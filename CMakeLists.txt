@@ -16,16 +16,18 @@ if(ARRA_USE_INTERNAL_ARROW)
     -DARROW_COMPUTE=ON
     -DARROW_EXTRA_ERROR_CONTEXT=ON
     "-DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>")
+  set(ARROW_SHARED_LIBRARY "${ARROW_PREFIX}/lib/${CMAKE_SHARED_LIBRARY_PREFIX}arrow${CMAKE_SHARED_LIBRARY_SUFFIX}")
   ExternalProject_Add(arrow_ep
     PREFIX ${ARROW_PREFIX}
     SOURCE_SUBDIR cpp
     URL "https://github.com/apache/arrow/archive/refs/tags/apache-arrow-10.0.0.tar.gz"
     URL_HASH "SHA256=2852b21f93ee84185a9d838809c9a9c41bf6deca741bed1744e0fdba6cc19e3f"
     BUILD_IN_SOURCE 1
-    CMAKE_ARGS ${ARROW_CMAKE_ARGS})
+    CMAKE_ARGS "${ARROW_CMAKE_ARGS}"
+    BUILD_BYPRODUCTS "${ARROW_SHARED_LIBRARY}")
   file(MAKE_DIRECTORY "${ARROW_PREFIX}/include")
   add_library(Arrow::arrow_shared SHARED IMPORTED)
-  set_target_properties(Arrow::arrow_shared PROPERTIES IMPORTED_LOCATION arrow INTERFACE_INCLUDE_DIRECTORIES "${ARROW_PREFIX}/include")
+  set_target_properties(Arrow::arrow_shared PROPERTIES IMPORTED_LOCATION "${ARROW_SHARED_LIBRARY}" INTERFACE_INCLUDE_DIRECTORIES "${ARROW_PREFIX}/include")
   add_dependencies(Arrow::arrow_shared arrow_ep)
 else(ARRA_USE_INTERNAL_ARROW)
   message(STATUS "Using system Arrow library")
@@ -43,6 +45,5 @@ target_link_libraries(arra PUBLIC Arrow::arrow_shared)
 
 if(ARRA_BUILD_TESTS)
   message(STATUS "Building the Arra googletest unit tests")
-  add_subdirectory(${CMAKE_SOURCE_DIR}/tests)
-  message(STATUS "ARRA_TEST_LIST set to: ${ARA_TEST_LIST}")
+  add_subdirectory("${CMAKE_SOURCE_DIR}/tests")
 endif(ARRA_BUILD_TESTS)
