@@ -1,0 +1,54 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "dev",
+      "hidden": true,
+      "cacheVariables": {
+        "ARRA_BUILD_TESTS": "ON",
+        "ARRA_USE_INTERNAL_ARROW": "ON"
+      }
+    },
+    {
+      "name": "build",
+      "hidden": true,
+      "cacheVariables": {
+        "ARRA_BUILD_TESTS": "OFF",
+        "ARRA_USE_INTERNAL_ARROW": "OFF"
+      }
+    },
+    {
+      "name": "dev-debug",
+      "inherits": "dev",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "dev-release",
+      "inherits": "dev",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "build-debug",
+      "inherits": "build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "build-release",
+      "inherits": "build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    }
+  ]
+}
