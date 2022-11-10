@@ -27,3 +27,7 @@ include_directories("${CMAKE_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}")
 set(FOO_TEST_SRC
   "${CMAKE_CURRENT_SOURCE_DIR}/foo_test.cpp")
 configure_test(foo_test "${FOO_TEST_SRC}")
+
+set(SKETCH_TEST_SRC
+        "${CMAKE_CURRENT_SOURCE_DIR}/sketch_test.cpp")
+configure_test(sketch_test "${SKETCH_TEST_SRC}")
