@@ -2,8 +2,6 @@
 
 namespace arra {
 
-arrow::compute::ExecContext Foo() {
-  return arrow::compute::ExecContext();
-}
+arrow::compute::ExecContext Foo() { return arrow::compute::ExecContext(); }
 
-}
+}  // namespace arra
