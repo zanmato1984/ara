@@ -1,1 +1,1 @@
-# ARRA: Arrow Relational Algebra
+# Arra
