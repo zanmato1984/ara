@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD 20)
 
 function(configure_test TEST_NAME TEST_SRC)
   add_executable(${TEST_NAME} ${TEST_SRC})
-  target_link_libraries(${TEST_NAME} GTest::GTest GTest::Main pthread arra)
+  target_link_libraries(${TEST_NAME} arra Arrow::arrow_shared GTest::GTest GTest::Main pthread)
   set_target_properties(${TEST_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/gtests")
   # With OSX and conda, we need to set the correct RPATH so that dependencies
   # are found. The installed libraries with conda have an RPATH that matches

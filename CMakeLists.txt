@@ -41,7 +41,7 @@ add_library(arra
   "${CMAKE_SOURCE_DIR}/src/foo.cpp")
 
 include_directories("${CMAKE_SOURCE_DIR}/include" "${RAPIDJSON_INCLUDE_DIRS}")
-target_link_libraries(arra PUBLIC Arrow::arrow_shared)
+target_link_libraries(arra PRIVATE Arrow::arrow_shared)
 
 if(ARRA_BUILD_TESTS)
   message(STATUS "Building the Arra googletest unit tests")
