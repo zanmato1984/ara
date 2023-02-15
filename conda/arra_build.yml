@@ -4,7 +4,7 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - arrow-cpp=10.0.0
+  - arrow-cpp=11.0.0
   - cmake
   - gmock=1.10.0
   - gtest=1.10.0

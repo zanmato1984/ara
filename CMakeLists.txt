@@ -20,8 +20,8 @@ if(ARRA_USE_INTERNAL_ARROW)
   ExternalProject_Add(arrow_ep
     PREFIX ${ARROW_PREFIX}
     SOURCE_SUBDIR cpp
-    URL "https://github.com/apache/arrow/archive/refs/tags/apache-arrow-10.0.0.tar.gz"
-    URL_HASH "SHA256=2852b21f93ee84185a9d838809c9a9c41bf6deca741bed1744e0fdba6cc19e3f"
+    URL "https://github.com/apache/arrow/archive/refs/tags/apache-arrow-11.0.0.tar.gz"
+    URL_HASH "SHA256=4a8c0c3d5b39ca81f4a636a41863f1cf5e0ed199f994bf5ead0854ca037eb741"
     BUILD_IN_SOURCE 1
     CMAKE_ARGS "${ARROW_CMAKE_ARGS}"
     BUILD_BYPRODUCTS "${ARROW_SHARED_LIBRARY}")
