@@ -31,3 +31,7 @@ configure_test(foo_test "${FOO_TEST_SRC}")
 set(SKETCH_TEST_SRC
         "${CMAKE_CURRENT_SOURCE_DIR}/sketch_test.cpp")
 configure_test(sketch_test "${SKETCH_TEST_SRC}")
+
+set(HASH_JOIN_TEST_SRC
+        "${CMAKE_CURRENT_SOURCE_DIR}/hash_join_test.cpp")
+configure_test(hash_join_test "${HASH_JOIN_TEST_SRC}")
