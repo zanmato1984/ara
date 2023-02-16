@@ -132,36 +132,67 @@ TEST(HashJoinTest, Basic) {
 //  scheduler_ = TaskScheduler::Make();
   DCHECK_OK(ctx_.Init(settings.num_threads, nullptr));
 
-  auto register_task_group_callback = [&](std::function<arrow::Status(size_t, int64_t)> task,
-                                          std::function<arrow::Status(size_t)> cont) {
-    return 0;
-  };
+  std::unordered_map<int, std::pair<std::function<arrow::Status(size_t, int64_t)>,
+                                    std::function<arrow::Status(size_t)>>>
+      task_groups;
+
+  auto register_task_group_callback =
+      [&](std::function<arrow::Status(size_t, int64_t)> task,
+          std::function<arrow::Status(size_t)> cont) {
+        static int group_id = 0;
+        task_groups.emplace(group_id, std::make_pair(std::move(task), std::move(cont)));
+        return group_id++;
+      };
 
   auto start_task_group_callback = [&](int task_group_id, int64_t num_tasks) {
+    std::vector<std::thread> threads;
+    for (size_t i = 0; i < settings.num_threads; ++i) {
+      threads.emplace_back([task_group_id, thread_id = i, num_threads = settings.num_threads, num_tasks, &task_groups]() {
+        for (size_t task_id = 0; task_id < num_tasks; task_id += num_threads) {
+          DCHECK_OK(task_groups[task_group_id].first(thread_id, static_cast<int64_t>(task_id)));
+        }
+      });
+    }
+    for (auto & t : threads) {
+      t.join();
+    }
+    threads.clear();
+    for (size_t i = 0; i < settings.num_threads; ++i) {
+      threads.emplace_back([task_group_id, thread_id = i, num_threads = settings.num_threads, num_tasks, &task_groups]() {
+        for (size_t task_id = 0; task_id < num_tasks; task_id += num_threads) {
+          DCHECK_OK(task_groups[task_group_id].first(thread_id, static_cast<int64_t>(task_id)));
+        }
+      });
+    }
+    for (auto & t : threads) {
+      t.join();
+    }
     return arrow::Status::OK();
   };
+
+  auto output_batch_callback =
+      [&](int64_t, arrow::compute::ExecBatch batch) {
+        std::cout << batch.ToString() << std::endl;
+        return arrow::Status::OK();
+      };
 
   DCHECK_OK(join_->Init(
       &ctx_, settings.join_type, settings.num_threads, &(schema_mgr_->proj_maps[0]),
       &(schema_mgr_->proj_maps[1]), std::move(key_cmp), std::move(filter),
-      {}, {}, {}, {}));
+      std::move(register_task_group_callback), std::move(start_task_group_callback),
+      std::move(output_batch_callback), {}));
 
-  std::vector<std::thread> build_threads(settings.num_threads);
-  std::vector<std::thread> probe_threads(settings.num_threads);
-
-  task_group_probe_ = scheduler_->RegisterTaskGroup(
-      [this](size_t thread_index, int64_t task_id) -> Status {
+  task_group_probe_ = register_task_group_callback(
+      [&](size_t thread_index, int64_t task_id) -> arrow::Status {
         return join_->ProbeSingleBatch(thread_index, std::move(l_batches_[task_id]));
       },
-      [this](size_t thread_index) -> Status {
+      [&](size_t thread_index) -> arrow::Status {
         return join_->ProbingFinished(thread_index);
       });
 
-  scheduler_->RegisterEnd();
-
-  DCHECK_OK(scheduler_->StartScheduling(
-      0 /*thread index*/, std::move(schedule_callback),
-      static_cast<int>(2 * settings.num_threads) /*concurrent tasks*/,
-      settings.num_threads == 1));
-
+  DCHECK_OK(
+      join_->BuildHashTable(0, std::move(r_batches_), [&](size_t thread_index) {
+        return start_task_group_callback(task_group_probe_,
+                                          l_batches_.batch_count());
+      }));
 }
