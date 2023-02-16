@@ -158,11 +158,9 @@ TEST(HashJoinTest, Basic) {
     }
     threads.clear();
     for (size_t i = 0; i < settings.num_threads; ++i) {
-      threads.emplace_back([task_group_id, thread_id = i, num_threads = settings.num_threads, num_tasks, &task_groups]() {
-        for (size_t task_id = 0; task_id < num_tasks; task_id += num_threads) {
-          DCHECK_OK(task_groups[task_group_id].first(thread_id, static_cast<int64_t>(task_id)));
-        }
-      });
+      threads.emplace_back(
+          [task_group_id, thread_id = i, num_threads = settings.num_threads, num_tasks,
+           &task_groups]() { return task_groups[task_group_id].second(thread_id); });
     }
     for (auto & t : threads) {
       t.join();

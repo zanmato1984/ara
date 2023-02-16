@@ -15,8 +15,10 @@ if(ARRA_USE_INTERNAL_ARROW)
     -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
     -DARROW_COMPUTE=ON
     -DARROW_EXTRA_ERROR_CONTEXT=ON
+    -DARROW_TESTING=ON
     "-DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>")
   set(ARROW_SHARED_LIBRARY "${ARROW_PREFIX}/lib/${CMAKE_SHARED_LIBRARY_PREFIX}arrow${CMAKE_SHARED_LIBRARY_SUFFIX}")
+  set(ARROW_TESTING_SHARED_LIBRARY "${ARROW_PREFIX}/lib/${CMAKE_SHARED_LIBRARY_PREFIX}arrow_testing${CMAKE_SHARED_LIBRARY_SUFFIX}")
   ExternalProject_Add(arrow_ep
     PREFIX ${ARROW_PREFIX}
     SOURCE_SUBDIR cpp
@@ -29,6 +31,9 @@ if(ARRA_USE_INTERNAL_ARROW)
   add_library(Arrow::arrow_shared SHARED IMPORTED)
   set_target_properties(Arrow::arrow_shared PROPERTIES IMPORTED_LOCATION "${ARROW_SHARED_LIBRARY}" INTERFACE_INCLUDE_DIRECTORIES "${ARROW_PREFIX}/include")
   add_dependencies(Arrow::arrow_shared arrow_ep)
+  add_library(Arrow::arrow_testing_shared SHARED IMPORTED)
+  set_target_properties(Arrow::arrow_testing_shared PROPERTIES IMPORTED_LOCATION "${ARROW_TESTING_SHARED_LIBRARY}" INTERFACE_INCLUDE_DIRECTORIES "${ARROW_PREFIX}/include")
+  add_dependencies(Arrow::arrow_testing_shared arrow_ep)
 else(ARRA_USE_INTERNAL_ARROW)
   message(STATUS "Using system Arrow library")
   include(cmake/find/arrow.cmake)
@@ -44,6 +49,9 @@ include_directories("${CMAKE_SOURCE_DIR}/include" "${RAPIDJSON_INCLUDE_DIRS}")
 target_link_libraries(arra PRIVATE Arrow::arrow_shared)
 
 if(ARRA_BUILD_TESTS)
+  if(NOT ARRA_USE_INTERNAL_ARROW)
+    message(FATAL_ERROR "Can't build Arra tests without internal Arrow library")
+  endif(NOT ARRA_USE_INTERNAL_ARROW)
   message(STATUS "Building the Arra googletest unit tests")
   add_subdirectory("${CMAKE_SOURCE_DIR}/tests")
 endif(ARRA_BUILD_TESTS)
