@@ -1,11 +1,11 @@
 #include <arrow/api.h>
 #include <arrow/compute/exec.h>
-#include <arrow/compute/exec/task_util.h>
-#include <arrow/compute/exec/options.h>
-#include <arrow/compute/exec/test_util.h>
-#include <arrow/compute/exec/hash_join_node.h>
-#include <arrow/compute/exec/hash_join.h>
 #include <arrow/compute/exec/accumulation_queue.h>
+#include <arrow/compute/exec/hash_join.h>
+#include <arrow/compute/exec/hash_join_node.h>
+#include <arrow/compute/exec/options.h>
+#include <arrow/compute/exec/task_util.h>
+#include <arrow/compute/exec/test_util.h>
 #include <arrow/util/logging.h>
 #include <arrow/util/vector.h>
 #include <gtest/gtest.h>
@@ -26,15 +26,17 @@ TEST(HashJoinTest, Basic) {
   struct BenchmarkSettings {
     int num_threads = 8;
     arrow::compute::JoinType join_type = arrow::compute::JoinType::INNER;
-    // Change to 'true' to benchmark alternative, non-default and less optimized version of
-    // a hash join node implementation.
+    // Change to 'true' to benchmark alternative, non-default and less optimized version
+    // of a hash join node implementation.
     bool use_basic_implementation = false;
     int batch_size = 1024;
     int num_build_batches = 32;
     int num_probe_batches = 32 * 16;
     std::vector<std::shared_ptr<arrow::DataType>> key_types = {arrow::int32()};
-    std::vector<std::shared_ptr<arrow::DataType>> build_payload_types = {arrow::int64(), arrow::decimal256(15, 2)};
-    std::vector<std::shared_ptr<arrow::DataType>> probe_payload_types = {arrow::int64(), arrow::utf8()};
+    std::vector<std::shared_ptr<arrow::DataType>> build_payload_types = {
+        arrow::int64(), arrow::decimal256(15, 2)};
+    std::vector<std::shared_ptr<arrow::DataType>> probe_payload_types = {arrow::int64(),
+                                                                         arrow::utf8()};
 
     double null_percentage = 0.0;
     double cardinality = 1.0;  // Proportion of distinct keys in build side
@@ -99,9 +101,11 @@ TEST(HashJoinTest, Basic) {
   auto r_schema = *r_schema_builder.Finish();
 
   arrow::compute::BatchesWithSchema l_batches_with_schema =
-      arrow::compute::MakeRandomBatches(l_schema, settings.num_probe_batches, settings.batch_size);
+      arrow::compute::MakeRandomBatches(l_schema, settings.num_probe_batches,
+                                        settings.batch_size);
   arrow::compute::BatchesWithSchema r_batches_with_schema =
-      arrow::compute::MakeRandomBatches(r_schema, settings.num_build_batches, settings.batch_size);
+      arrow::compute::MakeRandomBatches(r_schema, settings.num_build_batches,
+                                        settings.batch_size);
 
   for (arrow::compute::ExecBatch& batch : l_batches_with_schema.batches)
     l_batches_.InsertBatch(std::move(batch));
@@ -122,14 +126,6 @@ TEST(HashJoinTest, Basic) {
     join_ = *arrow::compute::HashJoinImpl::MakeSwiss();
   }
 
-//  omp_set_num_threads(settings.num_threads);
-//  auto schedule_callback = [](std::function<Status(size_t)> func) -> Status {
-//#pragma omp task
-//    { DCHECK_OK(func(omp_get_thread_num())); }
-//    return Status::OK();
-//  };
-//
-//  scheduler_ = TaskScheduler::Make();
   DCHECK_OK(ctx_.Init(settings.num_threads, nullptr));
 
   std::unordered_map<int, std::pair<std::function<arrow::Status(size_t, int64_t)>,
@@ -147,38 +143,32 @@ TEST(HashJoinTest, Basic) {
   auto start_task_group_callback = [&](int task_group_id, int64_t num_tasks) {
     std::vector<std::thread> threads;
     for (size_t i = 0; i < settings.num_threads; ++i) {
-      threads.emplace_back([task_group_id, thread_id = i, num_threads = settings.num_threads, num_tasks, &task_groups]() {
-        for (size_t task_id = 0; task_id < num_tasks; task_id += num_threads) {
-          DCHECK_OK(task_groups[task_group_id].first(thread_id, static_cast<int64_t>(task_id)));
+      threads.emplace_back([task_group_id, thread_id = i,
+                            num_threads = settings.num_threads, num_tasks,
+                            &task_groups]() {
+        for (size_t task_id = thread_id; task_id < num_tasks; task_id += num_threads) {
+          DCHECK_OK(
+              task_groups[task_group_id].first(thread_id, static_cast<int64_t>(task_id)));
         }
       });
     }
-    for (auto & t : threads) {
+    for (auto& t : threads) {
       t.join();
     }
     threads.clear();
-    for (size_t i = 0; i < settings.num_threads; ++i) {
-      threads.emplace_back(
-          [task_group_id, thread_id = i, num_threads = settings.num_threads, num_tasks,
-           &task_groups]() { return task_groups[task_group_id].second(thread_id); });
-    }
-    for (auto & t : threads) {
-      t.join();
-    }
-    return arrow::Status::OK();
+    return task_groups[task_group_id].second(0);
   };
 
-  auto output_batch_callback =
-      [&](int64_t, arrow::compute::ExecBatch batch) {
-        std::cout << batch.ToString() << std::endl;
-        return arrow::Status::OK();
-      };
+  auto output_batch_callback = [&](int64_t, arrow::compute::ExecBatch batch) {
+    std::cout << batch.ToString() << std::endl;
+    return arrow::Status::OK();
+  };
 
   DCHECK_OK(join_->Init(
       &ctx_, settings.join_type, settings.num_threads, &(schema_mgr_->proj_maps[0]),
       &(schema_mgr_->proj_maps[1]), std::move(key_cmp), std::move(filter),
       std::move(register_task_group_callback), std::move(start_task_group_callback),
-      std::move(output_batch_callback), {}));
+      std::move(output_batch_callback), [](int64_t x) {}));
 
   task_group_probe_ = register_task_group_callback(
       [&](size_t thread_index, int64_t task_id) -> arrow::Status {
@@ -188,9 +178,7 @@ TEST(HashJoinTest, Basic) {
         return join_->ProbingFinished(thread_index);
       });
 
-  DCHECK_OK(
-      join_->BuildHashTable(0, std::move(r_batches_), [&](size_t thread_index) {
-        return start_task_group_callback(task_group_probe_,
-                                          l_batches_.batch_count());
-      }));
+  DCHECK_OK(join_->BuildHashTable(0, std::move(r_batches_), [&](size_t thread_index) {
+    return start_task_group_callback(task_group_probe_, l_batches_.batch_count());
+  }));
 }
