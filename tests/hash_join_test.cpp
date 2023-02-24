@@ -24,14 +24,14 @@ TEST(HashJoinTest, Basic) {
   } stats_;
 
   struct BenchmarkSettings {
-    int num_threads = 8;
+    int num_threads = 16;
     arrow::compute::JoinType join_type = arrow::compute::JoinType::INNER;
     // Change to 'true' to benchmark alternative, non-default and less optimized version
     // of a hash join node implementation.
     bool use_basic_implementation = false;
-    int batch_size = 1024;
-    int num_build_batches = 32;
-    int num_probe_batches = 32 * 16;
+    int batch_size = 4096;
+    int num_build_batches = 128;
+    int num_probe_batches = 128 * 16;
     std::vector<std::shared_ptr<arrow::DataType>> key_types = {arrow::int32()};
     std::vector<std::shared_ptr<arrow::DataType>> build_payload_types = {
         arrow::int64(), arrow::decimal256(15, 2)};
@@ -179,6 +179,8 @@ TEST(HashJoinTest, Basic) {
       });
 
   DCHECK_OK(join_->BuildHashTable(0, std::move(r_batches_), [&](size_t thread_index) {
-    return start_task_group_callback(task_group_probe_, l_batches_.batch_count());
+    return arrow::Status::OK();
   }));
+
+  DCHECK_OK(start_task_group_callback(task_group_probe_, l_batches_.batch_count()));
 }
