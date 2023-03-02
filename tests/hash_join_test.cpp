@@ -112,6 +112,7 @@ TEST(HashJoinTest, Basic) {
   arrow::compute::ThreadIndexer thread_id;
   auto scheduler = arrow::compute::TaskScheduler::Make();
   auto thread_pool = *arrow::internal::ThreadPool::Make(num_threads);
+  // auto* thread_pool = arrow::internal::GetCpuThreadPool();
   // *arrow::internal::ThreadPool::Make(arrow::internal::ThreadPool::DefaultCapacity());
   // arrow::compute::ExecContext exec_ctx(memory_pool, tp.get());
 
@@ -150,13 +151,18 @@ TEST(HashJoinTest, Basic) {
   scheduler->RegisterEnd();
 
   DCHECK_OK(scheduler->StartScheduling(0, schedule_callback, dop, false));
-  // ARROW_ASSIGN_OR_RAISE(auto tp = arrow::util::Threa)
 
   DCHECK_OK(join_->BuildHashTable(0, std::move(r_batches_), [&](size_t thread_index) {
-    return arrow::Status::OK();
+    return scheduler->StartTaskGroup(thread_index, task_group_probe_,
+                                     l_batches_.batch_count());
   }));
 
-  DCHECK_OK(start_task_group_callback(task_group_probe_, l_batches_.batch_count()));
+  // DCHECK_OK(join_->BuildHashTable(0, std::move(r_batches_), [&](size_t thread_index) {
+  //   return arrow::Status::OK();
+  // }));
 
-  DCHECK_OK(thread_pool->Shutdown(true));
+  // DCHECK_OK(start_task_group_callback(task_group_probe_, l_batches_.batch_count()));
+
+  while (true)
+    ;
 }
