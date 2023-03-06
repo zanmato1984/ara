@@ -12,11 +12,13 @@
 #include <gtest/gtest.h>
 
 TEST(HashJoinTest, Basic) {
-  arrow::util::AccumulationQueue l_batches_;
-  arrow::util::AccumulationQueue r_batches_;
-  std::unique_ptr<arrow::compute::HashJoinSchema> schema_mgr_;
-  std::unique_ptr<arrow::compute::HashJoinImpl> join_;
-  int task_group_probe_;
+  arrow::util::AccumulationQueue l_batches;
+  arrow::util::AccumulationQueue r_batches;
+  std::unique_ptr<arrow::compute::HashJoinSchema> schema_mgr =
+      std::make_unique<arrow::compute::HashJoinSchema>();
+  std::unique_ptr<arrow::compute::HashJoinImpl> join =
+      *arrow::compute::HashJoinImpl::MakeSwiss();
+  int task_group_probe;
 
   size_t dop = 32;
   size_t num_threads = 16;
@@ -93,17 +95,14 @@ TEST(HashJoinTest, Basic) {
       arrow::compute::MakeRandomBatches(r_schema, num_build_batches, batch_size);
 
   for (arrow::compute::ExecBatch& batch : l_batches_with_schema.batches)
-    l_batches_.InsertBatch(std::move(batch));
+    l_batches.InsertBatch(std::move(batch));
   for (arrow::compute::ExecBatch& batch : r_batches_with_schema.batches)
-    r_batches_.InsertBatch(std::move(batch));
+    r_batches.InsertBatch(std::move(batch));
 
-  schema_mgr_ = std::make_unique<arrow::compute::HashJoinSchema>();
   arrow::compute::Expression filter = arrow::compute::literal(true);
-  DCHECK_OK(schema_mgr_->Init(join_type, *l_batches_with_schema.schema, left_keys,
-                              *r_batches_with_schema.schema, right_keys, filter, "l_",
-                              "r_"));
-
-  join_ = *arrow::compute::HashJoinImpl::MakeSwiss();
+  DCHECK_OK(schema_mgr->Init(join_type, *l_batches_with_schema.schema, left_keys,
+                             *r_batches_with_schema.schema, right_keys, filter, "l_",
+                             "r_"));
 
   auto* memory_pool = arrow::default_memory_pool();
   arrow::compute::QueryContext ctx_(
@@ -134,35 +133,29 @@ TEST(HashJoinTest, Basic) {
     return arrow::Status::OK();
   };
 
-  DCHECK_OK(join_->Init(&ctx_, join_type, dop, &(schema_mgr_->proj_maps[0]),
-                        &(schema_mgr_->proj_maps[1]), std::move(key_cmp),
-                        std::move(filter), std::move(register_task_group_callback),
-                        std::move(start_task_group_callback),
-                        std::move(output_batch_callback), [](int64_t x) {}));
+  DCHECK_OK(join->Init(&ctx_, join_type, dop, &(schema_mgr->proj_maps[0]),
+                       &(schema_mgr->proj_maps[1]), std::move(key_cmp), std::move(filter),
+                       std::move(register_task_group_callback),
+                       std::move(start_task_group_callback),
+                       std::move(output_batch_callback), [](int64_t x) {}));
 
-  task_group_probe_ = register_task_group_callback(
+  task_group_probe = register_task_group_callback(
       [&](size_t thread_index, int64_t task_id) -> arrow::Status {
-        return join_->ProbeSingleBatch(thread_index, std::move(l_batches_[task_id]));
+        return join->ProbeSingleBatch(thread_index, std::move(l_batches[task_id]));
       },
       [&](size_t thread_index) -> arrow::Status {
-        return join_->ProbingFinished(thread_index);
+        return join->ProbingFinished(thread_index);
       });
 
   scheduler->RegisterEnd();
 
   DCHECK_OK(scheduler->StartScheduling(0, schedule_callback, dop, false));
 
-  DCHECK_OK(join_->BuildHashTable(0, std::move(r_batches_), [&](size_t thread_index) {
-    return scheduler->StartTaskGroup(thread_index, task_group_probe_,
-                                     l_batches_.batch_count());
+  DCHECK_OK(join->BuildHashTable(0, std::move(r_batches), [&](size_t thread_index) {
+    return arrow::Status::OK();
   }));
+  thread_pool->WaitForIdle();
 
-  // DCHECK_OK(join_->BuildHashTable(0, std::move(r_batches_), [&](size_t thread_index) {
-  //   return arrow::Status::OK();
-  // }));
-
-  // DCHECK_OK(start_task_group_callback(task_group_probe_, l_batches_.batch_count()));
-
-  while (true)
-    ;
+  DCHECK_OK(start_task_group_callback(task_group_probe, l_batches.batch_count()));
+  thread_pool->WaitForIdle();
 }
