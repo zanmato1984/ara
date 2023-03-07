@@ -39,3 +39,7 @@ configure_test(hash_join_test "${HASH_JOIN_TEST_SRC}")
 set(TASK_TEST_SRC
         "${CMAKE_CURRENT_SOURCE_DIR}/task_test.cpp")
 configure_test(task_test "${TASK_TEST_SRC}")
+
+set(FUTURE_TEST_SRC
+        "${CMAKE_CURRENT_SOURCE_DIR}/future_test.cpp")
+configure_test(future_test "${FUTURE_TEST_SRC}")
