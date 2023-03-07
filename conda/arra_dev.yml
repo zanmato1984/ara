@@ -11,12 +11,13 @@ dependencies:
   - c-ares
   - cmake
   - flatbuffers
+  - folly
   - gflags
   - glog
-  - gmock=1.10.0
+  - gmock
   - google-cloud-cpp>=1.34.0
   - grpc-cpp
-  - gtest=1.10.0
+  - gtest
   - libprotobuf
   - libutf8proc
   - lz4-c

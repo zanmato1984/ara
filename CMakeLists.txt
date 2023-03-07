@@ -39,19 +39,21 @@ else(ARRA_USE_INTERNAL_ARROW)
   include(cmake/find/arrow.cmake)
 endif(ARRA_USE_INTERNAL_ARROW)
 
+include(cmake/find/folly.cmake)
 include(cmake/find/rapidjson.cmake)
-include(cmake/find/gtest.cmake)
 
 add_library(arra
   "${CMAKE_SOURCE_DIR}/src/foo.cpp")
 
-include_directories("${CMAKE_SOURCE_DIR}/include" "${RAPIDJSON_INCLUDE_DIRS}")
-target_link_libraries(arra PRIVATE Arrow::arrow_shared)
+target_include_directories(arra PUBLIC "${CMAKE_SOURCE_DIR}/include" "${RAPIDJSON_INCLUDE_DIRS}")
+target_link_libraries(arra PUBLIC Arrow::arrow_shared Folly::folly)
 
 if(ARRA_BUILD_TESTS)
   if(NOT ARRA_USE_INTERNAL_ARROW)
     message(FATAL_ERROR "Can't build Arra tests without internal Arrow library")
   endif(NOT ARRA_USE_INTERNAL_ARROW)
   message(STATUS "Building the Arra googletest unit tests")
+  include(cmake/find/gtest.cmake)
+  include(cmake/find/gflags.cmake)
   add_subdirectory("${CMAKE_SOURCE_DIR}/tests")
 endif(ARRA_BUILD_TESTS)

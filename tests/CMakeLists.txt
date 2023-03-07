@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD 20)
 
 function(configure_test TEST_NAME TEST_SRC)
   add_executable(${TEST_NAME} ${TEST_SRC})
-  target_link_libraries(${TEST_NAME} arra Arrow::arrow_shared Arrow::arrow_testing_shared GTest::GTest GTest::Main pthread)
+  target_link_libraries(${TEST_NAME} arra Arrow::arrow_testing_shared GTest::GTest GTest::Main pthread)
   set_target_properties(${TEST_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/gtests")
   # With OSX and conda, we need to set the correct RPATH so that dependencies
   # are found. The installed libraries with conda have an RPATH that matches
@@ -35,3 +35,7 @@ configure_test(sketch_test "${SKETCH_TEST_SRC}")
 set(HASH_JOIN_TEST_SRC
         "${CMAKE_CURRENT_SOURCE_DIR}/hash_join_test.cpp")
 configure_test(hash_join_test "${HASH_JOIN_TEST_SRC}")
+
+set(TASK_TEST_SRC
+        "${CMAKE_CURRENT_SOURCE_DIR}/task_test.cpp")
+configure_test(task_test "${TASK_TEST_SRC}")

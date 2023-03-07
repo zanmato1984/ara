@@ -1,13 +1,11 @@
 name: arra-build
 channels:
-  - arrow-nightlies
   - conda-forge
   - defaults
 dependencies:
   - arrow-cpp=11.0.0
   - cmake
-  - gmock=1.10.0
-  - gtest=1.10.0
+  - folly
   - make
   - ninja
   - pkg-config
