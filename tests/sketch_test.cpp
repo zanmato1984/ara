@@ -2,26 +2,33 @@
 #include <gtest/gtest.h>
 #include <queue>
 
-class Status {
+class TaskStatus {
  public:
-  static Status runnable, blocking, finished, error, canceled;
+  static const TaskStatus runnable;
+  static const TaskStatus waiting;
+  static const TaskStatus finished;
+  static const TaskStatus error;
+  static const TaskStatus canceled;
+
+  bool operator==(const TaskStatus& other) const { return internal_ == other.internal_; }
 
  private:
   enum class Internal : int8_t {
     RUNNABLE,
-    BLOCKING,
+    WAITING,
     FINISHED,
     ERROR,
     CANCELED,
-  };
+  } internal_;
 
-  template <Status::Internal internal>
-  Status() : internal_(internal) {}
-
-  Internal internal_;
+  explicit TaskStatus(Internal internal) : internal_(internal) {}
 };
 
-Status Status::runnable template <Status::Internal>(Status::RUNNABLE);
+class Task {
+  public:
+  virtual ~Task() = default;
+  virtual TaskStatus status() = 0;
+};
 
 class Operator;
 
@@ -42,7 +49,7 @@ struct PipelineState {
 
 class Operator {
  public:
-  virtual arrow::Result<Status> Stream() { return downstream->Stream(); }
+  virtual arrow::Result<TaskStatus> Stream() { return downstream->Stream(); }
 
  protected:
  protected:

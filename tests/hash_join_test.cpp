@@ -9,6 +9,7 @@
 #include <arrow/compute/exec/util.h>
 #include <arrow/util/logging.h>
 #include <arrow/util/vector.h>
+#include <folly/futures/Future.h>
 #include <gtest/gtest.h>
 
 TEST(HashJoinTest, Basic) {
@@ -151,9 +152,8 @@ TEST(HashJoinTest, Basic) {
 
   DCHECK_OK(scheduler->StartScheduling(0, schedule_callback, dop, false));
 
-  DCHECK_OK(join->BuildHashTable(0, std::move(r_batches), [&](size_t thread_index) {
-    return arrow::Status::OK();
-  }));
+  DCHECK_OK(join->BuildHashTable(
+      0, std::move(r_batches), [&](size_t thread_index) { return arrow::Status::OK(); }));
   thread_pool->WaitForIdle();
 
   DCHECK_OK(start_task_group_callback(task_group_probe, l_batches.batch_count()));
