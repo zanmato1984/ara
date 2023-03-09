@@ -55,7 +55,7 @@ TEST(FutureTest, CollectionAsContinuation) {
   EXPECT_EQ(result, 45);
 }
 
-TEST(FutureTest, Spawn) {
+TEST(FutureTest, ChainSpawn) {
   CPUThreadPoolExecutor e1(4);
   CPUThreadPoolExecutor e2(4);
   std::array<CPUThreadPoolExecutor*, 2> e = {&e1, &e2};
@@ -85,4 +85,26 @@ TEST(FutureTest, FutureLoop) {
   while (makeFutureWith([&]() { return ++i; }).wait().value() < count) {
   }
   EXPECT_EQ(i, count);
+}
+
+TEST(FutureTest, ParallelSpawn) {
+  CPUThreadPoolExecutor e(8);
+
+  std::unordered_set<std::thread::id> tid_set;
+
+  size_t count = 10;
+
+  std::vector<Future<Unit>> futures;
+
+  for (size_t i = 0; i < count; ++i) {
+    futures.push_back(makeFuture().via(&e).thenValue([&](Unit) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      tid_set.insert(std::this_thread::get_id());
+      return Unit{};
+    }));
+  }
+
+  collectAll(futures).wait();
+
+  std::cout << "thread count: " << tid_set.size() << std::endl;
 }
