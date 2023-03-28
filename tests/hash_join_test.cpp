@@ -7,11 +7,16 @@
 #include <arrow/compute/exec/task_util.h>
 #include <arrow/compute/exec/test_util.h>
 #include <arrow/compute/exec/util.h>
+#include <arrow/util/async_generator.h>
 #include <arrow/util/logging.h>
 #include <arrow/util/vector.h>
 #include <folly/executors/CPUThreadPoolExecutor.h>
 #include <folly/futures/Future.h>
 #include <gtest/gtest.h>
+
+template <typename Prober>
+using ProberFactory = std::function<Prober(arrow::compute::HashJoinImpl*,
+                                           arrow::util::AccumulationQueue&&)>;
 
 struct HashJoinCase {
   using Task = std::function<arrow::Status(size_t, int64_t)>;
@@ -124,12 +129,9 @@ struct HashJoinCase {
                                 [&](size_t thread_index) { return arrow::Status::OK(); });
   }
 
-  arrow::Status ProbeSingleBatch(size_t thread_index, int64_t task_id) {
-    return join->ProbeSingleBatch(thread_index, l_batches[task_id]);
-  }
-
-  arrow::Status ProbeFinished(size_t thread_index) {
-    return join->ProbingFinished(thread_index);
+  template <typename Prober>
+  Prober GetProber(ProberFactory<Prober> prober_factory) {
+    return prober_factory(join.get(), std::move(l_batches));
   }
 
  private:
@@ -140,6 +142,30 @@ struct HashJoinCase {
   std::unique_ptr<arrow::compute::HashJoinImpl> join =
       *arrow::compute::HashJoinImpl::MakeSwiss();
   std::unique_ptr<arrow::compute::QueryContext> ctx;
+};
+
+struct TaskGroupProber {
+ private:
+  arrow::compute::HashJoinImpl* join;
+  arrow::util::AccumulationQueue probe_batches;
+
+  TaskGroupProber(arrow::compute::HashJoinImpl* join,
+                  arrow::util::AccumulationQueue&& probe_batches)
+      : join(join), probe_batches(std::move(probe_batches)) {}
+
+ public:
+  static TaskGroupProber Make(arrow::compute::HashJoinImpl* join,
+                              arrow::util::AccumulationQueue&& probe_batches) {
+    return TaskGroupProber(join, std::move(probe_batches));
+  }
+
+  arrow::Status ProbeSingleBatch(size_t thread_index, int64_t task_id) {
+    return join->ProbeSingleBatch(thread_index, probe_batches[task_id]);
+  }
+
+  arrow::Status ProbeFinished(size_t thread_index) {
+    return join->ProbingFinished(thread_index);
+  }
 };
 
 TEST(HashJoinTest, ArrowAync) {
@@ -176,13 +202,15 @@ TEST(HashJoinTest, ArrowAync) {
                            dop, std::move(register_task_group_callback),
                            std::move(start_task_group_callback),
                            std::move(output_batch_callback)));
+  auto prober =
+      join_case.GetProber(ProberFactory<TaskGroupProber>(TaskGroupProber::Make));
 
   auto task_group_probe = register_task_group_callback(
       [&](size_t thread_index, int64_t task_id) -> arrow::Status {
-        return join_case.ProbeSingleBatch(thread_index, task_id);
+        return prober.ProbeSingleBatch(thread_index, task_id);
       },
       [&](size_t thread_index) -> arrow::Status {
-        return join_case.ProbeFinished(thread_index);
+        return prober.ProbeFinished(thread_index);
       });
 
   scheduler->RegisterEnd();
@@ -265,13 +293,15 @@ TEST(HashJoinTest, FollyFuture) {
                            dop, std::move(register_task_group_callback),
                            std::move(start_task_group_callback),
                            std::move(output_batch_callback)));
+  auto prober =
+      join_case.GetProber(ProberFactory<TaskGroupProber>(TaskGroupProber::Make));
 
   auto task_group_probe = register_task_group_callback(
       [&](size_t thread_index, int64_t task_id) -> arrow::Status {
-        return join_case.ProbeSingleBatch(thread_index, task_id);
+        return prober.ProbeSingleBatch(thread_index, task_id);
       },
       [&](size_t thread_index) -> arrow::Status {
-        return join_case.ProbeFinished(thread_index);
+        return prober.ProbeFinished(thread_index);
       });
 
   DCHECK_OK(join_case.Build());
@@ -351,18 +381,136 @@ TEST(HashJoinTest, ArrowFuture) {
                            dop, std::move(register_task_group_callback),
                            std::move(start_task_group_callback),
                            std::move(output_batch_callback)));
+  auto prober =
+      join_case.GetProber(ProberFactory<TaskGroupProber>(TaskGroupProber::Make));
 
   auto task_group_probe = register_task_group_callback(
       [&](size_t thread_index, int64_t task_id) -> arrow::Status {
-        return join_case.ProbeSingleBatch(thread_index, task_id);
+        return prober.ProbeSingleBatch(thread_index, task_id);
       },
       [&](size_t thread_index) -> arrow::Status {
-        return join_case.ProbeFinished(thread_index);
+        return prober.ProbeFinished(thread_index);
       });
 
   DCHECK_OK(join_case.Build());
 
   DCHECK_OK(start_task_group_callback(task_group_probe, num_probe_batches));
+
+  std::cout << "thread id num: " << thread_ids.size() << std::endl;
+}
+
+using ExecBatch = std::optional<arrow::compute::ExecBatch>;
+using AsyncGenerator = arrow::AsyncGenerator<ExecBatch>;
+
+struct ProbeGeneratorProber {
+ private:
+  arrow::compute::HashJoinImpl* join;
+  AsyncGenerator gen;
+
+ public:
+  ProbeGeneratorProber(arrow::compute::HashJoinImpl* join, AsyncGenerator gen)
+      : join(join), gen(std::move(gen)) {}
+
+  arrow::Future<ExecBatch> operator()() const {
+    return gen().Then(
+        [this](ExecBatch batch) {
+          if (batch.has_value()) {
+            return arrow::Future<ExecBatch>::MakeFinished(
+                join->ProbeSingleBatch(0, std::move(batch.value())));
+          } else {
+            return arrow::Future<ExecBatch>::MakeFinished(ExecBatch());
+          }
+        },
+        {}, arrow::CallbackOptions::Defaults());
+  }
+};
+
+ProbeGeneratorProber MakeVectorGeneratorProber(
+    arrow::compute::HashJoinImpl* join, arrow::util::AccumulationQueue&& probe_batches) {
+  std::vector<std::optional<arrow::compute::ExecBatch>> batches;
+  for (size_t i = 0; i < probe_batches.batch_count(); i++) {
+    batches.emplace_back(std::move(probe_batches[i]));
+  }
+  auto gen = arrow::MakeVectorGenerator(std::move(batches));
+  return ProbeGeneratorProber(join, std::move(gen));
+}
+
+TEST(HashJoinTest, ArrowFutureAndVectorGenerator) {
+  int batch_size = 4096;
+  int num_build_batches = 128;
+  int num_probe_batches = 128 * 8;
+  arrow::compute::JoinType join_type = arrow::compute::JoinType::RIGHT_OUTER;
+  size_t dop = 16;
+
+  size_t num_threads = 7;
+  using TaskGroup = std::pair<HashJoinCase::Task, HashJoinCase::TaskCont>;
+  std::unordered_map<int, TaskGroup> task_groups;
+  std::unordered_set<std::thread::id> thread_ids;
+
+  auto thread_pool = *arrow::internal::ThreadPool::Make(num_threads);
+
+  auto register_task_group_callback = [&](HashJoinCase::Task task,
+                                          HashJoinCase::TaskCont cont) {
+    int task_group_id = task_groups.size();
+    auto task_wrapped = [task = std::move(task), &thread_ids](size_t thread_id,
+                                                              int64_t task_id) {
+      thread_ids.insert(std::this_thread::get_id());
+      return task(thread_id, task_id);
+    };
+    task_groups.emplace(task_group_id,
+                        std::make_pair(std::move(task_wrapped), std::move(cont)));
+    return task_group_id;
+  };
+  auto start_task_group_callback = [&](int task_group_id, int64_t num_tasks) {
+    std::vector<arrow::Future<>> src_futures;
+    for (size_t thread_id = 0; thread_id < dop; thread_id++) {
+      src_futures.emplace_back(arrow::Future<>::Make());
+    }
+    std::vector<arrow::Future<>> task_futures;
+    auto task = task_groups[task_group_id].first;
+    arrow::CallbackOptions options{arrow::ShouldSchedule::Always, thread_pool.get()};
+    for (int64_t task_id = 0; task_id < num_tasks;) {
+      for (size_t thread_id = 0; thread_id < dop && task_id < num_tasks;
+           thread_id++, task_id++) {
+        if (task_id == thread_id) {
+          task_futures.emplace_back(src_futures[thread_id].Then(
+              [task, thread_id, task_id] { DCHECK_OK(task(thread_id, task_id)); }, {},
+              options));
+        } else {
+          task_futures[thread_id] =
+              std::move(task_futures[thread_id])
+                  .Then(
+                      [task, thread_id, task_id] { DCHECK_OK(task(thread_id, task_id)); },
+                      {}, options);
+        }
+      }
+    }
+    auto fut = arrow::AllComplete(task_futures).Then([task_group_id, &task_groups]() {
+      auto cont = task_groups[task_group_id].second;
+      DCHECK_OK(cont(0));
+    });
+    for (auto& f : src_futures) {
+      f.MarkFinished();
+    }
+    fut.Wait();
+    return arrow::Status::OK();
+  };
+  auto output_batch_callback = [&](int64_t, arrow::compute::ExecBatch batch) {
+    std::cout << batch.ToString() << std::endl;
+    return arrow::Status::OK();
+  };
+
+  HashJoinCase join_case;
+  DCHECK_OK(join_case.Init(batch_size, num_build_batches, num_probe_batches, join_type,
+                           dop, std::move(register_task_group_callback),
+                           std::move(start_task_group_callback),
+                           std::move(output_batch_callback)));
+  auto prober =
+      join_case.GetProber(ProberFactory<ProbeGeneratorProber>(MakeVectorGeneratorProber));
+
+  DCHECK_OK(join_case.Build());
+
+  DCHECK_OK(prober.Probe(dop));
 
   std::cout << "thread id num: " << thread_ids.size() << std::endl;
 }
