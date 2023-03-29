@@ -24,7 +24,7 @@ struct HashJoinCase {
   using RegisterTaskGroupCallBack = std::function<int(Task, TaskCont)>;
   using StartTaskGroupCallBack = std::function<arrow::Status(int, int64_t)>;
   using OutputBatchCallback =
-      std::function<arrow::Status(int64_t, arrow::compute::ExecBatch batch)>;
+      std::function<void(int64_t, arrow::compute::ExecBatch batch)>;
 
   arrow::Status Init(int batch_size, int num_build_batches, int num_probe_batches,
                      arrow::compute::JoinType join_type, size_t dop,
@@ -194,7 +194,6 @@ TEST(HashJoinTest, ArrowAync) {
   };
   auto output_batch_callback = [&](int64_t, arrow::compute::ExecBatch batch) {
     std::cout << batch.ToString() << std::endl;
-    return arrow::Status::OK();
   };
 
   HashJoinCase join_case;
@@ -285,7 +284,6 @@ TEST(HashJoinTest, FollyFuture) {
   };
   auto output_batch_callback = [&](int64_t, arrow::compute::ExecBatch batch) {
     std::cout << batch.ToString() << std::endl;
-    return arrow::Status::OK();
   };
 
   HashJoinCase join_case;
@@ -376,7 +374,6 @@ TEST(HashJoinTest, ArrowFuture) {
   };
   auto output_batch_callback = [&](int64_t, arrow::compute::ExecBatch batch) {
     std::cout << batch.ToString() << std::endl;
-    return arrow::Status::OK();
   };
 
   HashJoinCase join_case;
@@ -417,9 +414,7 @@ struct AsyncGeneratorProber {
 
   arrow::Status Probe(size_t dop, arrow::internal::Executor* exec) const {
     arrow::CallbackOptions options{arrow::ShouldSchedule::IfDifferentExecutor, exec};
-    struct StatusWrapper {
-      arrow::Status status;
-    };
+    struct StatusWrapper : public arrow::Status {};
     std::vector<arrow::Future<StatusWrapper>> futures;
     for (size_t thread_id = 0; thread_id < dop; thread_id++) {
       auto loop = arrow::Loop([this, thread_id, options] {
@@ -447,7 +442,7 @@ struct AsyncGeneratorProber {
                           [](const std::vector<arrow::Result<StatusWrapper>>& results) {
                             for (const auto& result : results) {
                               RETURN_NOT_OK(result);
-                              RETURN_NOT_OK(result.ValueUnsafe().status);
+                              RETURN_NOT_OK(result.ValueUnsafe());
                             }
                             return arrow::Status::OK();
                           },
@@ -532,7 +527,6 @@ TEST(HashJoinTest, ArrowFutureAndVectorGenerator) {
   };
   auto output_batch_callback = [&](int64_t, arrow::compute::ExecBatch batch) {
     std::cout << batch.ToString() << std::endl;
-    return arrow::Status::OK();
   };
 
   HashJoinCase join_case;
@@ -549,3 +543,6 @@ TEST(HashJoinTest, ArrowFutureAndVectorGenerator) {
 
   std::cout << "thread id num: " << thread_ids.size() << std::endl;
 }
+
+// TODO: Case about pipeline task pausing.
+// TODO: Case about error-handling.
