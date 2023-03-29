@@ -402,68 +402,66 @@ TEST(HashJoinTest, ArrowFuture) {
 using OptionalExecBatch = std::optional<arrow::compute::ExecBatch>;
 using AsyncGenerator = arrow::AsyncGenerator<OptionalExecBatch>;
 
-struct AsyncGeneratorProber {
+struct FromAsyncGeneratorProber {
  private:
   arrow::compute::HashJoinImpl* join;
   AsyncGenerator gen;
   mutable std::mutex mutex;
 
  public:
-  AsyncGeneratorProber(arrow::compute::HashJoinImpl* join, AsyncGenerator gen)
+  FromAsyncGeneratorProber(arrow::compute::HashJoinImpl* join, AsyncGenerator gen)
       : join(join), gen(std::move(gen)) {}
 
   arrow::Status Probe(size_t dop, arrow::internal::Executor* exec) const {
     arrow::CallbackOptions options{arrow::ShouldSchedule::IfDifferentExecutor, exec};
-    struct StatusWrapper : public arrow::Status {};
-    std::vector<arrow::Future<StatusWrapper>> futures;
+    std::vector<arrow::Future<>> futures;
     for (size_t thread_id = 0; thread_id < dop; thread_id++) {
       auto loop = arrow::Loop([this, thread_id, options] {
         std::unique_lock<std::mutex> lock(mutex);
         auto future = gen();
         lock.unlock();
-        return future.Then(
-            [this, thread_id, options](const OptionalExecBatch& batch)
-                -> arrow::Future<arrow::ControlFlow<StatusWrapper>> {
-              if (arrow::IsIterationEnd(batch)) {
-                return arrow::Break(StatusWrapper{arrow::Status::OK()});
-              }
-              if (auto status = join->ProbeSingleBatch(thread_id, *batch); !status.ok()) {
-                return arrow::Break(StatusWrapper{std::move(status)});
-              }
-              return arrow::Future<arrow::ControlFlow<StatusWrapper>>::MakeFinished(
-                  arrow::Continue());
-            },
-            {}, options);
+        return future
+            .Then(
+                [this, thread_id, options](const OptionalExecBatch& batch)
+                    -> arrow::Future<std::optional<arrow::Status>> {
+                  return batch.has_value() ? join->ProbeSingleBatch(thread_id, *batch)
+                                           : std::optional<arrow::Status>{};
+                },
+                {}, options)
+            .Then(
+                [](const std::optional<arrow::Status>& status)
+                    -> arrow::Result<arrow::ControlFlow<>> {
+                  if (arrow::IsIterationEnd(status)) {
+                    return arrow::Break();
+                  }
+                  if (status.has_value() && !status.value().ok()) {
+                    return status.value();
+                  }
+                  return arrow::Continue();
+                },
+                {}, options);
       });
       futures.emplace_back(std::move(loop));
     }
-    auto future = arrow::All(futures)
-                      .Then(
-                          [](const std::vector<arrow::Result<StatusWrapper>>& results) {
-                            for (const auto& result : results) {
-                              RETURN_NOT_OK(result);
-                              RETURN_NOT_OK(result.ValueUnsafe());
-                            }
-                            return arrow::Status::OK();
-                          },
-                          {}, arrow::CallbackOptions::Defaults())
-                      .Then([this] { return join->ProbingFinished(0); }, {}, options);
+    auto future = arrow::AllComplete(futures).Then(
+        [this] { return join->ProbingFinished(0); }, {}, options);
     return future.status();
   }
 };
 
-AsyncGeneratorProber MakeVectorGeneratorProber(
+FromAsyncGeneratorProber MakeFromVectorGeneratorProber(
     arrow::compute::HashJoinImpl* join, arrow::util::AccumulationQueue&& probe_batches) {
   std::vector<std::optional<arrow::compute::ExecBatch>> batches;
   for (size_t i = 0; i < probe_batches.batch_count(); i++) {
     batches.emplace_back(std::move(probe_batches[i]));
   }
   auto gen = arrow::MakeVectorGenerator(std::move(batches));
-  return AsyncGeneratorProber(join, std::move(gen));
+  return FromAsyncGeneratorProber(join, std::move(gen));
 }
 
-template <typename AsyncGeneratorProberFactory>
-void HashJoinTestArrowFutureAndAsyncGenerator(AsyncGeneratorProberFactory factory) {
+template <typename FromAsyncGeneratorProberFactory>
+void HashJoinTestArrowFutureAndFromAsyncGeneratorProber(
+    FromAsyncGeneratorProberFactory factory) {
   int batch_size = 4096;
   int num_build_batches = 128;
   int num_probe_batches = 128 * 8;
@@ -536,7 +534,7 @@ void HashJoinTestArrowFutureAndAsyncGenerator(AsyncGeneratorProberFactory factor
                            std::move(start_task_group_callback),
                            std::move(output_batch_callback)));
   auto prober =
-      join_case.GetProber(ProberFactory<AsyncGeneratorProber>(std::move(factory)));
+      join_case.GetProber(ProberFactory<FromAsyncGeneratorProber>(std::move(factory)));
 
   DCHECK_OK(join_case.Build());
 
@@ -546,8 +544,70 @@ void HashJoinTestArrowFutureAndAsyncGenerator(AsyncGeneratorProberFactory factor
 }
 
 TEST(HashJoinTest, ArrowFutureAndVectorGenerator) {
-  HashJoinTestArrowFutureAndAsyncGenerator(MakeVectorGeneratorProber);
+  HashJoinTestArrowFutureAndFromAsyncGeneratorProber(MakeFromVectorGeneratorProber);
 }
+
+// struct AsAsyncGeneratorProber {
+//  private:
+//   arrow::compute::HashJoinImpl* join;
+//   AsyncGenerator gen;
+
+//  public:
+//   AsAsyncGeneratorProber(arrow::compute::HashJoinImpl* join, AsyncGenerator gen)
+//       : join(join), gen(std::move(gen)) {}
+
+//   arrow::Status Probe(size_t dop, arrow::internal::Executor* exec) const {
+//     arrow::CallbackOptions options{arrow::ShouldSchedule::IfDifferentExecutor, exec};
+//     struct StatusWrapper : public arrow::Status {};
+//     std::vector<arrow::Future<StatusWrapper>> futures;
+//     for (size_t thread_id = 0; thread_id < dop; thread_id++) {
+//       auto loop = arrow::Loop([this, thread_id, options] {
+//         std::unique_lock<std::mutex> lock(mutex);
+//         auto future = gen();
+//         lock.unlock();
+//         return future.Then(
+//             [this, thread_id, options](const OptionalExecBatch& batch)
+//                 -> arrow::Future<arrow::ControlFlow<StatusWrapper>> {
+//               if (arrow::IsIterationEnd(batch)) {
+//                 return arrow::Break(StatusWrapper{arrow::Status::OK()});
+//               }
+//               if (auto status = join->ProbeSingleBatch(thread_id, *batch);
+//               !status.ok()) {
+//                 return arrow::Break(StatusWrapper{std::move(status)});
+//               }
+//               return arrow::Future<arrow::ControlFlow<StatusWrapper>>::MakeFinished(
+//                   arrow::Continue());
+//             },
+//             {}, options);
+//       });
+//       futures.emplace_back(std::move(loop));
+//     }
+//     auto future = arrow::All(futures)
+//                       .Then(
+//                           [](const std::vector<arrow::Result<StatusWrapper>>& results)
+//                           {
+//                             for (const auto& result : results) {
+//                               RETURN_NOT_OK(result);
+//                               RETURN_NOT_OK(result.ValueUnsafe());
+//                             }
+//                             return arrow::Status::OK();
+//                           },
+//                           {}, arrow::CallbackOptions::Defaults())
+//                       .Then([this] { return join->ProbingFinished(0); }, {}, options);
+//     return future.status();
+//   }
+// };
+
+// AsyncGeneratorProber MakeVectorGeneratorProber(
+//     arrow::compute::HashJoinImpl* join, arrow::util::AccumulationQueue&& probe_batches)
+//     {
+//   std::vector<std::optional<arrow::compute::ExecBatch>> batches;
+//   for (size_t i = 0; i < probe_batches.batch_count(); i++) {
+//     batches.emplace_back(std::move(probe_batches[i]));
+//   }
+//   auto gen = arrow::MakeVectorGenerator(std::move(batches));
+//   return AsyncGeneratorProber(join, std::move(gen));
+// }
 
 // TODO: Case about pipeline task pausing.
 // TODO: Case about error-handling.
