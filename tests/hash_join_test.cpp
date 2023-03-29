@@ -462,7 +462,8 @@ AsyncGeneratorProber MakeVectorGeneratorProber(
   return AsyncGeneratorProber(join, std::move(gen));
 }
 
-TEST(HashJoinTest, ArrowFutureAndVectorGenerator) {
+template <typename AsyncGeneratorProberFactory>
+void HashJoinTestArrowFutureAndAsyncGenerator(AsyncGeneratorProberFactory factory) {
   int batch_size = 4096;
   int num_build_batches = 128;
   int num_probe_batches = 128 * 8;
@@ -535,13 +536,17 @@ TEST(HashJoinTest, ArrowFutureAndVectorGenerator) {
                            std::move(start_task_group_callback),
                            std::move(output_batch_callback)));
   auto prober =
-      join_case.GetProber(ProberFactory<AsyncGeneratorProber>(MakeVectorGeneratorProber));
+      join_case.GetProber(ProberFactory<AsyncGeneratorProber>(std::move(factory)));
 
   DCHECK_OK(join_case.Build());
 
   DCHECK_OK(prober.Probe(dop, thread_pool.get()));
 
   std::cout << "thread id num: " << thread_ids.size() << std::endl;
+}
+
+TEST(HashJoinTest, ArrowFutureAndVectorGenerator) {
+  HashJoinTestArrowFutureAndAsyncGenerator(MakeVectorGeneratorProber);
 }
 
 // TODO: Case about pipeline task pausing.
