@@ -229,7 +229,7 @@ TEST(HashJoinTest, ArrowScheduler) {
   int batch_size = 4096;
   int num_build_batches = 128;
   int num_probe_batches = 128 * 8;
-  arrow::compute::JoinType join_type = arrow::compute::JoinType::RIGHT_SEMI;
+  arrow::compute::JoinType join_type = arrow::compute::JoinType::RIGHT_OUTER;
   size_t dop = 16;
   size_t num_threads = 7;
 
@@ -325,7 +325,7 @@ TEST(HashJoinTest, FollyFuture) {
   int batch_size = 4096;
   int num_build_batches = 128;
   int num_probe_batches = 128 * 8;
-  arrow::compute::JoinType join_type = arrow::compute::JoinType::RIGHT_SEMI;
+  arrow::compute::JoinType join_type = arrow::compute::JoinType::RIGHT_OUTER;
   size_t dop = 16;
   size_t num_threads = 7;
 
@@ -425,7 +425,7 @@ TEST(HashJoinTest, ArrowFuture) {
   int batch_size = 4096;
   int num_build_batches = 128;
   int num_probe_batches = 128 * 8;
-  arrow::compute::JoinType join_type = arrow::compute::JoinType::RIGHT_SEMI;
+  arrow::compute::JoinType join_type = arrow::compute::JoinType::RIGHT_OUTER;
   size_t dop = 16;
   size_t num_threads = 7;
 
@@ -515,7 +515,7 @@ void HashJoinTestArrowFromAsyncGeneratorProber(FromAsyncGeneratorProberFactory f
   int batch_size = 4096;
   int num_build_batches = 128;
   int num_probe_batches = 128 * 8;
-  arrow::compute::JoinType join_type = arrow::compute::JoinType::RIGHT_SEMI;
+  arrow::compute::JoinType join_type = arrow::compute::JoinType::RIGHT_OUTER;
   size_t dop = 16;
   size_t num_threads = 7;
 
@@ -607,7 +607,7 @@ void HashJoinTestArrowAsAsyncGeneratorFromAsyncGeneratorProber(
   int batch_size = 4096;
   int num_build_batches = 128;
   int num_probe_batches = 128 * 8;
-  arrow::compute::JoinType join_type = arrow::compute::JoinType::RIGHT_SEMI;
+  arrow::compute::JoinType join_type = arrow::compute::JoinType::RIGHT_OUTER;
   size_t dop = 16;
   size_t num_threads = 7;
 
@@ -721,7 +721,7 @@ void HashJoinTestErrorInjectionProber(ErrorInjectionProberFactory factory) {
   int batch_size = 4096;
   int num_build_batches = 128;
   int num_probe_batches = 128 * 8;
-  arrow::compute::JoinType join_type = arrow::compute::JoinType::RIGHT_SEMI;
+  arrow::compute::JoinType join_type = arrow::compute::JoinType::RIGHT_OUTER;
   size_t dop = 16;
   size_t num_threads = 7;
 
