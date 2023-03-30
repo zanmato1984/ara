@@ -5,7 +5,7 @@
             "type": "lldb",
             "request": "launch",
             "program": "${workspaceFolder}/out/build/dev-debug/gtests/sketch_hash_join_test",
-            "args": [],
+            "args": ["--gtest_filter=HashJoinTest.ArrowErrorInjection"],
             "stopAtEntry": false,
             "cwd": "${fileDirname}",
             "environment": [],
