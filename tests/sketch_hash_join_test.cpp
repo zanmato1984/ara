@@ -701,8 +701,7 @@ struct ErrorInjectionProber {
       });
       futures.emplace_back(std::move(loop));
     }
-    auto future = arrow::AllFinished(futures).Then(
-        [this] { return join->ProbingFinished(0); }, {}, options);
+    auto future = arrow::AllFinished(futures);
     return future.status();
   }
 };
@@ -736,7 +735,7 @@ void HashJoinTestErrorInjectionProber(ErrorInjectionProberFactory factory) {
 
   auto status = prober.Probe(dop, task_runner.GetThreadPool());
 
-  ASSERT_EQ(arrow::Status::UnknownError("Injected Error"), status);
+  EXPECT_EQ(arrow::Status::UnknownError("Injected Error"), status);
 
   std::cout << "thread id num: " << task_runner.NumThreadsOccupied() << std::endl;
 }
@@ -745,5 +744,120 @@ TEST(HashJoinTest, ArrowErrorInjection) {
   HashJoinTestErrorInjectionProber(MakeErrorInjectionProber);
 }
 
-// TODO: Case about canceling.
+struct CancelProber {
+ private:
+  arrow::compute::HashJoinImpl* join;
+  AsyncGenerator gen;
+  const size_t num_batches;
+  mutable std::atomic<bool> cancelled;
+  mutable std::atomic<size_t> num_cancelled;
+  mutable std::atomic<size_t> num_probed;
+  mutable std::mutex mutex;
+
+ public:
+  CancelProber(arrow::compute::HashJoinImpl* join, AsyncGenerator gen, size_t num_batches)
+      : join(join),
+        gen(std::move(gen)),
+        num_batches(num_batches),
+        cancelled(false),
+        num_cancelled(0),
+        num_probed(0) {}
+
+  auto Probe(size_t dop, arrow::internal::Executor* exec) const {
+    arrow::CallbackOptions options{arrow::ShouldSchedule::IfDifferentExecutor, exec};
+    std::vector<arrow::Future<>> futures;
+    for (size_t thread_id = 0; thread_id < dop; thread_id++) {
+      auto loop = arrow::Loop([this, thread_id, dop, options] {
+        std::unique_lock<std::mutex> lock(mutex);
+        auto future = gen();
+        lock.unlock();
+        return future
+            .Then(
+                [this, thread_id, options](const OptionalExecBatch& batch)
+                    -> arrow::Future<std::optional<arrow::Status>> {
+                  if (!batch.has_value()) {
+                    return std::optional{arrow::Status::UnknownError("Injected Error")};
+                  }
+                  if (cancelled) {
+                    num_cancelled++;
+                    return std::optional{arrow::Status::Cancelled("Canceled")};
+                  }
+                  num_probed++;
+                  return std::optional{join->ProbeSingleBatch(thread_id, *batch)};
+                },
+                {}, options)
+            .Then(
+                [this, thread_id, dop](const std::optional<arrow::Status>& status)
+                    -> arrow::Result<arrow::ControlFlow<>> {
+                  if (arrow::IsIterationEnd(status)) {
+                    return arrow::Break();
+                  }
+                  if (status.has_value() && !status.value().ok()) {
+                    cancelled = true;
+                    return status.value();
+                  }
+                  return arrow::Continue();
+                },
+                {}, options);
+      });
+      futures.emplace_back(std::move(loop));
+    }
+    auto status = arrow::AllFinished(futures).status();
+    EXPECT_EQ(cancelled, true);
+    EXPECT_TRUE(status.Equals(arrow::Status::Cancelled("Canceled")) ||
+                status.Equals(arrow::Status::UnknownError("Injected Error")));
+    size_t actual_num_errors = 0, actual_num_cancelled = 0;
+    for (const auto& future : futures) {
+      EXPECT_TRUE(future.is_finished());
+      if (future.status().Equals(arrow::Status::Cancelled("Canceled"))) {
+        actual_num_cancelled++;
+      } else if (future.status().Equals(arrow::Status::UnknownError("Injected Error"))) {
+        actual_num_errors++;
+      }
+    }
+    std::cout << "actual error num: " << actual_num_errors << std::endl;
+    std::cout << "actual cancelled num: " << actual_num_cancelled << std::endl;
+    std::cout << "expected cancelled num: " << num_cancelled << std::endl;
+    std::cout << "expected probed num: " << num_probed << std::endl;
+    EXPECT_GE(actual_num_errors, 1);
+    EXPECT_GE(actual_num_cancelled, 1);
+    EXPECT_EQ(actual_num_cancelled, num_cancelled);
+    EXPECT_EQ(num_cancelled + num_probed, num_batches);
+  }
+};
+
+CancelProber MakeCancelProber(arrow::compute::HashJoinImpl* join,
+                              arrow::util::AccumulationQueue&& probe_batches) {
+  std::vector<std::optional<arrow::compute::ExecBatch>> batches;
+  for (size_t i = 0; i < probe_batches.batch_count(); i++) {
+    batches.emplace_back(std::move(probe_batches[i]));
+  }
+  auto num_batches = probe_batches.batch_count();
+  auto gen = arrow::MakeVectorGenerator(std::move(batches));
+  return CancelProber(join, std::move(gen), num_batches);
+}
+
+template <typename CancelProberFactory>
+void HashJoinTestCancelProber(CancelProberFactory factory) {
+  int batch_size = 4096;
+  int num_build_batches = 128;
+  int num_probe_batches = 128 * 8;
+  arrow::compute::JoinType join_type = arrow::compute::JoinType::RIGHT_OUTER;
+  size_t dop = 16;
+  size_t num_threads = 7;
+
+  ArrowFutureTaskRunner task_runner(dop, num_threads);
+  HashJoinCase join_case(batch_size, num_build_batches, num_probe_batches, join_type);
+  DCHECK_OK(join_case.Init(dop, task_runner));
+  auto prober = join_case.GetProber(ProberFactory<CancelProber>(std::move(factory)));
+
+  DCHECK_OK(join_case.Build());
+
+  prober.Probe(dop, task_runner.GetThreadPool());
+
+  std::cout << "thread id num: " << task_runner.NumThreadsOccupied() << std::endl;
+}
+
+TEST(HashJoinTest, ArrowCancel) { HashJoinTestCancelProber(MakeCancelProber); }
+
 // TODO: Case about pipeline task pausing.
