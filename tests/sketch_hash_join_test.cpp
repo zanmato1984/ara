@@ -745,5 +745,5 @@ TEST(HashJoinTest, ArrowErrorInjection) {
   HashJoinTestErrorInjectionProber(MakeErrorInjectionProber);
 }
 
-// TODO: Case about error-handling.
+// TODO: Case about canceling.
 // TODO: Case about pipeline task pausing.
