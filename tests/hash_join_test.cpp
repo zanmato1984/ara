@@ -36,9 +36,9 @@ struct HashJoinCase {
   using StartTaskGroupCallBack = std::function<arrow::Status(int, int64_t)>;
   using OutputBatchCallBack = std::function<void(int64_t, arrow::compute::ExecBatch)>;
 
-  arrow::Status Init(int batch_size, int num_build_batches, int num_probe_batches,
-                     arrow::compute::JoinType join_type, size_t dop,
-                     TaskRunner& task_runner) {
+  HashJoinCase(int batch_size, int num_build_batches, int num_probe_batches,
+               arrow::compute::JoinType join_type)
+      : join_type(join_type) {
     std::vector<std::shared_ptr<arrow::DataType>> key_types = {arrow::int32()};
     std::vector<std::shared_ptr<arrow::DataType>> build_payload_types = {
         arrow::int64(), arrow::decimal256(15, 2)};
@@ -114,17 +114,20 @@ struct HashJoinCase {
     for (arrow::compute::ExecBatch& batch : r_batches_with_schema.batches)
       r_batches.InsertBatch(std::move(batch));
 
-    arrow::compute::Expression filter = arrow::compute::literal(true);
+    filter = arrow::compute::literal(true);
     DCHECK_OK(schema_mgr->Init(join_type, *l_batches_with_schema.schema, left_keys,
                                *r_batches_with_schema.schema, right_keys, filter, "l_",
                                "r_"));
+  }
 
+  arrow::Status Init(size_t dop, TaskRunner& task_runner) {
     auto* memory_pool = arrow::default_memory_pool();
     ctx = std::make_unique<arrow::compute::QueryContext>(
         arrow::compute::QueryOptions{},
         arrow::compute::ExecContext(memory_pool, NULLPTR, NULLPTR));
     DCHECK_OK(ctx->Init(dop, NULLPTR));
 
+    arrow::compute::Expression filter = arrow::compute::literal(true);
     return join->Init(
         ctx.get(), join_type, dop, &(schema_mgr->proj_maps[0]),
         &(schema_mgr->proj_maps[1]), std::move(key_cmp), std::move(filter),
@@ -153,6 +156,10 @@ struct HashJoinCase {
  private:
   arrow::util::AccumulationQueue l_batches;
   arrow::util::AccumulationQueue r_batches;
+
+  arrow::compute::JoinType join_type;
+  std::vector<arrow::compute::JoinKeyCmp> key_cmp;
+  arrow::compute::Expression filter = arrow::compute::literal(true);
   std::unique_ptr<arrow::compute::HashJoinSchema> schema_mgr =
       std::make_unique<arrow::compute::HashJoinSchema>();
   std::unique_ptr<arrow::compute::HashJoinImpl> join =
@@ -230,9 +237,8 @@ TEST(HashJoinTest, ArrowScheduler) {
   size_t num_threads = 7;
 
   ArrowSchedulerTaskRunner task_runner(num_threads);
-  HashJoinCase join_case;
-  DCHECK_OK(join_case.Init(batch_size, num_build_batches, num_probe_batches, join_type,
-                           dop, task_runner));
+  HashJoinCase join_case(batch_size, num_build_batches, num_probe_batches, join_type);
+  DCHECK_OK(join_case.Init(dop, task_runner));
   auto prober =
       join_case.GetProber(ProberFactory<TaskGroupProber>(TaskGroupProber::Make));
 
@@ -327,9 +333,8 @@ TEST(HashJoinTest, FollyFuture) {
   size_t num_threads = 7;
 
   FollyFutureTaskRunner task_runner(dop, num_threads);
-  HashJoinCase join_case;
-  DCHECK_OK(join_case.Init(batch_size, num_build_batches, num_probe_batches, join_type,
-                           dop, task_runner));
+  HashJoinCase join_case(batch_size, num_build_batches, num_probe_batches, join_type);
+  DCHECK_OK(join_case.Init(dop, task_runner));
   auto prober =
       join_case.GetProber(ProberFactory<TaskGroupProber>(TaskGroupProber::Make));
 
@@ -427,9 +432,8 @@ TEST(HashJoinTest, ArrowFuture) {
   size_t num_threads = 7;
 
   ArrowFutureTaskRunner task_runner(dop, num_threads);
-  HashJoinCase join_case;
-  DCHECK_OK(join_case.Init(batch_size, num_build_batches, num_probe_batches, join_type,
-                           dop, task_runner));
+  HashJoinCase join_case(batch_size, num_build_batches, num_probe_batches, join_type);
+  DCHECK_OK(join_case.Init(dop, task_runner));
   auto prober =
       join_case.GetProber(ProberFactory<TaskGroupProber>(TaskGroupProber::Make));
 
@@ -518,9 +522,8 @@ void HashJoinTestArrowFromAsyncGeneratorProber(FromAsyncGeneratorProberFactory f
   size_t num_threads = 7;
 
   ArrowFutureTaskRunner task_runner(dop, num_threads);
-  HashJoinCase join_case;
-  DCHECK_OK(join_case.Init(batch_size, num_build_batches, num_probe_batches, join_type,
-                           dop, task_runner));
+  HashJoinCase join_case(batch_size, num_build_batches, num_probe_batches, join_type);
+  DCHECK_OK(join_case.Init(dop, task_runner));
   auto prober =
       join_case.GetProber(ProberFactory<FromAsyncGeneratorProber>(std::move(factory)));
 
@@ -611,9 +614,8 @@ void HashJoinTestArrowAsAsyncGeneratorFromAsyncGeneratorProber(
   size_t num_threads = 7;
 
   ArrowFutureTaskRunner task_runner(dop, num_threads);
-  HashJoinCase join_case;
-  DCHECK_OK(join_case.Init(batch_size, num_build_batches, num_probe_batches, join_type,
-                           dop, task_runner));
+  HashJoinCase join_case(batch_size, num_build_batches, num_probe_batches, join_type);
+  DCHECK_OK(join_case.Init(dop, task_runner));
   auto prober =
       join_case.GetProber(ProberFactory<AsAsyncGeneratorFromAsyncGeneratorProber>(
           [factory = std::move(factory), dop, exec = task_runner.GetThreadPool()](
@@ -657,6 +659,7 @@ TEST(HashJoinTest, ArrowAsAsyncGeneratorFromVectorGenerator) {
       MakeAsAsyncGeneratorFromVectorAsyncGeneratorProber);
 }
 
+// TODO: Case about unifying build/probe as the same pipeline phasing.
 // TODO: Case about operator chaining.
 // TODO: Case about pipeline task pausing.
 // TODO: Case about error-handling.
