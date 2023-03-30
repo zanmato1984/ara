@@ -321,6 +321,7 @@ struct FollyFutureTaskRunner : public TaskRunner {
   std::unordered_set<std::thread::id> thread_ids;
 };
 
+// TODO: This test occasionally hangs.
 TEST(HashJoinTest, FollyFuture) {
   int batch_size = 4096;
   int num_build_batches = 128;
