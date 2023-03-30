@@ -740,7 +740,6 @@ void HashJoinTestErrorInjectionProber(ErrorInjectionProberFactory factory) {
   std::cout << "thread id num: " << task_runner.NumThreadsOccupied() << std::endl;
 }
 
-// TODO: Why no batch ever output?
 TEST(HashJoinTest, ArrowErrorInjection) {
   HashJoinTestErrorInjectionProber(MakeErrorInjectionProber);
 }
