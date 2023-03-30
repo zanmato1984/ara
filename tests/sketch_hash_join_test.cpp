@@ -395,7 +395,7 @@ struct ArrowFutureTaskRunner : public TaskRunner {
         }
       }
     }
-    auto fut = arrow::AllComplete(task_futures).Then([this, task_group_id]() {
+    auto fut = arrow::AllFinished(task_futures).Then([this, task_group_id]() {
       auto cont = task_groups[task_group_id].second;
       DCHECK_OK(cont(0));
     });
@@ -420,6 +420,7 @@ struct ArrowFutureTaskRunner : public TaskRunner {
   std::unordered_set<std::thread::id> thread_ids;
 };
 
+// TODO: This test occasionally reports double-free.
 TEST(HashJoinTest, ArrowFuture) {
   int batch_size = 4096;
   int num_build_batches = 128;
@@ -493,7 +494,7 @@ struct FromAsyncGeneratorProber {
       });
       futures.emplace_back(std::move(loop));
     }
-    auto future = arrow::AllComplete(futures).Then(
+    auto future = arrow::AllFinished(futures).Then(
         [this] { return join->ProbingFinished(0); }, {}, options);
     return future.status();
   }
@@ -645,7 +646,7 @@ void HashJoinTestArrowAsAsyncGeneratorFromAsyncGeneratorProber(
       });
       futures.emplace_back(std::move(loop));
     }
-    EXPECT_TRUE(arrow::AllComplete(futures).status().ok());
+    EXPECT_TRUE(arrow::AllFinished(futures).status().ok());
   }
 
   std::cout << "thread id num: " << task_runner.NumThreadsOccupied() << std::endl;
@@ -654,6 +655,94 @@ void HashJoinTestArrowAsAsyncGeneratorFromAsyncGeneratorProber(
 TEST(HashJoinTest, ArrowAsAsyncGeneratorFromVectorGenerator) {
   HashJoinTestArrowAsAsyncGeneratorFromAsyncGeneratorProber(
       MakeAsAsyncGeneratorFromVectorAsyncGeneratorProber);
+}
+
+struct ErrorInjectionProber {
+ private:
+  arrow::compute::HashJoinImpl* join;
+  AsyncGenerator gen;
+  mutable std::mutex mutex;
+
+ public:
+  ErrorInjectionProber(arrow::compute::HashJoinImpl* join, AsyncGenerator gen)
+      : join(join), gen(std::move(gen)) {}
+
+  arrow::Status Probe(size_t dop, arrow::internal::Executor* exec) const {
+    arrow::CallbackOptions options{arrow::ShouldSchedule::IfDifferentExecutor, exec};
+    std::vector<arrow::Future<>> futures;
+    for (size_t thread_id = 0; thread_id < dop; thread_id++) {
+      auto loop = arrow::Loop([this, thread_id, dop, options] {
+        std::unique_lock<std::mutex> lock(mutex);
+        auto future = gen();
+        lock.unlock();
+        return future
+            .Then(
+                [this, thread_id, options](const OptionalExecBatch& batch)
+                    -> arrow::Future<std::optional<arrow::Status>> {
+                  if (!batch.has_value()) {
+                    return std::optional{arrow::Status::UnknownError("Injected Error")};
+                  }
+                  return std::optional{join->ProbeSingleBatch(thread_id, *batch)};
+                },
+                {}, options)
+            .Then(
+                [thread_id, dop](const std::optional<arrow::Status>& status)
+                    -> arrow::Result<arrow::ControlFlow<>> {
+                  if (arrow::IsIterationEnd(status)) {
+                    return arrow::Break();
+                  }
+                  if (status.has_value() && !status.value().ok()) {
+                    return status.value();
+                  }
+                  return arrow::Continue();
+                },
+                {}, options);
+      });
+      futures.emplace_back(std::move(loop));
+    }
+    auto future = arrow::AllFinished(futures).Then(
+        [this] { return join->ProbingFinished(0); }, {}, options);
+    return future.status();
+  }
+};
+
+ErrorInjectionProber MakeErrorInjectionProber(
+    arrow::compute::HashJoinImpl* join, arrow::util::AccumulationQueue&& probe_batches) {
+  std::vector<std::optional<arrow::compute::ExecBatch>> batches;
+  for (size_t i = 0; i < probe_batches.batch_count(); i++) {
+    batches.emplace_back(std::move(probe_batches[i]));
+  }
+  auto gen = arrow::MakeVectorGenerator(std::move(batches));
+  return ErrorInjectionProber(join, std::move(gen));
+}
+
+template <typename ErrorInjectionProberFactory>
+void HashJoinTestErrorInjectionProber(ErrorInjectionProberFactory factory) {
+  int batch_size = 4096;
+  int num_build_batches = 128;
+  int num_probe_batches = 128 * 8;
+  arrow::compute::JoinType join_type = arrow::compute::JoinType::RIGHT_SEMI;
+  size_t dop = 16;
+  size_t num_threads = 7;
+
+  ArrowFutureTaskRunner task_runner(dop, num_threads);
+  HashJoinCase join_case(batch_size, num_build_batches, num_probe_batches, join_type);
+  DCHECK_OK(join_case.Init(dop, task_runner));
+  auto prober =
+      join_case.GetProber(ProberFactory<ErrorInjectionProber>(std::move(factory)));
+
+  DCHECK_OK(join_case.Build());
+
+  auto status = prober.Probe(dop, task_runner.GetThreadPool());
+
+  ASSERT_EQ(arrow::Status::UnknownError("Injected Error"), status);
+
+  std::cout << "thread id num: " << task_runner.NumThreadsOccupied() << std::endl;
+}
+
+// TODO: Why no batch ever output?
+TEST(HashJoinTest, ArrowErrorInjection) {
+  HashJoinTestErrorInjectionProber(MakeErrorInjectionProber);
 }
 
 // TODO: Case about error-handling.
