@@ -32,14 +32,14 @@ set(SKETCH_TEST_SRC
         "${CMAKE_CURRENT_SOURCE_DIR}/sketch_test.cpp")
 configure_test(sketch_test "${SKETCH_TEST_SRC}")
 
-set(HASH_JOIN_TEST_SRC
-        "${CMAKE_CURRENT_SOURCE_DIR}/hash_join_test.cpp")
-configure_test(hash_join_test "${HASH_JOIN_TEST_SRC}")
+set(SKETCH_HASH_JOIN_TEST_SRC
+        "${CMAKE_CURRENT_SOURCE_DIR}/sketch_hash_join_test.cpp")
+configure_test(sketch_hash_join_test "${SKETCH_HASH_JOIN_TEST_SRC}")
 
-set(TASK_TEST_SRC
-        "${CMAKE_CURRENT_SOURCE_DIR}/task_test.cpp")
-configure_test(task_test "${TASK_TEST_SRC}")
+set(SKETCH_TASK_TEST_SRC
+        "${CMAKE_CURRENT_SOURCE_DIR}/sketch_task_test.cpp")
+configure_test(sketch_task_test "${SKETCH_TASK_TEST_SRC}")
 
-set(FUTURE_TEST_SRC
-        "${CMAKE_CURRENT_SOURCE_DIR}/future_test.cpp")
-configure_test(future_test "${FUTURE_TEST_SRC}")
+set(SKETCH_FUTURE_TEST_SRC
+        "${CMAKE_CURRENT_SOURCE_DIR}/sketch_future_test.cpp")
+configure_test(sketch_future_test "${SKETCH_FUTURE_TEST_SRC}")

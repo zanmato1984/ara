@@ -1,0 +1,48 @@
+{
+    "configurations": [
+        {
+            "name": "sketch_hash_join_test",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/out/build/dev-debug/gtests/sketch_hash_join_test",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${fileDirname}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "lldb"
+        },
+        {
+            "name": "sketch_hash_join_operator_test",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/out/build/dev-debug/gtests/sketch_hash_join_test",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${fileDirname}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "lldb"
+        },
+        {
+            "name": "sketch_future_test",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/out/build/dev-debug/gtests/sketch_future_test",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${fileDirname}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "lldb"
+        }
+    ],
+    "setupCommands": [
+        {
+            "description": "Enable all-exceptions",
+            "text": "catch throw",
+            "ignoreFailures": true
+        }
+    ],
+    "version": "2.0.0"
+}
