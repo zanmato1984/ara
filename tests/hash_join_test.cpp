@@ -32,9 +32,6 @@ struct TaskRunner {
 struct HashJoinCase {
   using Task = TaskRunner::Task;
   using TaskCont = TaskRunner::TaskCont;
-  using RegisterTaskGroupCallBack = std::function<int(Task, TaskCont)>;
-  using StartTaskGroupCallBack = std::function<arrow::Status(int, int64_t)>;
-  using OutputBatchCallBack = std::function<void(int64_t, arrow::compute::ExecBatch)>;
 
   HashJoinCase(int batch_size, int num_build_batches, int num_probe_batches,
                arrow::compute::JoinType join_type)
