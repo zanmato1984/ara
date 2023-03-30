@@ -656,6 +656,5 @@ TEST(HashJoinTest, ArrowAsAsyncGeneratorFromVectorGenerator) {
       MakeAsAsyncGeneratorFromVectorAsyncGeneratorProber);
 }
 
-// TODO: Case about operator chaining.
 // TODO: Case about error-handling.
 // TODO: Case about pipeline task pausing.
