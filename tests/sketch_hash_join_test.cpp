@@ -14,6 +14,8 @@
 #include <folly/futures/Future.h>
 #include <gtest/gtest.h>
 
+// TODO: How the hell to use arrow::Future<arrow::Status> with arrow::Loop?
+
 template <typename Prober>
 using ProberFactory = std::function<Prober(arrow::compute::HashJoinImpl*,
                                            arrow::util::AccumulationQueue&&)>;
@@ -870,6 +872,3 @@ void HashJoinTestCancelProber(CancelProberFactory factory) {
 }
 
 TEST(HashJoinTest, ArrowCancel) { HashJoinTestCancelProber(MakeCancelProber); }
-
-// TODO: How the hell to use arrow::Future<arrow::Status> with arrow::Loop?
-// TODO: Case about pipeline task pausing.

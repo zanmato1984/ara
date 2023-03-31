@@ -5,3 +5,5 @@
 // This is critical for cases like a pipeline having two hash right outer join probe operators,
 // the `Finish()` method of each will scan the hash table and produce non-joined rows.
 // 3. How to turn the sync `Stream()` and `Finish()` methods to future.
+
+// TODO: Case about operator ping-pong between RUNNING and SPILLING states.
