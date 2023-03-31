@@ -860,4 +860,5 @@ void HashJoinTestCancelProber(CancelProberFactory factory) {
 
 TEST(HashJoinTest, ArrowCancel) { HashJoinTestCancelProber(MakeCancelProber); }
 
+// TODO: How the hell to use arrow::Future<arrow::Status> with arrow::Loop?
 // TODO: Case about pipeline task pausing.
