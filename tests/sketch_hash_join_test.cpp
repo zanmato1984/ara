@@ -352,16 +352,19 @@ TEST(HashJoinTest, FollyFuture) {
 }
 
 struct ArrowFutureTaskRunner : public TaskRunner {
-  ArrowFutureTaskRunner(size_t dop, size_t num_threads)
+  ArrowFutureTaskRunner(size_t dop, size_t num_threads, bool record_thread_id = false)
       : TaskRunner(),
         dop(dop),
-        thread_pool(*arrow::internal::ThreadPool::Make(num_threads)) {}
+        thread_pool(*arrow::internal::ThreadPool::Make(num_threads)),
+        record_thread_id(record_thread_id) {}
 
   int RegisterTaskGroup(Task task, TaskCont task_cont) override {
     int task_group_id = task_groups.size();
     auto task_wrapped = [this, task = std::move(task)](size_t thread_id,
                                                        int64_t task_id) {
-      thread_ids.insert(std::this_thread::get_id());
+      if (record_thread_id) {
+        thread_ids.insert(std::this_thread::get_id());
+      }
       return task(thread_id, task_id);
     };
     task_groups.emplace(task_group_id,
@@ -410,6 +413,8 @@ struct ArrowFutureTaskRunner : public TaskRunner {
     std::cout << batch.ToString() << std::endl;
   }
 
+  void SetRecordThreadId(bool record_thread_id_) { record_thread_id = record_thread_id_; }
+
   size_t NumThreadsOccupied() const { return thread_ids.size(); }
 
   auto GetThreadPool() const { return thread_pool.get(); }
@@ -418,6 +423,7 @@ struct ArrowFutureTaskRunner : public TaskRunner {
   const size_t dop;
   std::shared_ptr<arrow::internal::ThreadPool> thread_pool;
   std::unordered_map<int, TaskRunner::TaskGroup> task_groups;
+  bool record_thread_id;
   std::unordered_set<std::thread::id> thread_ids;
 };
 
@@ -464,8 +470,9 @@ struct FromAsyncGeneratorProber {
   FromAsyncGeneratorProber(arrow::compute::HashJoinImpl* join, AsyncGenerator gen)
       : join(join), gen(std::move(gen)) {}
 
-  arrow::Status Probe(size_t dop, arrow::internal::Executor* exec) const {
-    arrow::CallbackOptions options{arrow::ShouldSchedule::IfDifferentExecutor, exec};
+  arrow::Status Probe(size_t dop, ArrowFutureTaskRunner& task_runner) const {
+    arrow::CallbackOptions options{arrow::ShouldSchedule::IfDifferentExecutor,
+                                   task_runner.GetThreadPool()};
     std::vector<arrow::Future<>> futures;
     for (size_t thread_id = 0; thread_id < dop; thread_id++) {
       auto loop = arrow::Loop([this, thread_id, options] {
@@ -496,7 +503,11 @@ struct FromAsyncGeneratorProber {
       futures.emplace_back(std::move(loop));
     }
     auto future = arrow::AllFinished(futures).Then(
-        [this] { return join->ProbingFinished(0); }, {}, options);
+        [this, &task_runner] {
+          task_runner.SetRecordThreadId(true);
+          return join->ProbingFinished(0);
+        },
+        {}, options);
     return future.status();
   }
 };
@@ -528,7 +539,7 @@ void HashJoinTestArrowFromAsyncGeneratorProber(FromAsyncGeneratorProberFactory f
 
   DCHECK_OK(join_case.Build());
 
-  DCHECK_OK(prober.Probe(dop, task_runner.GetThreadPool()));
+  DCHECK_OK(prober.Probe(dop, task_runner));
 
   std::cout << "thread id num: " << task_runner.NumThreadsOccupied() << std::endl;
 }
