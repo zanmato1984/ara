@@ -34,6 +34,8 @@
 // |  |  |  |
 // P1 P2 P3 P4
 //
-// Explain:
-// 1. The top UnionAll operators introduces a pipeline with two parallel sources.
-// 2. RJs (RightJoins) introduce 
+// Challenges:
+// 1. P1 ~ P4 are independent pipelines, so a staged plan execution model would need to consider if to parallel them.
+// 2. P5 has two source paths, so a pipeline execution model would need to consider if to parallel them.
+// 3. Each RJ (RightJoin) probe needs a scan pass of the hash table to produce unmatched batches when the source is fully drained.
+// 4. Each source path contains multiple chained RJ probes whose scan passes need to be executed in sequence.
