@@ -1,4 +1,4 @@
-// TODO: The following case demonstrates the ultimate challenge to a pipeline model:
+// TODO: The following case demonstrates the ultimate challenges to a pipeline model:
 //        UnionAll
 //           |
 //      -----------
