@@ -36,9 +36,9 @@ set(SKETCH_HASH_JOIN_TEST_SRC
         "${CMAKE_CURRENT_SOURCE_DIR}/sketch_hash_join_test.cpp")
 configure_test(sketch_hash_join_test "${SKETCH_HASH_JOIN_TEST_SRC}")
 
-set(SKETCH_HASH_JOIN_OPERATOR_TEST_SRC
-        "${CMAKE_CURRENT_SOURCE_DIR}/sketch_hash_join_operator_test.cpp")
-configure_test(sketch_hash_join_operator_test "${SKETCH_HASH_JOIN_OPERATOR_TEST_SRC}")
+set(SKETCH_OPERATOR_TEST_SRC
+        "${CMAKE_CURRENT_SOURCE_DIR}/sketch_operator_test.cpp")
+configure_test(sketch_operator_test "${SKETCH_OPERATOR_TEST_SRC}")
 
 set(SKETCH_PIPELINE_TEST_SRC
         "${CMAKE_CURRENT_SOURCE_DIR}/sketch_pipeline_test.cpp")
