@@ -25,6 +25,18 @@
             "MIMode": "lldb"
         },
         {
+            "name": "sketch_pipeline_test",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/out/build/dev-debug/gtests/sketch_pipeline_test",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${fileDirname}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "lldb"
+        },
+        {
             "name": "sketch_future_test",
             "type": "lldb",
             "request": "launch",

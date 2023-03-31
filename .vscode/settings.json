@@ -84,6 +84,8 @@
         "vector": "cpp",
         "algorithm": "cpp",
         "thread": "cpp",
-        "filesystem": "cpp"
+        "filesystem": "cpp",
+        "coroutine": "cpp",
+        "typeindex": "cpp"
     }
 }
