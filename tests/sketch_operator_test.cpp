@@ -42,7 +42,7 @@ class Operator {
  public:
   virtual ~Operator() = default;
 
-  virtual Result Steram(size_t thread_id, Batch batch) {
+  virtual Result Push(size_t thread_id, const Batch & batch) {
     return {OperatorStatus::RUNNING(), {}};
   }
   // TODO: Breakdown the `Break()` method into TaskGroup-like primitives?
