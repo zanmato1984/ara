@@ -22,6 +22,7 @@
 #include <arrow/compute/exec/hash_join.h>
 #include <arrow/compute/exec/hash_join_node.h>
 #include <arrow/compute/exec/test_util.h>
+#include <arrow/util/future.h>
 #include <gtest/gtest.h>
 
 enum class OperatorStatusCode : char {
@@ -62,15 +63,22 @@ struct OperatorResult {
   std::optional<Batch> batch;
 };
 
-class TaskGroups {
+using LoopTask = std::function<OperatorStatus(size_t /*round*/)>;
+using LoopTaskGroup = std::vector<std::pair<LoopTask, size_t /*rounds to loop*/>>;
+
+class LoopTaskGroups {
  public:
-  using Task = std::function<OperatorResult(size_t /*round*/)>;
-  using TaskGroup = std::vector<std::pair<Task, size_t /*num_rounds*/>>;
+  virtual ~LoopTaskGroups() = default;
 
-  virtual ~TaskGroups() = default;
+  virtual size_t Size() = 0;
+  virtual arrow::Result<LoopTaskGroup> Next() = 0;
+};
 
-  virtual bool HasNext() = 0;
-  virtual arrow::Result<TaskGroup> Next() = 0;
+class LoopTaskGroupsExecutor {
+ public:
+  virtual ~LoopTaskGroupsExecutor() = default;
+
+  virtual arrow::Status Execute(LoopTaskGroups& groups) = 0;
 };
 
 class Operator {
@@ -80,7 +88,9 @@ class Operator {
   virtual OperatorResult Push(size_t thread_id, const Batch& batch) {
     return {OperatorStatus::RUNNING(), {}};
   }
-  virtual arrow::Result<std::unique_ptr<TaskGroups>> Break(size_t dop) { return nullptr; }
+  virtual arrow::Result<std::unique_ptr<LoopTaskGroups>> Break(size_t dop) {
+    return nullptr;
+  }
   virtual OperatorResult Finish(size_t thread_id) {
     return {OperatorStatus::RUNNING(), {}};
   }
@@ -190,20 +200,24 @@ TEST(OperatorTest, HashJoinBuild) {
     }
   };
 
-  class BuildTaskGroups : public TaskGroups {
+  class BuildTaskGroups : public LoopTaskGroups {
    public:
-    explicit BuildTaskGroups(arrow::compute::HashJoinImpl* join_impl, size_t dop)
+    explicit BuildTaskGroups(arrow::compute::HashJoinImpl* join_impl,
+                             arrow::util::AccumulationQueue build_batches, size_t dop)
         : join_impl(join_impl),
+          build_batches(std::move(build_batches)),
           dop(dop),
-          count(0),
           current_build_task_group(-1),
           current_num_build_tasks(0),
-          next_build_task_cont(
-              [this](size_t) { return this->join_impl->BuildHashTable(0, {}, {}); }) {}
+          next_build_task_cont([this](size_t) {
+            return this->join_impl->BuildHashTable(
+                0, std::move(this->build_batches),
+                [&](size_t thread_index) { return arrow::Status::OK(); });
+          }) {}
 
-    bool HasNext() override { return count < build_task_groups.size(); }
+    size_t Size() override { return build_task_groups.size(); }
 
-    arrow::Result<TaskGroup> Next() override {
+    arrow::Result<LoopTaskGroup> Next() override {
       ARROW_RETURN_NOT_OK(next_build_task_cont(0));
       auto it = build_task_groups.find(current_build_task_group);
       ARROW_RETURN_IF(it == build_task_groups.end(),
@@ -211,7 +225,7 @@ TEST(OperatorTest, HashJoinBuild) {
       auto& build_task = it->second.first;
       auto& build_task_cont = it->second.second;
 
-      TaskGroup task_group;
+      LoopTaskGroup task_group;
       task_group.reserve(current_num_build_tasks);
 
       // Spread tasks across threads.
@@ -227,21 +241,21 @@ TEST(OperatorTest, HashJoinBuild) {
               auto status =
                   build_task(thread_id, thread_id * num_tasks_per_thread + round);
               if (status.ok()) {
-                return OperatorResult{OperatorStatus::RUNNING(), {}};
+                return OperatorStatus::RUNNING();
               } else {
-                return OperatorResult{OperatorStatus::ERROR(std::move(status)), {}};
+                return OperatorStatus::ERROR(std::move(status));
               }
             },
             num_tasks);
       }
 
-      count++;
       next_build_task_cont = build_task_cont;
       return arrow::Result(std::move(task_group));
     }
 
    private:
     arrow::compute::HashJoinImpl* join_impl;
+    arrow::util::AccumulationQueue build_batches;
 
    public:
     using BuildTask = std::function<arrow::Status(size_t, int64_t)>;
@@ -264,7 +278,6 @@ TEST(OperatorTest, HashJoinBuild) {
    private:
     const size_t dop;
     std::unordered_map<int, BuildTaskGroup> build_task_groups;
-    size_t count;
     int current_build_task_group;
     int64_t current_num_build_tasks;
     BuildTaskCont next_build_task_cont;
@@ -272,15 +285,16 @@ TEST(OperatorTest, HashJoinBuild) {
 
   class HashJoinBuildOperator : public Operator {
    public:
-    HashJoinBuildOperator(const HashJoinCase& join_case)
+    HashJoinBuildOperator(HashJoinCase& join_case)
         : join_case(join_case), join_impl(nullptr) {}
     ~HashJoinBuildOperator() override = default;
 
-    arrow::Result<std::unique_ptr<TaskGroups>> Break(size_t dop) override {
+    arrow::Result<std::unique_ptr<LoopTaskGroups>> Break(size_t dop) override {
       auto join_impl_ = arrow::compute::HashJoinImpl::MakeSwiss();
       ARROW_RETURN_NOT_OK(join_impl_);
       join_impl = std::move(*join_impl_);
-      auto build_task_groups = std::make_unique<BuildTaskGroups>(join_impl.get(), dop);
+      auto build_task_groups = std::make_unique<BuildTaskGroups>(
+          join_impl.get(), std::move(join_case.r_batches), dop);
 
       using BuildTask = std::function<arrow::Status(size_t, int64_t)>;
       using BuildTaskCont = std::function<arrow::Status(size_t)>;
@@ -300,14 +314,85 @@ TEST(OperatorTest, HashJoinBuild) {
             return build_task_groups->StartTaskGroup(build_task_group_id,
                                                      num_build_tasks);
           },
-          {}, [](int64_t x) {}));
+          [](int64_t thread_id, arrow::compute::ExecBatch batch) {
+            std::cout << batch.ToString() << std::endl;
+          },
+          [](int64_t x) {}));
 
       return build_task_groups;
     }
 
+    std::shared_ptr<arrow::compute::HashJoinImpl> GetJoinImpl() { return join_impl; }
+
    private:
-    const HashJoinCase& join_case;
+    HashJoinCase& join_case;
     std::shared_ptr<arrow::compute::HashJoinImpl> join_impl;
+  };
+
+  class FutureLoopTaskGroupsExecutor : public LoopTaskGroupsExecutor {
+   public:
+    FutureLoopTaskGroupsExecutor(arrow::internal::Executor* exec) : exec(exec) {}
+
+    arrow::Status Execute(LoopTaskGroups& groups) override {
+      arrow::CallbackOptions top_options{arrow::ShouldSchedule::Always, exec};
+      arrow::CallbackOptions task_options{arrow::ShouldSchedule::IfDifferentExecutor,
+                                          exec};
+      auto fut = arrow::Future<>::MakeFinished();
+      for (size_t i = 0; i < groups.Size(); i++) {
+        auto next_fut = std::move(fut).Then(
+            [&groups]() -> arrow::Result<LoopTaskGroup> {
+              ARROW_ASSIGN_OR_RAISE(auto group, groups.Next());
+              return group;
+            },
+            {}, top_options);
+        auto group_fut = std::move(next_fut).Then(
+            [task_options](const LoopTaskGroup& group) {
+              std::vector<arrow::Future<OperatorStatus>> task_futs;
+              for (auto& task_loop : group) {
+                task_futs.emplace_back(arrow::Future<OperatorStatus>::MakeFinished(
+                    OperatorStatus::RUNNING()));
+                for (size_t round = 0; round < task_loop.second; round++) {
+                  task_futs.back() =
+                      std::move(task_futs.back())
+                          .Then(
+                              [task_options, task = task_loop.first,
+                               round](const OperatorStatus& op_status)
+                                  -> arrow::Result<OperatorStatus> {
+                                if (op_status.code == OperatorStatusCode::CANCELLED) {
+                                  return arrow::Result<OperatorStatus>(
+                                      arrow::Status::Cancelled("Cancelled"));
+                                }
+                                if (op_status.code == OperatorStatusCode::ERROR) {
+                                  return arrow::Result<OperatorStatus>(op_status.status);
+                                }
+                                return arrow::Result<OperatorStatus>(task(round));
+                              },
+                              {}, task_options);
+                }
+              }
+              return arrow::All(task_futs);
+            },
+            {}, task_options);
+        fut = std::move(group_fut).Then(
+            [](const std::vector<arrow::Result<OperatorStatus>>& op_statuses) {
+              for (const auto& op_status_res : op_statuses) {
+                ARROW_ASSIGN_OR_RAISE(auto op_status, op_status_res);
+                if (op_status.code == OperatorStatusCode::CANCELLED) {
+                  return arrow::Status::Cancelled("Cancelled");
+                }
+                if (op_status.code == OperatorStatusCode::ERROR) {
+                  return op_status.status;
+                }
+              }
+              return arrow::Status::OK();
+            },
+            {}, arrow::CallbackOptions::Defaults());
+      }
+      return fut.status();
+    }
+
+   private:
+    arrow::internal::Executor* exec;
   };
 
   {
@@ -321,7 +406,22 @@ TEST(OperatorTest, HashJoinBuild) {
     HashJoinCase join_case(batch_size, num_build_batches, num_probe_batches, join_type,
                            dop);
     HashJoinBuildOperator join_build(join_case);
-    auto build_task_groups = join_build.Break(dop);
+    auto build_task_groups = [&]() {
+      auto build_task_groups = join_build.Break(dop);
+      ARROW_DCHECK_OK(build_task_groups.status());
+      return std::move(*build_task_groups);
+    }();
+    auto thread_pool = [&]() {
+      auto thread_pool = arrow::internal::ThreadPool::Make(num_threads);
+      ARROW_DCHECK_OK(thread_pool.status());
+      return *thread_pool;
+    }();
+    ARROW_DCHECK_OK(
+        FutureLoopTaskGroupsExecutor(thread_pool.get()).Execute(*build_task_groups));
+
+    auto join_impl = join_build.GetJoinImpl();
+    ARROW_DCHECK_OK(join_impl->ProbeSingleBatch(0, join_case.l_batches[0]));
+    ARROW_DCHECK_OK(join_impl->ProbingFinished(0));
   }
 }
 
