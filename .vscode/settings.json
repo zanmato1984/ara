@@ -86,6 +86,7 @@
         "thread": "cpp",
         "filesystem": "cpp",
         "coroutine": "cpp",
-        "typeindex": "cpp"
+        "typeindex": "cpp",
+        "*.ipp": "cpp"
     }
 }
