@@ -88,15 +88,15 @@ class Operator {
   virtual OperatorResult Push(size_t thread_id, const Batch& batch) {
     return {OperatorStatus::RUNNING(), {}};
   }
-  virtual arrow::Result<std::unique_ptr<LoopTaskGroups>> Break(size_t dop) {
+  virtual arrow::Result<std::shared_ptr<LoopTaskGroups>> Break(size_t thread_id) {
     return nullptr;
   }
-  virtual OperatorResult Finish(size_t thread_id) {
-    return {OperatorStatus::RUNNING(), {}};
+  virtual arrow::Result<std::shared_ptr<LoopTaskGroups>> Finish(size_t thread_id) {
+    return nullptr;
   }
 };
 
-TEST(OperatorTest, HashJoinBuild) {
+TEST(OperatorTest, HashJoinBreakAndFinish) {
   struct HashJoinCase {
     arrow::compute::JoinType join_type;
     size_t dop;
@@ -200,46 +200,45 @@ TEST(OperatorTest, HashJoinBuild) {
     }
   };
 
-  class BuildTaskGroups : public LoopTaskGroups {
-   public:
-    explicit BuildTaskGroups(arrow::compute::HashJoinImpl* join_impl,
-                             arrow::util::AccumulationQueue build_batches, size_t dop)
-        : join_impl(join_impl),
-          build_batches(std::move(build_batches)),
-          dop(dop),
-          current_build_task_group(-1),
-          current_num_build_tasks(0),
-          next_build_task_cont([this](size_t) {
-            return this->join_impl->BuildHashTable(
-                0, std::move(this->build_batches),
-                [&](size_t thread_index) { return arrow::Status::OK(); });
-          }) {}
+  using Task = std::function<arrow::Status(size_t, int64_t)>;
+  using TaskCont = std::function<arrow::Status(size_t)>;
+  using TaskGroup = std::pair<Task, TaskCont>;
 
-    size_t Size() override { return build_task_groups.size(); }
+  class HashJoinTaskGroups : public LoopTaskGroups {
+   public:
+    HashJoinTaskGroups(TaskCont entry, std::unordered_map<int, TaskGroup> task_groups,
+                       size_t dop)
+        : task_groups(std::move(task_groups)),
+          dop(dop),
+          current_entry(std::move(entry)),
+          current_task_group(-1),
+          current_num_tasks(0),
+          pos(0) {}
+
+    size_t Size() override { return task_groups.size() + 1; }
 
     arrow::Result<LoopTaskGroup> Next() override {
-      ARROW_RETURN_NOT_OK(next_build_task_cont(0));
-      auto it = build_task_groups.find(current_build_task_group);
-      ARROW_RETURN_IF(it == build_task_groups.end(),
+      ARROW_RETURN_NOT_OK(current_entry(0));
+      if (pos == task_groups.size()) {
+        return arrow::Result<LoopTaskGroup>(LoopTaskGroup{});
+      }
+      pos++;
+      auto it = task_groups.find(current_task_group);
+      ARROW_RETURN_IF(it == task_groups.end(),
                       arrow::Status::Invalid("Build task group not found"));
-      auto& build_task = it->second.first;
-      auto& build_task_cont = it->second.second;
+      auto& task = it->second.first;
+      current_entry = it->second.second;
 
       LoopTaskGroup task_group;
-      task_group.reserve(current_num_build_tasks);
-
       // Spread tasks across threads.
-      auto num_tasks_per_thread = (current_num_build_tasks + dop - 1) / dop;
-      for (size_t build_task_id = 0; build_task_id < current_num_build_tasks;
-           build_task_id += num_tasks_per_thread) {
+      auto num_tasks_per_thread = (current_num_tasks + dop - 1) / dop;
+      for (size_t task_id = 0; task_id < current_num_tasks;
+           task_id += num_tasks_per_thread) {
         auto thread_id = task_group.size();
-        auto num_tasks =
-            std::min(num_tasks_per_thread, current_num_build_tasks - build_task_id);
+        auto num_tasks = std::min(num_tasks_per_thread, current_num_tasks - task_id);
         task_group.emplace_back(
-            [build_task, build_task_cont, num_tasks_per_thread, build_task_id, thread_id,
-             num_tasks](size_t round) {
-              auto status =
-                  build_task(thread_id, thread_id * num_tasks_per_thread + round);
+            [task, num_tasks_per_thread, task_id, thread_id, num_tasks](size_t round) {
+              auto status = task(thread_id, thread_id * num_tasks_per_thread + round);
               if (status.ok()) {
                 return OperatorStatus::RUNNING();
               } else {
@@ -249,84 +248,108 @@ TEST(OperatorTest, HashJoinBuild) {
             num_tasks);
       }
 
-      next_build_task_cont = build_task_cont;
       return arrow::Result(std::move(task_group));
     }
 
-   private:
-    arrow::compute::HashJoinImpl* join_impl;
-    arrow::util::AccumulationQueue build_batches;
-
-   public:
-    using BuildTask = std::function<arrow::Status(size_t, int64_t)>;
-    using BuildTaskCont = std::function<arrow::Status(size_t)>;
-    using BuildTaskGroup = std::pair<BuildTask, BuildTaskCont>;
-
-    int RegisterTaskGroup(BuildTask build_task, BuildTaskCont build_task_cont) {
-      int id = build_task_groups.size();
-      build_task_groups.emplace(
-          id, std::make_pair(std::move(build_task), std::move(build_task_cont)));
-      return id;
-    }
-
-    arrow::Status StartTaskGroup(int build_task_group, int64_t num_build_tasks) {
-      current_build_task_group = build_task_group;
-      current_num_build_tasks = num_build_tasks;
+    arrow::Status StartTaskGroup(int task_group, int64_t num_tasks) {
+      current_task_group = task_group;
+      current_num_tasks = num_tasks;
       return arrow::Status::OK();
     }
 
    private:
+    std::unordered_map<int, TaskGroup> task_groups;
     const size_t dop;
-    std::unordered_map<int, BuildTaskGroup> build_task_groups;
-    int current_build_task_group;
-    int64_t current_num_build_tasks;
-    BuildTaskCont next_build_task_cont;
+
+    TaskCont current_entry;
+    int current_task_group;
+    int64_t current_num_tasks;
+    size_t pos;
   };
 
-  class HashJoinBuildOperator : public Operator {
+  class HashJoinTaskGroupDispatcher {
    public:
-    HashJoinBuildOperator(HashJoinCase& join_case)
-        : join_case(join_case), join_impl(nullptr) {}
-    ~HashJoinBuildOperator() override = default;
-
-    arrow::Result<std::unique_ptr<LoopTaskGroups>> Break(size_t dop) override {
-      auto join_impl_ = arrow::compute::HashJoinImpl::MakeSwiss();
-      ARROW_RETURN_NOT_OK(join_impl_);
-      join_impl = std::move(*join_impl_);
-      auto build_task_groups = std::make_unique<BuildTaskGroups>(
-          join_impl.get(), std::move(join_case.r_batches), dop);
-
-      using BuildTask = std::function<arrow::Status(size_t, int64_t)>;
-      using BuildTaskCont = std::function<arrow::Status(size_t)>;
-
-      ARROW_RETURN_NOT_OK(join_impl->Init(
-          join_case.ctx.get(), join_case.join_type, join_case.dop,
-          &(join_case.schema_mgr->proj_maps[0]), &(join_case.schema_mgr->proj_maps[1]),
-          std::move(join_case.key_cmp), std::move(join_case.filter),
-          [build_task_groups = build_task_groups.get()](
-              BuildTaskGroups::BuildTask build_task,
-              BuildTaskGroups::BuildTaskCont build_task_cont) {
-            return build_task_groups->RegisterTaskGroup(std::move(build_task),
-                                                        std::move(build_task_cont));
-          },
-          [build_task_groups = build_task_groups.get()](int build_task_group_id,
-                                                        int64_t num_build_tasks) {
-            return build_task_groups->StartTaskGroup(build_task_group_id,
-                                                     num_build_tasks);
-          },
-          [](int64_t thread_id, arrow::compute::ExecBatch batch) {
-            std::cout << batch.ToString() << std::endl;
-          },
-          [](int64_t x) {}));
-
-      return build_task_groups;
+    int RegisterTaskGroup(Task task, TaskCont task_cont) {
+      auto cur = n++;
+      auto task_group = std::make_pair(std::move(task), std::move(task_cont));
+      if (cur == 0) {
+        build_task_group = std::move(task_group);
+        return BUILD;
+      }
+      if (cur == 1) {
+        merge_task_group = std::move(task_group);
+        return MERGE;
+      }
+      if (cur == 2) {
+        scan_task_group = std::move(task_group);
+        return SCAN;
+      }
+      return -1;
     }
 
-    std::shared_ptr<arrow::compute::HashJoinImpl> GetJoinImpl() { return join_impl; }
+    arrow::Status StartTaskGroup(int task_group, int64_t num_tasks) {
+      if (task_group == BUILD || task_group == MERGE) {
+        return build_task_groups->StartTaskGroup(task_group, num_tasks);
+      }
+      if (task_group == SCAN) {
+        return probe_task_groups->StartTaskGroup(task_group, num_tasks);
+      }
+      return arrow::Status::UnknownError("Unknown task group");
+    }
+
+    void Seal(TaskCont build_entry, TaskCont probe_entry, size_t dop) {
+      {
+        std::unordered_map<int, TaskGroup> task_groups;
+        task_groups.emplace(BUILD, std::move(build_task_group));
+        task_groups.emplace(MERGE, std::move(merge_task_group));
+        build_task_groups = std::make_shared<HashJoinTaskGroups>(
+            std::move(build_entry), std::move(task_groups), dop);
+      }
+      {
+        std::unordered_map<int, TaskGroup> task_groups;
+        task_groups.emplace(SCAN, std::move(scan_task_group));
+        probe_task_groups = std::make_shared<HashJoinTaskGroups>(
+            std::move(probe_entry), std::move(task_groups), dop);
+      }
+    }
+
+    std::shared_ptr<LoopTaskGroups> BuilTaskGroups() { return build_task_groups; }
+
+    std::shared_ptr<LoopTaskGroups> ProbeTaskGroups() { return probe_task_groups; }
 
    private:
-    HashJoinCase& join_case;
-    std::shared_ptr<arrow::compute::HashJoinImpl> join_impl;
+    enum HashJoinTaskGroupType : int {
+      BUILD,
+      MERGE,
+      SCAN,
+    };
+
+    size_t n = 0;
+    TaskGroup build_task_group;
+    TaskGroup merge_task_group;
+    TaskGroup scan_task_group;
+
+    std::shared_ptr<HashJoinTaskGroups> build_task_groups = nullptr;
+    std::shared_ptr<HashJoinTaskGroups> probe_task_groups = nullptr;
+  };
+
+  class HashJoinOperator : public Operator {
+   public:
+    HashJoinOperator(std::shared_ptr<HashJoinTaskGroupDispatcher> dispatcher)
+        : dispatcher(std::move(dispatcher)) {}
+
+    ~HashJoinOperator() override = default;
+
+    arrow::Result<std::shared_ptr<LoopTaskGroups>> Break(size_t thread_id) override {
+      return dispatcher->BuilTaskGroups();
+    }
+
+    arrow::Result<std::shared_ptr<LoopTaskGroups>> Finish(size_t thread_id) override {
+      return dispatcher->ProbeTaskGroups();
+    }
+
+   private:
+    std::shared_ptr<HashJoinTaskGroupDispatcher> dispatcher;
   };
 
   class FutureLoopTaskGroupsExecutor : public LoopTaskGroupsExecutor {
@@ -334,9 +357,7 @@ TEST(OperatorTest, HashJoinBuild) {
     FutureLoopTaskGroupsExecutor(arrow::internal::Executor* exec) : exec(exec) {}
 
     arrow::Status Execute(LoopTaskGroups& groups) override {
-      arrow::CallbackOptions top_options{arrow::ShouldSchedule::Always, exec};
-      arrow::CallbackOptions task_options{arrow::ShouldSchedule::IfDifferentExecutor,
-                                          exec};
+      arrow::CallbackOptions options{arrow::ShouldSchedule::Always, exec};
       auto fut = arrow::Future<>::MakeFinished();
       for (size_t i = 0; i < groups.Size(); i++) {
         auto next_fut = std::move(fut).Then(
@@ -344,9 +365,9 @@ TEST(OperatorTest, HashJoinBuild) {
               ARROW_ASSIGN_OR_RAISE(auto group, groups.Next());
               return group;
             },
-            {}, top_options);
+            {}, options);
         auto group_fut = std::move(next_fut).Then(
-            [task_options](const LoopTaskGroup& group) {
+            [options](const LoopTaskGroup& group) {
               std::vector<arrow::Future<OperatorStatus>> task_futs;
               for (auto& task_loop : group) {
                 task_futs.emplace_back(arrow::Future<OperatorStatus>::MakeFinished(
@@ -355,7 +376,7 @@ TEST(OperatorTest, HashJoinBuild) {
                   task_futs.back() =
                       std::move(task_futs.back())
                           .Then(
-                              [task_options, task = task_loop.first,
+                              [options, task = task_loop.first,
                                round](const OperatorStatus& op_status)
                                   -> arrow::Result<OperatorStatus> {
                                 if (op_status.code == OperatorStatusCode::CANCELLED) {
@@ -367,12 +388,12 @@ TEST(OperatorTest, HashJoinBuild) {
                                 }
                                 return arrow::Result<OperatorStatus>(task(round));
                               },
-                              {}, task_options);
+                              {}, options);
                 }
               }
               return arrow::All(task_futs);
             },
-            {}, task_options);
+            {}, options);
         fut = std::move(group_fut).Then(
             [](const std::vector<arrow::Result<OperatorStatus>>& op_statuses) {
               for (const auto& op_status_res : op_statuses) {
@@ -386,7 +407,7 @@ TEST(OperatorTest, HashJoinBuild) {
               }
               return arrow::Status::OK();
             },
-            {}, arrow::CallbackOptions::Defaults());
+            {}, options);
       }
       return fut.status();
     }
@@ -405,23 +426,66 @@ TEST(OperatorTest, HashJoinBuild) {
 
     HashJoinCase join_case(batch_size, num_build_batches, num_probe_batches, join_type,
                            dop);
-    HashJoinBuildOperator join_build(join_case);
-    auto build_task_groups = [&]() {
-      auto build_task_groups = join_build.Break(dop);
-      ARROW_DCHECK_OK(build_task_groups.status());
-      return std::move(*build_task_groups);
+
+    auto dispatcher = std::make_shared<HashJoinTaskGroupDispatcher>();
+
+    auto join_impl = []() {
+      auto join_impl = arrow::compute::HashJoinImpl::MakeSwiss();
+      ARROW_DCHECK_OK(join_impl.status());
+      return std::move(*join_impl);
     }();
+    ARROW_DCHECK_OK(join_impl->Init(
+        join_case.ctx.get(), join_case.join_type, join_case.dop,
+        &(join_case.schema_mgr->proj_maps[0]), &(join_case.schema_mgr->proj_maps[1]),
+        std::move(join_case.key_cmp), std::move(join_case.filter),
+        [&](Task task, TaskCont task_cont) {
+          return dispatcher->RegisterTaskGroup(std::move(task), std::move(task_cont));
+        },
+        [&](int task_group_id, int64_t num_tasks) {
+          return dispatcher->StartTaskGroup(task_group_id, num_tasks);
+        },
+        [](int64_t thread_id, arrow::compute::ExecBatch batch) {
+          std::cout << batch.ToString() << std::endl;
+        },
+        [](int64_t x) {}));
+
+    dispatcher->Seal(
+        [&](int64_t thread_id) {
+          return join_impl->BuildHashTable(thread_id, std::move(join_case.r_batches),
+                                           [&](size_t) { return arrow::Status::OK(); });
+        },
+        [&](int64_t thread_id) { return join_impl->ProbingFinished(thread_id); }, dop);
+
+    HashJoinOperator join(dispatcher);
+
     auto thread_pool = [&]() {
       auto thread_pool = arrow::internal::ThreadPool::Make(num_threads);
       ARROW_DCHECK_OK(thread_pool.status());
       return *thread_pool;
     }();
-    ARROW_DCHECK_OK(
-        FutureLoopTaskGroupsExecutor(thread_pool.get()).Execute(*build_task_groups));
+    FutureLoopTaskGroupsExecutor executor(thread_pool.get());
 
-    auto join_impl = join_build.GetJoinImpl();
-    ARROW_DCHECK_OK(join_impl->ProbeSingleBatch(0, join_case.l_batches[0]));
-    ARROW_DCHECK_OK(join_impl->ProbingFinished(0));
+    {
+      auto build_task_groups = [&]() {
+        auto build_task_groups = join.Break(0);
+        ARROW_DCHECK_OK(build_task_groups.status());
+        return *build_task_groups;
+      }();
+      ARROW_DCHECK_OK(executor.Execute(*build_task_groups));
+    }
+
+    for (size_t i = 0; i < join_case.l_batches.batch_count(); i++) {
+      ARROW_DCHECK_OK(join_impl->ProbeSingleBatch(0, join_case.l_batches[i]));
+    }
+
+    {
+      auto probe_task_groups = [&]() {
+        auto probe_task_groups = join.Finish(0);
+        ARROW_DCHECK_OK(probe_task_groups.status());
+        return *probe_task_groups;
+      }();
+      ARROW_DCHECK_OK(executor.Execute(*probe_task_groups));
+    }
   }
 }
 
