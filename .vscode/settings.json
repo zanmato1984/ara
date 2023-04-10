@@ -87,6 +87,12 @@
         "filesystem": "cpp",
         "coroutine": "cpp",
         "typeindex": "cpp",
-        "*.ipp": "cpp"
+        "*.ipp": "cpp",
+        "__std_stream": "cpp",
+        "cfenv": "cpp",
+        "forward_list": "cpp",
+        "numbers": "cpp",
+        "semaphore": "cpp",
+        "strstream": "cpp"
     }
 }
