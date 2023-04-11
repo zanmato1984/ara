@@ -81,6 +81,70 @@ class LoopTaskGroupsExecutor {
   virtual arrow::Status Execute(LoopTaskGroups& groups) = 0;
 };
 
+class FutureLoopTaskGroupsExecutor : public LoopTaskGroupsExecutor {
+ public:
+  FutureLoopTaskGroupsExecutor(arrow::internal::Executor* exec) : exec(exec) {}
+
+  arrow::Status Execute(LoopTaskGroups& groups) override {
+    arrow::CallbackOptions options{arrow::ShouldSchedule::Always, exec};
+    auto fut = arrow::Future<>::MakeFinished();
+    for (size_t i = 0; i < groups.Size(); i++) {
+      auto next_fut = std::move(fut).Then(
+          [&groups]() -> arrow::Result<LoopTaskGroup> {
+            ARROW_ASSIGN_OR_RAISE(auto group, groups.Next());
+            return group;
+          },
+          {}, options);
+      auto group_fut = std::move(next_fut).Then(
+          [options](const LoopTaskGroup& group) {
+            std::vector<arrow::Future<OperatorStatus>> task_futs;
+            for (auto& task_loop : group) {
+              task_futs.emplace_back(
+                  arrow::Future<OperatorStatus>::MakeFinished(OperatorStatus::RUNNING()));
+              for (size_t round = 0; round < task_loop.second; round++) {
+                task_futs.back() =
+                    std::move(task_futs.back())
+                        .Then(
+                            [options, task = task_loop.first,
+                             round](const OperatorStatus& op_status)
+                                -> arrow::Result<OperatorStatus> {
+                              if (op_status.code == OperatorStatusCode::CANCELLED) {
+                                return arrow::Result<OperatorStatus>(
+                                    arrow::Status::Cancelled("Cancelled"));
+                              }
+                              if (op_status.code == OperatorStatusCode::ERROR) {
+                                return arrow::Result<OperatorStatus>(op_status.status);
+                              }
+                              return arrow::Result<OperatorStatus>(task(round));
+                            },
+                            {}, options);
+              }
+            }
+            return arrow::All(task_futs);
+          },
+          {}, options);
+      fut = std::move(group_fut).Then(
+          [](const std::vector<arrow::Result<OperatorStatus>>& op_statuses) {
+            for (const auto& op_status_res : op_statuses) {
+              ARROW_ASSIGN_OR_RAISE(auto op_status, op_status_res);
+              if (op_status.code == OperatorStatusCode::CANCELLED) {
+                return arrow::Status::Cancelled("Cancelled");
+              }
+              if (op_status.code == OperatorStatusCode::ERROR) {
+                return op_status.status;
+              }
+            }
+            return arrow::Status::OK();
+          },
+          {}, options);
+    }
+    return fut.status();
+  }
+
+ private:
+  arrow::internal::Executor* exec;
+};
+
 class Operator {
  public:
   virtual ~Operator() = default;
@@ -127,8 +191,8 @@ TEST(OperatorTest, HashJoinBreakAndFinish) {
         std::string l_name = "lk" + std::to_string(i);
         std::string r_name = "rk" + std::to_string(i);
 
-        // For integers, selectivity is the proportion of the build interval that overlaps
-        // with the probe interval
+        // For integers, selectivity is the proportion of the build interval that
+        // overlaps with the probe interval
         uint64_t num_build_rows = num_build_batches * batch_size;
 
         uint64_t min_build_value = 0;
@@ -352,70 +416,6 @@ TEST(OperatorTest, HashJoinBreakAndFinish) {
     std::shared_ptr<HashJoinTaskGroupDispatcher> dispatcher;
   };
 
-  class FutureLoopTaskGroupsExecutor : public LoopTaskGroupsExecutor {
-   public:
-    FutureLoopTaskGroupsExecutor(arrow::internal::Executor* exec) : exec(exec) {}
-
-    arrow::Status Execute(LoopTaskGroups& groups) override {
-      arrow::CallbackOptions options{arrow::ShouldSchedule::Always, exec};
-      auto fut = arrow::Future<>::MakeFinished();
-      for (size_t i = 0; i < groups.Size(); i++) {
-        auto next_fut = std::move(fut).Then(
-            [&groups]() -> arrow::Result<LoopTaskGroup> {
-              ARROW_ASSIGN_OR_RAISE(auto group, groups.Next());
-              return group;
-            },
-            {}, options);
-        auto group_fut = std::move(next_fut).Then(
-            [options](const LoopTaskGroup& group) {
-              std::vector<arrow::Future<OperatorStatus>> task_futs;
-              for (auto& task_loop : group) {
-                task_futs.emplace_back(arrow::Future<OperatorStatus>::MakeFinished(
-                    OperatorStatus::RUNNING()));
-                for (size_t round = 0; round < task_loop.second; round++) {
-                  task_futs.back() =
-                      std::move(task_futs.back())
-                          .Then(
-                              [options, task = task_loop.first,
-                               round](const OperatorStatus& op_status)
-                                  -> arrow::Result<OperatorStatus> {
-                                if (op_status.code == OperatorStatusCode::CANCELLED) {
-                                  return arrow::Result<OperatorStatus>(
-                                      arrow::Status::Cancelled("Cancelled"));
-                                }
-                                if (op_status.code == OperatorStatusCode::ERROR) {
-                                  return arrow::Result<OperatorStatus>(op_status.status);
-                                }
-                                return arrow::Result<OperatorStatus>(task(round));
-                              },
-                              {}, options);
-                }
-              }
-              return arrow::All(task_futs);
-            },
-            {}, options);
-        fut = std::move(group_fut).Then(
-            [](const std::vector<arrow::Result<OperatorStatus>>& op_statuses) {
-              for (const auto& op_status_res : op_statuses) {
-                ARROW_ASSIGN_OR_RAISE(auto op_status, op_status_res);
-                if (op_status.code == OperatorStatusCode::CANCELLED) {
-                  return arrow::Status::Cancelled("Cancelled");
-                }
-                if (op_status.code == OperatorStatusCode::ERROR) {
-                  return op_status.status;
-                }
-              }
-              return arrow::Status::OK();
-            },
-            {}, options);
-      }
-      return fut.status();
-    }
-
-   private:
-    arrow::internal::Executor* exec;
-  };
-
   {
     int batch_size = 4096;
     int num_build_batches = 128;
@@ -489,7 +489,9 @@ TEST(OperatorTest, HashJoinBreakAndFinish) {
   }
 }
 
-// TODO: Case about chaining Push methods in a pipeline.
+TEST(OperatorTest, PushAndFinish) {
+
+}
 
 // TODO: Case about operator ping-pong between RUNNING and SPILLING states.
 
