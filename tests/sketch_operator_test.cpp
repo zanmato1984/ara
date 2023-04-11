@@ -57,33 +57,59 @@ struct OperatorStatus {
 struct Batch {
   int value = 0;
 };
+using Batches = std::vector<Batch>;
 
 struct OperatorResult {
   OperatorStatus status;
-  std::optional<Batch> batch;
+  std::optional<Batches> batches;
 };
 
 using LoopTask = std::function<OperatorStatus(size_t /*round*/)>;
 using LoopTaskGroup = std::vector<std::pair<LoopTask, size_t /*rounds to loop*/>>;
 
-class LoopTaskGroups {
+using PipelineTask =
+    std::function<OperatorResult(size_t /*thread id*/, size_t /*task id*/, const Batch&)>;
+using PipelineTaskGroup = std::pair<PipelineTask, size_t /*tasks*/>;
+
+template <typename T>
+class TaskGroups {
  public:
-  virtual ~LoopTaskGroups() = default;
+  virtual ~TaskGroups() = default;
 
   virtual size_t Size() = 0;
-  virtual arrow::Result<LoopTaskGroup> Next() = 0;
+  virtual arrow::Result<T> Next() = 0;
 };
 
-class LoopTaskGroupsExecutor {
+using LoopTaskGroups = TaskGroups<LoopTaskGroup>;
+using PipelineTaskGroups = TaskGroups<PipelineTaskGroup>;
+
+class TaskGroupsExecutor {
  public:
-  virtual ~LoopTaskGroupsExecutor() = default;
+  virtual ~TaskGroupsExecutor() = default;
 
   virtual arrow::Status Execute(LoopTaskGroups& groups) = 0;
+
+  virtual arrow::Status Execute(PipelineTaskGroups& groups, size_t dop) = 0;
 };
 
-class FutureLoopTaskGroupsExecutor : public LoopTaskGroupsExecutor {
+class Operator {
  public:
-  FutureLoopTaskGroupsExecutor(arrow::internal::Executor* exec) : exec(exec) {}
+  virtual ~Operator() = default;
+
+  virtual OperatorResult Push(size_t thread_id, const Batch& batch) {
+    return {OperatorStatus::RUNNING(), {}};
+  }
+
+  virtual arrow::Result<std::unique_ptr<LoopTaskGroups>> Break(size_t thread_id) {
+    return nullptr;
+  }
+
+  virtual arrow::Result<std::unique_ptr<PipelineTaskGroups>> Finish() { return nullptr; }
+};
+
+class FutureTaskGroupsExecutor : public TaskGroupsExecutor {
+ public:
+  FutureTaskGroupsExecutor(arrow::internal::Executor* exec) : exec(exec) {}
 
   arrow::Status Execute(LoopTaskGroups& groups) override {
     arrow::CallbackOptions options{arrow::ShouldSchedule::Always, exec};
@@ -105,7 +131,7 @@ class FutureLoopTaskGroupsExecutor : public LoopTaskGroupsExecutor {
                 task_futs.back() =
                     std::move(task_futs.back())
                         .Then(
-                            [options, task = task_loop.first,
+                            [task = task_loop.first,
                              round](const OperatorStatus& op_status)
                                 -> arrow::Result<OperatorStatus> {
                               if (op_status.code == OperatorStatusCode::CANCELLED) {
@@ -141,25 +167,85 @@ class FutureLoopTaskGroupsExecutor : public LoopTaskGroupsExecutor {
     return fut.status();
   }
 
+  arrow::Status Execute(PipelineTaskGroups& groups, size_t dop) override {
+    arrow::CallbackOptions options{arrow::ShouldSchedule::Always, exec};
+    std::atomic<size_t> num_rows{0};
+    auto fut = arrow::Future<>::MakeFinished();
+    for (size_t i = 0; i < groups.Size(); i++) {
+      auto next_fut = std::move(fut).Then(
+          [&groups]() -> arrow::Result<PipelineTaskGroup> {
+            ARROW_ASSIGN_OR_RAISE(auto group, groups.Next());
+            return group;
+          },
+          {}, options);
+      auto group_fut = std::move(next_fut).Then(
+          [options, &num_rows, dop](const PipelineTaskGroup& group) {
+            auto task = group.first;
+            auto num_tasks = group.second;
+            std::vector<arrow::Future<OperatorStatus>> task_futs;
+            for (size_t task_id = 0; task_id < num_tasks;) {
+              for (size_t thread_id = 0; thread_id < dop && task_id < num_tasks;
+                   thread_id++, task_id++) {
+                if (task_id == thread_id) {
+                  task_futs.emplace_back(arrow::Future<OperatorStatus>::MakeFinished(
+                      OperatorStatus::RUNNING()));
+                }
+                task_futs.back() =
+                    std::move(task_futs.back())
+                        .Then(
+                            [&num_rows, task, task_id,
+                             thread_id](const OperatorStatus& op_status)
+                                -> arrow::Result<OperatorStatus> {
+                              if (op_status.code == OperatorStatusCode::CANCELLED) {
+                                return arrow::Result<OperatorStatus>(
+                                    arrow::Status::Cancelled("Cancelled"));
+                              }
+                              if (op_status.code == OperatorStatusCode::ERROR) {
+                                return arrow::Result<OperatorStatus>(op_status.status);
+                              }
+                              auto batches = task(thread_id, task_id, {});
+                              if (batches.status.code == OperatorStatusCode::RUNNING) {
+                                auto sum = std::accumulate(
+                                    batches.batches.value().begin(),
+                                    batches.batches.value().end(), size_t(0),
+                                    [](size_t acc, const Batch& batch) {
+                                      return acc + batch.value;
+                                    });
+                                num_rows += sum;
+                              }
+                              return batches.status;
+                            },
+                            {}, options);
+              }
+            }
+            return arrow::All(task_futs);
+          },
+          {}, options);
+      fut = std::move(group_fut).Then(
+          [](const std::vector<arrow::Result<OperatorStatus>>& op_statuses) {
+            for (const auto& op_status_res : op_statuses) {
+              ARROW_ASSIGN_OR_RAISE(auto op_status, op_status_res);
+              if (op_status.code == OperatorStatusCode::CANCELLED) {
+                return arrow::Status::Cancelled("Cancelled");
+              }
+              if (op_status.code == OperatorStatusCode::ERROR) {
+                return op_status.status;
+              }
+            }
+            return arrow::Status::OK();
+          },
+          {}, options);
+    }
+    auto status = fut.status();
+    std::cout << "Row count: " << num_rows << std::endl;
+    return status;
+  }
+
  private:
   arrow::internal::Executor* exec;
 };
 
-class Operator {
- public:
-  virtual ~Operator() = default;
-
-  virtual OperatorResult Push(size_t thread_id, const Batch& batch) {
-    return {OperatorStatus::RUNNING(), {}};
-  }
-  virtual arrow::Result<std::shared_ptr<LoopTaskGroups>> Break(size_t thread_id) {
-    return nullptr;
-  }
-  virtual arrow::Result<std::shared_ptr<LoopTaskGroups>> Finish(size_t thread_id) {
-    return nullptr;
-  }
-};
-
+// TODO: Result wrong, expected 524288, got 491520, diff 32768.
 TEST(OperatorTest, HashJoinBreakAndFinish) {
   struct HashJoinCase {
     arrow::compute::JoinType join_type;
@@ -268,10 +354,10 @@ TEST(OperatorTest, HashJoinBreakAndFinish) {
   using TaskCont = std::function<arrow::Status(size_t)>;
   using TaskGroup = std::pair<Task, TaskCont>;
 
-  class HashJoinTaskGroups : public LoopTaskGroups {
+  class HashJoinBuildTaskGroups : public LoopTaskGroups {
    public:
-    HashJoinTaskGroups(TaskCont entry, std::unordered_map<int, TaskGroup> task_groups,
-                       size_t dop)
+    HashJoinBuildTaskGroups(TaskCont entry,
+                            std::unordered_map<int, TaskGroup> task_groups, size_t dop)
         : task_groups(std::move(task_groups)),
           dop(dop),
           current_entry(std::move(entry)),
@@ -305,9 +391,11 @@ TEST(OperatorTest, HashJoinBreakAndFinish) {
               auto status = task(thread_id, thread_id * num_tasks_per_thread + round);
               if (status.ok()) {
                 return OperatorStatus::RUNNING();
-              } else {
-                return OperatorStatus::ERROR(std::move(status));
               }
+              if (status.IsCancelled()) {
+                return OperatorStatus::CANCELLED();
+              }
+              return OperatorStatus::ERROR(std::move(status));
             },
             num_tasks);
       }
@@ -324,6 +412,82 @@ TEST(OperatorTest, HashJoinBreakAndFinish) {
    private:
     std::unordered_map<int, TaskGroup> task_groups;
     const size_t dop;
+
+    TaskCont current_entry;
+    int current_task_group;
+    int64_t current_num_tasks;
+    size_t pos;
+  };
+
+  class HashJoinProbeResultHolder {
+   public:
+    HashJoinProbeResultHolder(size_t dop) : holder(dop) {}
+
+    void Emplace(size_t thread_id, arrow::compute::ExecBatch batch) {
+      // std::cout << "Thread " << thread_id << ": " << batch.ToString() << std::endl;
+      holder[thread_id].emplace_back(Batch{static_cast<int>(batch.length)});
+    }
+
+    Batches GetBatches(size_t thread_id) { return std::move(holder[thread_id]); }
+
+   private:
+    std::vector<Batches> holder;
+  };
+
+  class HashJoinProbeTaskGroups : public PipelineTaskGroups {
+   public:
+    HashJoinProbeTaskGroups(TaskCont entry,
+                            std::unordered_map<int, TaskGroup> task_groups, size_t dop,
+                            HashJoinProbeResultHolder& holder)
+        : task_groups(std::move(task_groups)),
+          dop(dop),
+          holder(holder),
+          current_entry(std::move(entry)),
+          current_task_group(-1),
+          current_num_tasks(0),
+          pos(0) {}
+
+    size_t Size() override { return task_groups.size() + 1; }
+
+    arrow::Result<PipelineTaskGroup> Next() override {
+      ARROW_RETURN_NOT_OK(current_entry(0));
+      if (pos == task_groups.size()) {
+        return arrow::Result<PipelineTaskGroup>(PipelineTaskGroup{});
+      }
+      pos++;
+      auto it = task_groups.find(current_task_group);
+      ARROW_RETURN_IF(it == task_groups.end(),
+                      arrow::Status::Invalid("Build task group not found"));
+      auto& task = it->second.first;
+      current_entry = it->second.second;
+
+      auto pipeline_task = [task, &holder = this->holder](
+                               size_t thread_id, size_t task_id,
+                               const Batch&) -> OperatorResult {
+        auto status = task(thread_id, task_id);
+        if (status.ok()) {
+          return {OperatorStatus::RUNNING(), holder.GetBatches(thread_id)};
+        }
+        if (status.IsCancelled()) {
+          return {OperatorStatus::CANCELLED(), {}};
+        }
+        return {OperatorStatus::ERROR(std::move(status)), {}};
+      };
+      PipelineTaskGroup task_group{std::move(pipeline_task), current_num_tasks};
+
+      return arrow::Result(std::move(task_group));
+    }
+
+    arrow::Status StartTaskGroup(int task_group, int64_t num_tasks) {
+      current_task_group = task_group;
+      current_num_tasks = num_tasks;
+      return arrow::Status::OK();
+    }
+
+   private:
+    std::unordered_map<int, TaskGroup> task_groups;
+    const size_t dop;
+    HashJoinProbeResultHolder& holder;
 
     TaskCont current_entry;
     int current_task_group;
@@ -361,25 +525,32 @@ TEST(OperatorTest, HashJoinBreakAndFinish) {
       return arrow::Status::UnknownError("Unknown task group");
     }
 
-    void Seal(TaskCont build_entry, TaskCont probe_entry, size_t dop) {
+    void Seal(TaskCont build_entry, TaskCont probe_entry, size_t dop,
+              HashJoinProbeResultHolder& holder) {
       {
         std::unordered_map<int, TaskGroup> task_groups;
         task_groups.emplace(BUILD, std::move(build_task_group));
         task_groups.emplace(MERGE, std::move(merge_task_group));
-        build_task_groups = std::make_shared<HashJoinTaskGroups>(
+        build_task_groups_unique = std::make_unique<HashJoinBuildTaskGroups>(
             std::move(build_entry), std::move(task_groups), dop);
+        build_task_groups = build_task_groups_unique.get();
       }
       {
         std::unordered_map<int, TaskGroup> task_groups;
         task_groups.emplace(SCAN, std::move(scan_task_group));
-        probe_task_groups = std::make_shared<HashJoinTaskGroups>(
-            std::move(probe_entry), std::move(task_groups), dop);
+        probe_task_groups_unique = std::make_unique<HashJoinProbeTaskGroups>(
+            std::move(probe_entry), std::move(task_groups), dop, holder);
+        probe_task_groups = probe_task_groups_unique.get();
       }
     }
 
-    std::shared_ptr<LoopTaskGroups> BuilTaskGroups() { return build_task_groups; }
+    std::unique_ptr<LoopTaskGroups> BuilTaskGroups() {
+      return std::move(build_task_groups_unique);
+    }
 
-    std::shared_ptr<LoopTaskGroups> ProbeTaskGroups() { return probe_task_groups; }
+    std::unique_ptr<PipelineTaskGroups> ProbeTaskGroups() {
+      return std::move(probe_task_groups_unique);
+    }
 
    private:
     enum HashJoinTaskGroupType : int {
@@ -393,8 +564,10 @@ TEST(OperatorTest, HashJoinBreakAndFinish) {
     TaskGroup merge_task_group;
     TaskGroup scan_task_group;
 
-    std::shared_ptr<HashJoinTaskGroups> build_task_groups = nullptr;
-    std::shared_ptr<HashJoinTaskGroups> probe_task_groups = nullptr;
+    std::unique_ptr<HashJoinBuildTaskGroups> build_task_groups_unique = nullptr;
+    std::unique_ptr<HashJoinProbeTaskGroups> probe_task_groups_unique = nullptr;
+    HashJoinBuildTaskGroups* build_task_groups = nullptr;
+    HashJoinProbeTaskGroups* probe_task_groups = nullptr;
   };
 
   class HashJoinOperator : public Operator {
@@ -404,11 +577,11 @@ TEST(OperatorTest, HashJoinBreakAndFinish) {
 
     ~HashJoinOperator() override = default;
 
-    arrow::Result<std::shared_ptr<LoopTaskGroups>> Break(size_t thread_id) override {
+    arrow::Result<std::unique_ptr<LoopTaskGroups>> Break(size_t thread_id) override {
       return dispatcher->BuilTaskGroups();
     }
 
-    arrow::Result<std::shared_ptr<LoopTaskGroups>> Finish(size_t thread_id) override {
+    arrow::Result<std::unique_ptr<PipelineTaskGroups>> Finish() override {
       return dispatcher->ProbeTaskGroups();
     }
 
@@ -427,7 +600,11 @@ TEST(OperatorTest, HashJoinBreakAndFinish) {
     HashJoinCase join_case(batch_size, num_build_batches, num_probe_batches, join_type,
                            dop);
 
+    std::cout << "Build row count: " << join_case.r_batches.row_count() << std::endl;
+    std::cout << "Probe row count: " << join_case.l_batches.row_count() << std::endl;
+
     auto dispatcher = std::make_shared<HashJoinTaskGroupDispatcher>();
+    HashJoinProbeResultHolder holder(dop);
 
     auto join_impl = []() {
       auto join_impl = arrow::compute::HashJoinImpl::MakeSwiss();
@@ -444,8 +621,8 @@ TEST(OperatorTest, HashJoinBreakAndFinish) {
         [&](int task_group_id, int64_t num_tasks) {
           return dispatcher->StartTaskGroup(task_group_id, num_tasks);
         },
-        [](int64_t thread_id, arrow::compute::ExecBatch batch) {
-          std::cout << batch.ToString() << std::endl;
+        [&](int64_t thread_id, arrow::compute::ExecBatch batch) {
+          holder.Emplace(thread_id, std::move(batch));
         },
         [](int64_t x) {}));
 
@@ -454,7 +631,8 @@ TEST(OperatorTest, HashJoinBreakAndFinish) {
           return join_impl->BuildHashTable(thread_id, std::move(join_case.r_batches),
                                            [&](size_t) { return arrow::Status::OK(); });
         },
-        [&](int64_t thread_id) { return join_impl->ProbingFinished(thread_id); }, dop);
+        [&](int64_t thread_id) { return join_impl->ProbingFinished(thread_id); }, dop,
+        holder);
 
     HashJoinOperator join(dispatcher);
 
@@ -463,34 +641,55 @@ TEST(OperatorTest, HashJoinBreakAndFinish) {
       ARROW_DCHECK_OK(thread_pool.status());
       return *thread_pool;
     }();
-    FutureLoopTaskGroupsExecutor executor(thread_pool.get());
+    FutureTaskGroupsExecutor executor(thread_pool.get());
 
     {
       auto build_task_groups = [&]() {
         auto build_task_groups = join.Break(0);
         ARROW_DCHECK_OK(build_task_groups.status());
-        return *build_task_groups;
+        return std::move(*build_task_groups);
       }();
       ARROW_DCHECK_OK(executor.Execute(*build_task_groups));
     }
 
-    for (size_t i = 0; i < join_case.l_batches.batch_count(); i++) {
-      ARROW_DCHECK_OK(join_impl->ProbeSingleBatch(0, join_case.l_batches[i]));
-    }
+    // for (size_t i = 0; i < join_case.l_batches.batch_count(); i++) {
+    //   ARROW_DCHECK_OK(join_impl->ProbeSingleBatch(0, join_case.l_batches[i]));
+    // }
 
     {
       auto probe_task_groups = [&]() {
-        auto probe_task_groups = join.Finish(0);
+        auto probe_task_groups = join.Finish();
         ARROW_DCHECK_OK(probe_task_groups.status());
-        return *probe_task_groups;
+        return std::move(*probe_task_groups);
       }();
-      ARROW_DCHECK_OK(executor.Execute(*probe_task_groups));
+      ARROW_DCHECK_OK(executor.Execute(*probe_task_groups, dop));
     }
   }
 }
 
 TEST(OperatorTest, PushAndFinish) {
+  // class PushAndFinishOperator : public Operator {
+  //  public:
+  //   ~PushAndFinishOperator() override = default;
 
+  //  OperatorResult Push(size_t thread_id, const Batch& batch) override {
+  //   return {OperatorStatus::RUNNING(), {}};
+  // }
+
+  //   arrow::Result<std::shared_ptr<LoopTaskGroups>> Finish() override {
+  //     return nullptr;
+  //   }
+  // };
+
+  // {
+  //   PushAndFinishOperator op;
+  //   auto task_groups = op.Break(0);
+  //   ASSERT_TRUE(task_groups.ok());
+  //   ASSERT_EQ(task_groups.ValueOrDie(), nullptr);
+  //   task_groups = op.Finish(0);
+  //   ASSERT_TRUE(task_groups.ok());
+  //   ASSERT_EQ(task_groups.ValueOrDie(), nullptr);
+  // }
 }
 
 // TODO: Case about operator ping-pong between RUNNING and SPILLING states.
