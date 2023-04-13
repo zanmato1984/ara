@@ -125,7 +125,7 @@ class FutureTaskGroupsExecutor : public TaskGroupsExecutor {
           [options](const LoopTaskGroup& group) {
             std::vector<arrow::Future<OperatorStatus>> task_futs;
             for (auto& task_loop : group) {
-              task_futs.emplace_back(
+              task_futs.push_back(
                   arrow::Future<OperatorStatus>::MakeFinished(OperatorStatus::RUNNING()));
               for (size_t round = 0; round < task_loop.second; round++) {
                 task_futs.back() =
@@ -187,7 +187,7 @@ class FutureTaskGroupsExecutor : public TaskGroupsExecutor {
               for (size_t thread_id = 0; thread_id < dop && task_id < num_tasks;
                    thread_id++, task_id++) {
                 if (task_id == thread_id) {
-                  task_futs.emplace_back(arrow::Future<OperatorStatus>::MakeFinished(
+                  task_futs.push_back(arrow::Future<OperatorStatus>::MakeFinished(
                       OperatorStatus::RUNNING()));
                 }
                 task_futs.back() =
@@ -245,7 +245,6 @@ class FutureTaskGroupsExecutor : public TaskGroupsExecutor {
   arrow::internal::Executor* exec;
 };
 
-// TODO: Result wrong, expected 524288, got 491520, diff 32768.
 TEST(OperatorTest, HashJoinBreakAndFinish) {
   struct HashJoinCase {
     arrow::compute::JoinType join_type;
@@ -386,7 +385,7 @@ TEST(OperatorTest, HashJoinBreakAndFinish) {
            task_id += num_tasks_per_thread) {
         auto thread_id = task_group.size();
         auto num_tasks = std::min(num_tasks_per_thread, current_num_tasks - task_id);
-        task_group.emplace_back(
+        task_group.push_back(std::pair(
             [task, num_tasks_per_thread, task_id, thread_id, num_tasks](size_t round) {
               auto status = task(thread_id, thread_id * num_tasks_per_thread + round);
               if (status.ok()) {
@@ -397,7 +396,7 @@ TEST(OperatorTest, HashJoinBreakAndFinish) {
               }
               return OperatorStatus::ERROR(std::move(status));
             },
-            num_tasks);
+            num_tasks));
       }
 
       return arrow::Result(std::move(task_group));
@@ -425,7 +424,7 @@ TEST(OperatorTest, HashJoinBreakAndFinish) {
 
     void Emplace(size_t thread_id, arrow::compute::ExecBatch batch) {
       // std::cout << "Thread " << thread_id << ": " << batch.ToString() << std::endl;
-      holder[thread_id].emplace_back(Batch{static_cast<int>(batch.length)});
+      holder[thread_id].push_back(Batch{static_cast<int>(batch.length)});
     }
 
     Batches GetBatches(size_t thread_id) { return std::move(holder[thread_id]); }
@@ -457,7 +456,7 @@ TEST(OperatorTest, HashJoinBreakAndFinish) {
       pos++;
       auto it = task_groups.find(current_task_group);
       ARROW_RETURN_IF(it == task_groups.end(),
-                      arrow::Status::Invalid("Build task group not found"));
+                      arrow::Status::Invalid("Probe task group not found"));
       auto& task = it->second.first;
       current_entry = it->second.second;
 
@@ -540,6 +539,10 @@ TEST(OperatorTest, HashJoinBreakAndFinish) {
         task_groups.emplace(SCAN, std::move(scan_task_group));
         probe_task_groups_unique = std::make_unique<HashJoinProbeTaskGroups>(
             std::move(probe_entry), std::move(task_groups), dop, holder);
+        // FIXME: The last result is not fetched by
+        // HashJoinProbeResultHolder::GetBatches() from a living scan task, though the
+        // output is actually produced by JoinProbeProcessor::OnFinished() and resides in
+        // HashJoinProbeResultHolder.
         probe_task_groups = probe_task_groups_unique.get();
       }
     }
@@ -590,9 +593,9 @@ TEST(OperatorTest, HashJoinBreakAndFinish) {
   };
 
   {
-    int batch_size = 4096;
-    int num_build_batches = 128;
-    int num_probe_batches = 128 * 8;
+    int batch_size = 32769;
+    int num_build_batches = 1;
+    int num_probe_batches = 1;
     arrow::compute::JoinType join_type = arrow::compute::JoinType::RIGHT_OUTER;
     size_t dop = 16;
     size_t num_threads = 7;
