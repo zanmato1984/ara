@@ -353,6 +353,7 @@ TEST(OperatorTest, HashJoinBreakAndFinish) {
   using TaskCont = std::function<arrow::Status(size_t)>;
   using TaskGroup = std::pair<Task, TaskCont>;
 
+  // TODO: These two task groups and the subsequent dispatcher need a re-design.
   class HashJoinBuildTaskGroups : public LoopTaskGroups {
    public:
     HashJoinBuildTaskGroups(TaskCont entry,
@@ -451,7 +452,12 @@ TEST(OperatorTest, HashJoinBreakAndFinish) {
     arrow::Result<PipelineTaskGroup> Next() override {
       ARROW_RETURN_NOT_OK(current_entry(0));
       if (pos == task_groups.size()) {
-        return arrow::Result<PipelineTaskGroup>(PipelineTaskGroup{});
+        return arrow::Result<PipelineTaskGroup>(PipelineTaskGroup{
+            [&holder = this->holder](size_t thread_id, size_t task_id,
+                                     const Batch&) -> OperatorResult {
+              return {OperatorStatus::RUNNING(), holder.GetBatches(thread_id)};
+            },
+            1});
       }
       pos++;
       auto it = task_groups.find(current_task_group);
@@ -539,10 +545,6 @@ TEST(OperatorTest, HashJoinBreakAndFinish) {
         task_groups.emplace(SCAN, std::move(scan_task_group));
         probe_task_groups_unique = std::make_unique<HashJoinProbeTaskGroups>(
             std::move(probe_entry), std::move(task_groups), dop, holder);
-        // FIXME: The last result is not fetched by
-        // HashJoinProbeResultHolder::GetBatches() from a living scan task, though the
-        // output is actually produced by JoinProbeProcessor::OnFinished() and resides in
-        // HashJoinProbeResultHolder.
         probe_task_groups = probe_task_groups_unique.get();
       }
     }
