@@ -1,11 +1,13 @@
 #include <arrow/acero/accumulation_queue.h>
 #include <arrow/acero/query_context.h>
 
-#include "arrow/acero/swiss_join.h"
+#include "arrow/acero/swiss_join_internal.h"
 
 namespace arra {
 
     using namespace arrow;
+    using namespace arrow::acero;
+    using namespace arrow::acero::util;
     using namespace arrow::compute;
     using namespace arrow::util;
 
@@ -99,7 +101,7 @@ class SwissJoin {
 
     ExecBatch keypayload_batch;
     ARROW_ASSIGN_OR_RAISE(keypayload_batch, KeyPayloadFromInput(/*side=*/0, &batch));
-    ARROW_ASSIGN_OR_RAISE(util::TempVectorStack * temp_stack,
+    ARROW_ASSIGN_OR_RAISE(TempVectorStack * temp_stack,
                           ctx_->GetTempStack(thread_index));
 
     return CancelIfNotOK(
@@ -209,7 +211,7 @@ class SwissJoin {
             input_batch.values[schema->num_cols(HashJoinProjection::KEY) + icol];
       }
     }
-    ARROW_ASSIGN_OR_RAISE(util::TempVectorStack * temp_stack,
+    ARROW_ASSIGN_OR_RAISE(TempVectorStack * temp_stack,
                           ctx_->GetTempStack(thread_id));
     RETURN_NOT_OK(CancelIfNotOK(hash_table_build_.PushNextBatch(
         static_cast<int64_t>(thread_id), key_batch, no_payload ? nullptr : &payload_batch,
@@ -246,7 +248,7 @@ class SwissJoin {
 
   Status MergeFinished(size_t thread_id) {
     RETURN_NOT_OK(status());
-    ARROW_ASSIGN_OR_RAISE(util::TempVectorStack * temp_stack,
+    ARROW_ASSIGN_OR_RAISE(TempVectorStack * temp_stack,
                           ctx_->GetTempStack(thread_id));
     hash_table_build_.FinishPrtnMerge(temp_stack);
     return CancelIfNotOK(OnBuildHashTableFinished(static_cast<int64_t>(thread_id)));
@@ -302,23 +304,23 @@ class SwissJoin {
         std::min((task_id + 1) * kNumRowsPerScanTask, hash_table_.num_rows());
     // Get thread index and related temp vector stack
     //
-    ARROW_ASSIGN_OR_RAISE(util::TempVectorStack * temp_stack,
+    ARROW_ASSIGN_OR_RAISE(TempVectorStack * temp_stack,
                           ctx_->GetTempStack(thread_id));
 
     // Split into mini-batches
     //
     auto payload_ids_buf =
-        util::TempVectorHolder<uint32_t>(temp_stack, util::MiniBatch::kMiniBatchLength);
+        TempVectorHolder<uint32_t>(temp_stack, MiniBatch::kMiniBatchLength);
     auto key_ids_buf =
-        util::TempVectorHolder<uint32_t>(temp_stack, util::MiniBatch::kMiniBatchLength);
+        TempVectorHolder<uint32_t>(temp_stack, MiniBatch::kMiniBatchLength);
     auto selection_buf =
-        util::TempVectorHolder<uint16_t>(temp_stack, util::MiniBatch::kMiniBatchLength);
+        TempVectorHolder<uint16_t>(temp_stack, MiniBatch::kMiniBatchLength);
     for (int64_t mini_batch_start = start_row; mini_batch_start < end_row;) {
       // Compute the size of the next mini-batch
       //
       int64_t mini_batch_size_next =
           std::min(end_row - mini_batch_start,
-                   static_cast<int64_t>(util::MiniBatch::kMiniBatchLength));
+                   static_cast<int64_t>(MiniBatch::kMiniBatchLength));
 
       // Get the list of key and payload ids from this mini-batch to output.
       //

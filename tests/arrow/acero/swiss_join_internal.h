@@ -17,541 +17,28 @@
 
 #pragma once
 
-#include "arrow/buffer.h"
-#include "arrow/compute/light_array.h"
-#include "arrow/memory_pool.h"
-#include "arrow/status.h"
-#include "arrow/util/logging.h"
-
-namespace arrow {
-namespace compute {
-
-/// Description of the data stored in a RowTable
-struct ARROW_EXPORT RowTableMetadata {
-  /// \brief True if there are no variable length columns in the table
-  bool is_fixed_length;
-
-  /// For a fixed-length binary row, common size of rows in bytes,
-  /// rounded up to the multiple of alignment.
-  ///
-  /// For a varying-length binary, size of all encoded fixed-length key columns,
-  /// including lengths of varying-length columns, rounded up to the multiple of string
-  /// alignment.
-  uint32_t fixed_length;
-
-  /// Offset within a row to the array of 32-bit offsets within a row of
-  /// ends of varbinary fields.
-  /// Used only when the row is not fixed-length, zero for fixed-length row.
-  /// There are N elements for N varbinary fields.
-  /// Each element is the offset within a row of the first byte after
-  /// the corresponding varbinary field bytes in that row.
-  /// If varbinary fields begin at aligned addresses, than the end of the previous
-  /// varbinary field needs to be rounded up according to the specified alignment
-  /// to obtain the beginning of the next varbinary field.
-  /// The first varbinary field starts at offset specified by fixed_length,
-  /// which should already be aligned.
-  uint32_t varbinary_end_array_offset;
-
-  /// Fixed number of bytes per row that are used to encode null masks.
-  /// Null masks indicate for a single row which of its columns are null.
-  /// Nth bit in the sequence of bytes assigned to a row represents null
-  /// information for Nth field according to the order in which they are encoded.
-  int null_masks_bytes_per_row;
-
-  /// Power of 2. Every row will start at an offset aligned to that number of bytes.
-  int row_alignment;
-
-  /// Power of 2. Must be no greater than row alignment.
-  /// Every non-power-of-2 binary field and every varbinary field bytes
-  /// will start aligned to that number of bytes.
-  int string_alignment;
-
-  /// Metadata of encoded columns in their original order.
-  std::vector<KeyColumnMetadata> column_metadatas;
-
-  /// Order in which fields are encoded.
-  std::vector<uint32_t> column_order;
-  std::vector<uint32_t> inverse_column_order;
-
-  /// Offsets within a row to fields in their encoding order.
-  std::vector<uint32_t> column_offsets;
-
-  /// Rounding up offset to the nearest multiple of alignment value.
-  /// Alignment must be a power of 2.
-  static inline uint32_t padding_for_alignment(uint32_t offset, int required_alignment) {
-    ARROW_DCHECK(ARROW_POPCOUNT64(required_alignment) == 1);
-    return static_cast<uint32_t>((-static_cast<int32_t>(offset)) &
-                                 (required_alignment - 1));
-  }
-
-  /// Rounding up offset to the beginning of next column,
-  /// choosing required alignment based on the data type of that column.
-  static inline uint32_t padding_for_alignment(uint32_t offset, int string_alignment,
-                                               const KeyColumnMetadata& col_metadata) {
-    if (!col_metadata.is_fixed_length ||
-        ARROW_POPCOUNT64(col_metadata.fixed_length) <= 1) {
-      return 0;
-    } else {
-      return padding_for_alignment(offset, string_alignment);
-    }
-  }
-
-  /// Returns an array of offsets within a row of ends of varbinary fields.
-  inline const uint32_t* varbinary_end_array(const uint8_t* row) const {
-    ARROW_DCHECK(!is_fixed_length);
-    return reinterpret_cast<const uint32_t*>(row + varbinary_end_array_offset);
-  }
-
-  /// \brief An array of mutable offsets within a row of ends of varbinary fields.
-  inline uint32_t* varbinary_end_array(uint8_t* row) const {
-    ARROW_DCHECK(!is_fixed_length);
-    return reinterpret_cast<uint32_t*>(row + varbinary_end_array_offset);
-  }
-
-  /// Returns the offset within the row and length of the first varbinary field.
-  inline void first_varbinary_offset_and_length(const uint8_t* row, uint32_t* offset,
-                                                uint32_t* length) const {
-    ARROW_DCHECK(!is_fixed_length);
-    *offset = fixed_length;
-    *length = varbinary_end_array(row)[0] - fixed_length;
-  }
-
-  /// Returns the offset within the row and length of the second and further varbinary
-  /// fields.
-  inline void nth_varbinary_offset_and_length(const uint8_t* row, int varbinary_id,
-                                              uint32_t* out_offset,
-                                              uint32_t* out_length) const {
-    ARROW_DCHECK(!is_fixed_length);
-    ARROW_DCHECK(varbinary_id > 0);
-    const uint32_t* varbinary_end = varbinary_end_array(row);
-    uint32_t offset = varbinary_end[varbinary_id - 1];
-    offset += padding_for_alignment(offset, string_alignment);
-    *out_offset = offset;
-    *out_length = varbinary_end[varbinary_id] - offset;
-  }
-
-  uint32_t encoded_field_order(uint32_t icol) const { return column_order[icol]; }
-
-  uint32_t pos_after_encoding(uint32_t icol) const { return inverse_column_order[icol]; }
-
-  uint32_t encoded_field_offset(uint32_t icol) const { return column_offsets[icol]; }
-
-  uint32_t num_cols() const { return static_cast<uint32_t>(column_metadatas.size()); }
-
-  uint32_t num_varbinary_cols() const;
-
-  /// \brief Populate this instance to describe `cols` with the given alignment
-  void FromColumnMetadataVector(const std::vector<KeyColumnMetadata>& cols,
-                                int in_row_alignment, int in_string_alignment);
-
-  /// \brief True if `other` has the same number of columns
-  ///   and each column has the same width (two variable length
-  ///   columns are considered to have the same width)
-  bool is_compatible(const RowTableMetadata& other) const;
-};
-
-/// \brief A table of data stored in row-major order
-///
-/// Can only store non-nested data types
-///
-/// Can store both fixed-size data types and variable-length data types
-///
-/// The row table is not safe
-class ARROW_EXPORT RowTableImpl {
- public:
-  RowTableImpl();
-  /// \brief Initialize a row array for use
-  ///
-  /// This must be called before any other method
-  Status Init(MemoryPool* pool, const RowTableMetadata& metadata);
-  /// \brief Clear all rows from the table
-  ///
-  /// Does not shrink buffers
-  void Clean();
-  /// \brief Add empty rows
-  /// \param num_rows_to_append The number of empty rows to append
-  /// \param num_extra_bytes_to_append For tables storing variable-length data this
-  ///     should be a guess of how many data bytes will be needed to populate the
-  ///     data.  This is ignored if there are no variable-length columns
-  Status AppendEmpty(uint32_t num_rows_to_append, uint32_t num_extra_bytes_to_append);
-  /// \brief Append rows from a source table
-  /// \param from The table to append from
-  /// \param num_rows_to_append The number of rows to append
-  /// \param source_row_ids Indices (into `from`) of the desired rows
-  Status AppendSelectionFrom(const RowTableImpl& from, uint32_t num_rows_to_append,
-                             const uint16_t* source_row_ids);
-  /// \brief Metadata describing the data stored in this table
-  const RowTableMetadata& metadata() const { return metadata_; }
-  /// \brief The number of rows stored in the table
-  int64_t length() const { return num_rows_; }
-  // Accessors into the table's buffers
-  const uint8_t* data(int i) const {
-    ARROW_DCHECK(i >= 0 && i < kMaxBuffers);
-    return buffers_[i];
-  }
-  uint8_t* mutable_data(int i) {
-    ARROW_DCHECK(i >= 0 && i < kMaxBuffers);
-    return buffers_[i];
-  }
-  const uint32_t* offsets() const { return reinterpret_cast<const uint32_t*>(data(1)); }
-  uint32_t* mutable_offsets() { return reinterpret_cast<uint32_t*>(mutable_data(1)); }
-  const uint8_t* null_masks() const { return null_masks_->data(); }
-  uint8_t* null_masks() { return null_masks_->mutable_data(); }
-
-  /// \brief True if there is a null value anywhere in the table
-  ///
-  /// This calculation is memoized based on the number of rows and assumes
-  /// that values are only appended (and not modified in place) between
-  /// successive calls
-  bool has_any_nulls(const LightContext* ctx) const;
-
- private:
-  Status ResizeFixedLengthBuffers(int64_t num_extra_rows);
-  Status ResizeOptionalVaryingLengthBuffer(int64_t num_extra_bytes);
-
-  // Helper functions to determine the number of bytes needed for each
-  // buffer given a number of rows.
-  int64_t size_null_masks(int64_t num_rows) const;
-  int64_t size_offsets(int64_t num_rows) const;
-  int64_t size_rows_fixed_length(int64_t num_rows) const;
-  int64_t size_rows_varying_length(int64_t num_bytes) const;
-
-  // Called after resize to fix pointers
-  void UpdateBufferPointers();
-
-  // The arrays in `buffers_` need to be padded so that
-  // vectorized operations can operate in blocks without
-  // worrying about tails
-  static constexpr int64_t kPaddingForVectors = 64;
-  MemoryPool* pool_;
-  RowTableMetadata metadata_;
-  // Buffers can only expand during lifetime and never shrink.
-  std::unique_ptr<ResizableBuffer> null_masks_;
-  // Only used if the table has variable-length columns
-  // Stores the offsets into the binary data (which is stored
-  // after all the fixed-sized fields)
-  std::unique_ptr<ResizableBuffer> offsets_;
-  // Stores the fixed-length parts of the rows
-  std::unique_ptr<ResizableBuffer> rows_;
-  static constexpr int kMaxBuffers = 3;
-  uint8_t* buffers_[kMaxBuffers];
-  // The number of rows in the table
-  int64_t num_rows_;
-  // The number of rows that can be stored in the table without resizing
-  int64_t rows_capacity_;
-  // The number of bytes that can be stored in the table without resizing
-  int64_t bytes_capacity_;
-
-  // Mutable to allow lazy evaluation
-  mutable int64_t num_rows_for_has_any_nulls_;
-  mutable bool has_any_nulls_;
-};
-
-}  // namespace compute
-}  // namespace arrow
-
-namespace arrow {
-namespace compute {
-
-/// Converts between Arrow's typical column representation to a row-based representation
-///
-/// Data is stored as a single array of rows.  Each row combines data from all columns.
-/// The conversion is reversible.
-///
-/// Row-oriented storage is beneficial when there is a need for random access
-/// of individual rows and at the same time all included columns are likely to
-/// be accessed together, as in the case of hash table key.
-///
-/// Does not support nested types
-class RowTableEncoder {
- public:
-  void Init(const std::vector<KeyColumnMetadata>& cols, int row_alignment,
-            int string_alignment);
-
-  const RowTableMetadata& row_metadata() { return row_metadata_; }
-  // GrouperFastImpl right now needs somewhat intrusive visibility into RowTableEncoder
-  // This could be cleaned up at some point
-  const std::vector<KeyColumnArray>& batch_all_cols() { return batch_all_cols_; }
-
-  /// \brief Prepare to encode a collection of columns
-  /// \param start_row The starting row to encode
-  /// \param num_rows The number of rows to encode
-  /// \param cols The columns to encode.  The order of the columns should
-  ///             be consistent with the order used to create the RowTableMetadata
-  void PrepareEncodeSelected(int64_t start_row, int64_t num_rows,
-                             const std::vector<KeyColumnArray>& cols);
-  /// \brief Encode selection of prepared rows into a row table
-  /// \param rows The output row table
-  /// \param num_selected The number of rows to encode
-  /// \param selection indices of the rows to encode
-  Status EncodeSelected(RowTableImpl* rows, uint32_t num_selected,
-                        const uint16_t* selection);
-
-  /// \brief Decode a window of row oriented data into a corresponding
-  ///        window of column oriented storage.
-  /// \param start_row_input The starting row to decode
-  /// \param start_row_output An offset into the output array to write to
-  /// \param num_rows The number of rows to decode
-  /// \param rows The row table to decode from
-  /// \param cols The columns to decode into, should be sized appropriately
-  ///
-  /// The output buffers need to be correctly allocated and sized before
-  /// calling each method.  For that reason decoding is split into two functions.
-  /// DecodeFixedLengthBuffers processes everything except for varying length
-  /// buffers.
-  /// The output can be used to find out required varying length buffers sizes
-  /// for the call to DecodeVaryingLengthBuffers
-  void DecodeFixedLengthBuffers(int64_t start_row_input, int64_t start_row_output,
-                                int64_t num_rows, const RowTableImpl& rows,
-                                std::vector<KeyColumnArray>* cols, int64_t hardware_flags,
-                                util::TempVectorStack* temp_stack);
-
-  /// \brief Decode the varlength columns of a row table into column storage
-  /// \param start_row_input The starting row to decode
-  /// \param start_row_output An offset into the output arrays
-  /// \param num_rows The number of rows to decode
-  /// \param rows The row table to decode from
-  /// \param cols The column arrays to decode into
-  void DecodeVaryingLengthBuffers(int64_t start_row_input, int64_t start_row_output,
-                                  int64_t num_rows, const RowTableImpl& rows,
-                                  std::vector<KeyColumnArray>* cols,
-                                  int64_t hardware_flags,
-                                  util::TempVectorStack* temp_stack);
-
- private:
-  /// Prepare column array vectors.
-  /// Output column arrays represent a range of input column arrays
-  /// specified by starting row and number of rows.
-  /// Three vectors are generated:
-  /// - all columns
-  /// - fixed-length columns only
-  /// - varying-length columns only
-  void PrepareKeyColumnArrays(int64_t start_row, int64_t num_rows,
-                              const std::vector<KeyColumnArray>& cols_in);
-
-  // Data initialized once, based on data types of key columns
-  RowTableMetadata row_metadata_;
-
-  // Data initialized for each input batch.
-  // All elements are ordered according to the order of encoded fields in a row.
-  std::vector<KeyColumnArray> batch_all_cols_;
-  std::vector<KeyColumnArray> batch_varbinary_cols_;
-  std::vector<uint32_t> batch_varbinary_cols_base_offsets_;
-};
-
-class EncoderInteger {
- public:
-  static void Decode(uint32_t start_row, uint32_t num_rows, uint32_t offset_within_row,
-                     const RowTableImpl& rows, KeyColumnArray* col, LightContext* ctx,
-                     KeyColumnArray* temp);
-  static bool UsesTransform(const KeyColumnArray& column);
-  static KeyColumnArray ArrayReplace(const KeyColumnArray& column,
-                                     const KeyColumnArray& temp);
-  static void PostDecode(const KeyColumnArray& input, KeyColumnArray* output,
-                         LightContext* ctx);
-
- private:
-  static bool IsBoolean(const KeyColumnMetadata& metadata);
-};
-
-class EncoderBinary {
- public:
-  static void EncodeSelected(uint32_t offset_within_row, RowTableImpl* rows,
-                             const KeyColumnArray& col, uint32_t num_selected,
-                             const uint16_t* selection);
-  static void Decode(uint32_t start_row, uint32_t num_rows, uint32_t offset_within_row,
-                     const RowTableImpl& rows, KeyColumnArray* col, LightContext* ctx,
-                     KeyColumnArray* temp);
-  static bool IsInteger(const KeyColumnMetadata& metadata);
-
- private:
-  template <class COPY_FN, class SET_NULL_FN>
-  static void EncodeSelectedImp(uint32_t offset_within_row, RowTableImpl* rows,
-                                const KeyColumnArray& col, uint32_t num_selected,
-                                const uint16_t* selection, COPY_FN copy_fn,
-                                SET_NULL_FN set_null_fn);
-
-  template <bool is_row_fixed_length, class COPY_FN>
-  static inline void DecodeHelper(uint32_t start_row, uint32_t num_rows,
-                                  uint32_t offset_within_row,
-                                  const RowTableImpl* rows_const,
-                                  RowTableImpl* rows_mutable_maybe_null,
-                                  const KeyColumnArray* col_const,
-                                  KeyColumnArray* col_mutable_maybe_null,
-                                  COPY_FN copy_fn) {
-    ARROW_DCHECK(col_const && col_const->metadata().is_fixed_length);
-    uint32_t col_width = col_const->metadata().fixed_length;
-
-    if (is_row_fixed_length) {
-      uint32_t row_width = rows_const->metadata().fixed_length;
-      for (uint32_t i = 0; i < num_rows; ++i) {
-        const uint8_t* src;
-        uint8_t* dst;
-        src = rows_const->data(1) + row_width * (start_row + i) + offset_within_row;
-        dst = col_mutable_maybe_null->mutable_data(1) + col_width * i;
-        copy_fn(dst, src, col_width);
-      }
-    } else {
-      const uint32_t* row_offsets = rows_const->offsets();
-      for (uint32_t i = 0; i < num_rows; ++i) {
-        const uint8_t* src;
-        uint8_t* dst;
-        src = rows_const->data(2) + row_offsets[start_row + i] + offset_within_row;
-        dst = col_mutable_maybe_null->mutable_data(1) + col_width * i;
-        copy_fn(dst, src, col_width);
-      }
-    }
-  }
-
-  template <bool is_row_fixed_length>
-  static void DecodeImp(uint32_t start_row, uint32_t num_rows, uint32_t offset_within_row,
-                        const RowTableImpl& rows, KeyColumnArray* col);
-#if defined(ARROW_HAVE_AVX2)
-  static void DecodeHelper_avx2(bool is_row_fixed_length, uint32_t start_row,
-                                uint32_t num_rows, uint32_t offset_within_row,
-                                const RowTableImpl& rows, KeyColumnArray* col);
-  template <bool is_row_fixed_length>
-  static void DecodeImp_avx2(uint32_t start_row, uint32_t num_rows,
-                             uint32_t offset_within_row, const RowTableImpl& rows,
-                             KeyColumnArray* col);
-#endif
-};
-
-class EncoderBinaryPair {
- public:
-  static bool CanProcessPair(const KeyColumnMetadata& col1,
-                             const KeyColumnMetadata& col2) {
-    return EncoderBinary::IsInteger(col1) && EncoderBinary::IsInteger(col2);
-  }
-  static void Decode(uint32_t start_row, uint32_t num_rows, uint32_t offset_within_row,
-                     const RowTableImpl& rows, KeyColumnArray* col1, KeyColumnArray* col2,
-                     LightContext* ctx, KeyColumnArray* temp1, KeyColumnArray* temp2);
-
- private:
-  template <bool is_row_fixed_length, typename col1_type, typename col2_type>
-  static void DecodeImp(uint32_t num_rows_to_skip, uint32_t start_row, uint32_t num_rows,
-                        uint32_t offset_within_row, const RowTableImpl& rows,
-                        KeyColumnArray* col1, KeyColumnArray* col2);
-#if defined(ARROW_HAVE_AVX2)
-  static uint32_t DecodeHelper_avx2(bool is_row_fixed_length, uint32_t col_width,
-                                    uint32_t start_row, uint32_t num_rows,
-                                    uint32_t offset_within_row, const RowTableImpl& rows,
-                                    KeyColumnArray* col1, KeyColumnArray* col2);
-  template <bool is_row_fixed_length, uint32_t col_width>
-  static uint32_t DecodeImp_avx2(uint32_t start_row, uint32_t num_rows,
-                                 uint32_t offset_within_row, const RowTableImpl& rows,
-                                 KeyColumnArray* col1, KeyColumnArray* col2);
-#endif
-};
-
-class EncoderOffsets {
- public:
-  static void GetRowOffsetsSelected(RowTableImpl* rows,
-                                    const std::vector<KeyColumnArray>& cols,
-                                    uint32_t num_selected, const uint16_t* selection);
-  static void EncodeSelected(RowTableImpl* rows, const std::vector<KeyColumnArray>& cols,
-                             uint32_t num_selected, const uint16_t* selection);
-
-  static void Decode(uint32_t start_row, uint32_t num_rows, const RowTableImpl& rows,
-                     std::vector<KeyColumnArray>* varbinary_cols,
-                     const std::vector<uint32_t>& varbinary_cols_base_offset,
-                     LightContext* ctx);
-
- private:
-  template <bool has_nulls, bool is_first_varbinary>
-  static void EncodeSelectedImp(uint32_t ivarbinary, RowTableImpl* rows,
-                                const std::vector<KeyColumnArray>& cols,
-                                uint32_t num_selected, const uint16_t* selection);
-};
-
-class EncoderVarBinary {
- public:
-  static void EncodeSelected(uint32_t ivarbinary, RowTableImpl* rows,
-                             const KeyColumnArray& cols, uint32_t num_selected,
-                             const uint16_t* selection);
-
-  static void Decode(uint32_t start_row, uint32_t num_rows, uint32_t varbinary_col_id,
-                     const RowTableImpl& rows, KeyColumnArray* col, LightContext* ctx);
-
- private:
-  template <bool first_varbinary_col, class COPY_FN>
-  static inline void DecodeHelper(uint32_t start_row, uint32_t num_rows,
-                                  uint32_t varbinary_col_id,
-                                  const RowTableImpl* rows_const,
-                                  RowTableImpl* rows_mutable_maybe_null,
-                                  const KeyColumnArray* col_const,
-                                  KeyColumnArray* col_mutable_maybe_null,
-                                  COPY_FN copy_fn) {
-    // Column and rows need to be varying length
-    ARROW_DCHECK(!rows_const->metadata().is_fixed_length &&
-                 !col_const->metadata().is_fixed_length);
-
-    const uint32_t* row_offsets_for_batch = rows_const->offsets() + start_row;
-    const uint32_t* col_offsets = col_const->offsets();
-
-    uint32_t col_offset_next = col_offsets[0];
-    for (uint32_t i = 0; i < num_rows; ++i) {
-      uint32_t col_offset = col_offset_next;
-      col_offset_next = col_offsets[i + 1];
-
-      uint32_t row_offset = row_offsets_for_batch[i];
-      const uint8_t* row = rows_const->data(2) + row_offset;
-
-      uint32_t offset_within_row;
-      uint32_t length;
-      if (first_varbinary_col) {
-        rows_const->metadata().first_varbinary_offset_and_length(row, &offset_within_row,
-                                                                 &length);
-      } else {
-        rows_const->metadata().nth_varbinary_offset_and_length(
-            row, varbinary_col_id, &offset_within_row, &length);
-      }
-
-      row_offset += offset_within_row;
-
-      const uint8_t* src;
-      uint8_t* dst;
-      src = rows_const->data(2) + row_offset;
-      dst = col_mutable_maybe_null->mutable_data(2) + col_offset;
-      copy_fn(dst, src, length);
-    }
-  }
-  template <bool first_varbinary_col>
-  static void DecodeImp(uint32_t start_row, uint32_t num_rows, uint32_t varbinary_col_id,
-                        const RowTableImpl& rows, KeyColumnArray* col);
-#if defined(ARROW_HAVE_AVX2)
-  static void DecodeHelper_avx2(uint32_t start_row, uint32_t num_rows,
-                                uint32_t varbinary_col_id, const RowTableImpl& rows,
-                                KeyColumnArray* col);
-  template <bool first_varbinary_col>
-  static void DecodeImp_avx2(uint32_t start_row, uint32_t num_rows,
-                             uint32_t varbinary_col_id, const RowTableImpl& rows,
-                             KeyColumnArray* col);
-#endif
-};
-
-class EncoderNulls {
- public:
-  static void EncodeSelected(RowTableImpl* rows, const std::vector<KeyColumnArray>& cols,
-                             uint32_t num_selected, const uint16_t* selection);
-
-  static void Decode(uint32_t start_row, uint32_t num_rows, const RowTableImpl& rows,
-                     std::vector<KeyColumnArray>* cols);
-};
-
-}  // namespace compute
-}  // namespace arrow
-
 #include <cstdint>
-#include "arrow/compute/exec/key_map.h"
-#include "arrow/compute/exec/options.h"
-#include "arrow/compute/exec/partition_util.h"
-#include "arrow/compute/exec/schema_util.h"
-#include "arrow/compute/exec/task_util.h"
+#include "arrow/acero/options.h"
+#include "arrow/acero/partition_util.h"
+#include "arrow/acero/schema_util.h"
+#include "arrow/acero/task_util.h"
+#include "arrow/compute/kernels/row_encoder_internal.h"
+#include "arrow/compute/key_map.h"
 #include "arrow/compute/light_array.h"
+#include "arrow/compute/row/encode_internal.h"
 
 namespace arrow {
-namespace compute {
+
+using compute::ExecBatchBuilder;
+using compute::KeyColumnArray;
+using compute::KeyColumnMetadata;
+using compute::ResizableArrayData;
+using compute::RowTableEncoder;
+using compute::RowTableImpl;
+using compute::RowTableMetadata;
+using compute::SwissTable;
+
+namespace acero {
 
 class RowArrayAccessor {
  public:
@@ -635,7 +122,7 @@ struct RowArray {
   void Compare(const ExecBatch& batch, int begin_row_id, int end_row_id, int num_selected,
                const uint16_t* batch_selection_maybe_null, const uint32_t* array_row_ids,
                uint32_t* out_num_not_equal, uint16_t* out_not_equal_selection,
-               int64_t hardware_flags, util::TempVectorStack* temp_stack,
+               int64_t hardware_flags, arrow::util::TempVectorStack* temp_stack,
                std::vector<KeyColumnArray>& temp_column_arrays,
                uint8_t* out_match_bitvector_maybe_null = NULLPTR);
 
@@ -799,14 +286,14 @@ class SwissTableMerge {
 struct SwissTableWithKeys {
   struct Input {
     Input(const ExecBatch* in_batch, int in_batch_start_row, int in_batch_end_row,
-          util::TempVectorStack* in_temp_stack,
+          arrow::util::TempVectorStack* in_temp_stack,
           std::vector<KeyColumnArray>* in_temp_column_arrays);
 
-    Input(const ExecBatch* in_batch, util::TempVectorStack* in_temp_stack,
+    Input(const ExecBatch* in_batch, arrow::util::TempVectorStack* in_temp_stack,
           std::vector<KeyColumnArray>* in_temp_column_arrays);
 
     Input(const ExecBatch* in_batch, int in_num_selected, const uint16_t* in_selection,
-          util::TempVectorStack* in_temp_stack,
+          arrow::util::TempVectorStack* in_temp_stack,
           std::vector<KeyColumnArray>* in_temp_column_arrays,
           std::vector<uint32_t>* in_temp_group_ids);
 
@@ -825,7 +312,7 @@ struct SwissTableWithKeys {
     const uint16_t* selection_maybe_null;
     // Thread specific scratch buffers for storing temporary data.
     //
-    util::TempVectorStack* temp_stack;
+    arrow::util::TempVectorStack* temp_stack;
     std::vector<KeyColumnArray>* temp_column_arrays;
     std::vector<uint32_t>* temp_group_ids;
   };
@@ -943,7 +430,7 @@ class SwissTableForJoinBuild {
   //
   Status PushNextBatch(int64_t thread_id, const ExecBatch& key_batch,
                        const ExecBatch* payload_batch_maybe_null,
-                       util::TempVectorStack* temp_stack);
+                       arrow::util::TempVectorStack* temp_stack);
 
   // Allocate memory and initialize counters required for parallel merging of
   // hash table partitions.
@@ -961,7 +448,7 @@ class SwissTableForJoinBuild {
   // parallel merging phase, due to hash table search resulting in crossing
   // partition boundaries.
   //
-  void FinishPrtnMerge(util::TempVectorStack* temp_stack);
+  void FinishPrtnMerge(arrow::util::TempVectorStack* temp_stack);
 
   // The number of partitions is the number of parallel tasks to execute during
   // the final phase of hash table build process.
@@ -974,7 +461,7 @@ class SwissTableForJoinBuild {
   void InitRowArray();
   Status ProcessPartition(int64_t thread_id, const ExecBatch& key_batch,
                           const ExecBatch* payload_batch_maybe_null,
-                          util::TempVectorStack* temp_stack, int prtn_id);
+                          arrow::util::TempVectorStack* temp_stack, int prtn_id);
 
   SwissTableForJoin* target_;
   // DOP stands for Degree Of Parallelism - the maximum number of participating
@@ -1081,7 +568,7 @@ class JoinResultMaterialize {
       if (num_rows_appended < num_rows_to_append) {
         ExecBatch batch;
         ARROW_RETURN_NOT_OK(Flush(&batch));
-        output_batch_fn(batch);
+        ARROW_RETURN_NOT_OK(output_batch_fn(batch));
         num_rows_to_append -= num_rows_appended;
         offset += num_rows_appended;
       } else {
@@ -1136,7 +623,7 @@ class JoinResultMaterialize {
     if (num_rows_ > 0) {
       ExecBatch batch({}, num_rows_);
       ARROW_RETURN_NOT_OK(Flush(&batch));
-      output_batch_fn(std::move(batch));
+      ARROW_RETURN_NOT_OK(output_batch_fn(std::move(batch)));
     }
     return Status::OK();
   }
@@ -1254,13 +741,13 @@ class JoinMatchIterator {
 //
 class JoinProbeProcessor {
  public:
-  using OutputBatchFn = std::function<void(int64_t, ExecBatch)>;
+  using OutputBatchFn = std::function<Status(int64_t, ExecBatch)>;
 
   void Init(int num_key_columns, JoinType join_type, SwissTableForJoin* hash_table,
             std::vector<JoinResultMaterialize*> materialize,
             const std::vector<JoinKeyCmp>* cmp, OutputBatchFn output_batch_fn);
   Status OnNextBatch(int64_t thread_id, const ExecBatch& keypayload_batch,
-                     util::TempVectorStack* temp_stack,
+                     arrow::util::TempVectorStack* temp_stack,
                      std::vector<KeyColumnArray>* temp_column_arrays);
 
   // Must be called by a single-thread having exclusive access to the instance
@@ -1280,5 +767,5 @@ class JoinProbeProcessor {
   OutputBatchFn output_batch_fn_;
 };
 
-}  // namespace compute
+}  // namespace acero
 }  // namespace arrow
