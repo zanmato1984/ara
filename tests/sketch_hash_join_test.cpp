@@ -1,12 +1,11 @@
+#include <arrow/acero/accumulation_queue.h>
+#include <arrow/acero/hash_join.h>
+#include <arrow/acero/hash_join_node.h>
+#include <arrow/acero/options.h>
+#include <arrow/acero/task_util.h>
+#include <arrow/acero/util.h>
 #include <arrow/api.h>
 #include <arrow/compute/exec.h>
-#include <arrow/compute/exec/accumulation_queue.h>
-#include <arrow/compute/exec/hash_join.h>
-#include <arrow/compute/exec/hash_join_node.h>
-#include <arrow/compute/exec/options.h>
-#include <arrow/compute/exec/task_util.h>
-#include <arrow/compute/exec/test_util.h>
-#include <arrow/compute/exec/util.h>
 #include <arrow/util/async_generator.h>
 #include <arrow/util/logging.h>
 #include <arrow/util/vector.h>
@@ -14,11 +13,13 @@
 #include <folly/futures/Future.h>
 #include <gtest/gtest.h>
 
+#include "arrow/acero/test_util_internal.h"
+
 // TODO: How the hell to use arrow::Future<arrow::Status> with arrow::Loop?
 
 template <typename Prober>
-using ProberFactory = std::function<Prober(arrow::compute::HashJoinImpl*,
-                                           arrow::util::AccumulationQueue&&)>;
+using ProberFactory =
+    std::function<Prober(arrow::acero::HashJoinImpl*, arrow::acero::AccumulationQueue&&)>;
 struct TaskRunner {
   using Task = std::function<arrow::Status(size_t, int64_t)>;
   using TaskCont = std::function<arrow::Status(size_t)>;
@@ -36,7 +37,7 @@ struct HashJoinCase {
   using TaskCont = TaskRunner::TaskCont;
 
   HashJoinCase(int batch_size, int num_build_batches, int num_probe_batches,
-               arrow::compute::JoinType join_type)
+               arrow::acero::JoinType join_type)
       : join_type(join_type) {
     std::vector<std::shared_ptr<arrow::DataType>> key_types = {arrow::int32()};
     std::vector<std::shared_ptr<arrow::DataType>> build_payload_types = {
@@ -49,7 +50,7 @@ struct HashJoinCase {
 
     arrow::SchemaBuilder l_schema_builder, r_schema_builder;
     std::vector<arrow::FieldRef> left_keys, right_keys;
-    std::vector<arrow::compute::JoinKeyCmp> key_cmp;
+    std::vector<arrow::acero::JoinKeyCmp> key_cmp;
     for (size_t i = 0; i < key_types.size(); i++) {
       std::string l_name = "lk" + std::to_string(i);
       std::string r_name = "rk" + std::to_string(i);
@@ -87,7 +88,7 @@ struct HashJoinCase {
 
       left_keys.push_back(arrow::FieldRef(l_name));
       right_keys.push_back(arrow::FieldRef(r_name));
-      key_cmp.push_back(arrow::compute::JoinKeyCmp::EQ);
+      key_cmp.push_back(arrow::acero::JoinKeyCmp::EQ);
     }
 
     for (size_t i = 0; i < build_payload_types.size(); i++) {
@@ -103,10 +104,10 @@ struct HashJoinCase {
     auto l_schema = *l_schema_builder.Finish();
     auto r_schema = *r_schema_builder.Finish();
 
-    arrow::compute::BatchesWithSchema l_batches_with_schema =
-        arrow::compute::MakeRandomBatches(l_schema, num_probe_batches, batch_size);
-    arrow::compute::BatchesWithSchema r_batches_with_schema =
-        arrow::compute::MakeRandomBatches(r_schema, num_build_batches, batch_size);
+    arrow::acero::BatchesWithSchema l_batches_with_schema =
+        arrow::acero::MakeRandomBatches(l_schema, num_probe_batches, batch_size);
+    arrow::acero::BatchesWithSchema r_batches_with_schema =
+        arrow::acero::MakeRandomBatches(r_schema, num_build_batches, batch_size);
 
     for (arrow::compute::ExecBatch& batch : l_batches_with_schema.batches)
       l_batches.InsertBatch(std::move(batch));
@@ -121,8 +122,8 @@ struct HashJoinCase {
 
   arrow::Status Init(size_t dop, TaskRunner& task_runner) {
     auto* memory_pool = arrow::default_memory_pool();
-    ctx = std::make_unique<arrow::compute::QueryContext>(
-        arrow::compute::QueryOptions{},
+    ctx = std::make_unique<arrow::acero::QueryContext>(
+        arrow::acero::QueryOptions{},
         arrow::compute::ExecContext(memory_pool, NULLPTR, NULLPTR));
     DCHECK_OK(ctx->Init(dop, NULLPTR));
 
@@ -138,8 +139,9 @@ struct HashJoinCase {
         },
         [&task_runner](int64_t thread_id, arrow::compute::ExecBatch batch) {
           task_runner.OutputBatch(thread_id, std::move(batch));
+          return arrow::Status::OK();
         },
-        [](int64_t x) {});
+        [](int64_t x) { return arrow::Status::OK(); });
   }
 
   arrow::Status Build() {
@@ -153,31 +155,31 @@ struct HashJoinCase {
   }
 
  private:
-  arrow::util::AccumulationQueue l_batches;
-  arrow::util::AccumulationQueue r_batches;
+  arrow::acero::AccumulationQueue l_batches;
+  arrow::acero::AccumulationQueue r_batches;
 
-  arrow::compute::JoinType join_type;
-  std::vector<arrow::compute::JoinKeyCmp> key_cmp;
+  arrow::acero::JoinType join_type;
+  std::vector<arrow::acero::JoinKeyCmp> key_cmp;
   arrow::compute::Expression filter = arrow::compute::literal(true);
-  std::unique_ptr<arrow::compute::HashJoinSchema> schema_mgr =
-      std::make_unique<arrow::compute::HashJoinSchema>();
-  std::unique_ptr<arrow::compute::HashJoinImpl> join =
-      *arrow::compute::HashJoinImpl::MakeSwiss();
-  std::unique_ptr<arrow::compute::QueryContext> ctx;
+  std::unique_ptr<arrow::acero::HashJoinSchema> schema_mgr =
+      std::make_unique<arrow::acero::HashJoinSchema>();
+  std::unique_ptr<arrow::acero::HashJoinImpl> join =
+      *arrow::acero::HashJoinImpl::MakeSwiss();
+  std::unique_ptr<arrow::acero::QueryContext> ctx;
 };
 
 struct TaskGroupProber {
  private:
-  arrow::compute::HashJoinImpl* join;
-  arrow::util::AccumulationQueue probe_batches;
+  arrow::acero::HashJoinImpl* join;
+  arrow::acero::AccumulationQueue probe_batches;
 
-  TaskGroupProber(arrow::compute::HashJoinImpl* join,
-                  arrow::util::AccumulationQueue&& probe_batches)
+  TaskGroupProber(arrow::acero::HashJoinImpl* join,
+                  arrow::acero::AccumulationQueue&& probe_batches)
       : join(join), probe_batches(std::move(probe_batches)) {}
 
  public:
-  static TaskGroupProber Make(arrow::compute::HashJoinImpl* join,
-                              arrow::util::AccumulationQueue&& probe_batches) {
+  static TaskGroupProber Make(arrow::acero::HashJoinImpl* join,
+                              arrow::acero::AccumulationQueue&& probe_batches) {
     return TaskGroupProber(join, std::move(probe_batches));
   }
 
@@ -193,7 +195,7 @@ struct TaskGroupProber {
 struct ArrowSchedulerTaskRunner : public TaskRunner {
   ArrowSchedulerTaskRunner(size_t num_threads)
       : TaskRunner(),
-        scheduler(arrow::compute::TaskScheduler::Make()),
+        scheduler(arrow::acero::TaskScheduler::Make()),
         thread_pool(*arrow::internal::ThreadPool::Make(num_threads)) {}
 
   void RegisterEnd() { scheduler->RegisterEnd(); }
@@ -222,8 +224,8 @@ struct ArrowSchedulerTaskRunner : public TaskRunner {
   void WaitForIdle() { thread_pool->WaitForIdle(); }
 
  private:
-  arrow::compute::ThreadIndexer thread_id;
-  std::unique_ptr<arrow::compute::TaskScheduler> scheduler;
+  arrow::acero::ThreadIndexer thread_id;
+  std::unique_ptr<arrow::acero::TaskScheduler> scheduler;
   std::shared_ptr<arrow::internal::ThreadPool> thread_pool;
 };
 
@@ -231,7 +233,7 @@ TEST(HashJoinTest, ArrowScheduler) {
   int batch_size = 4096;
   int num_build_batches = 128;
   int num_probe_batches = 128 * 8;
-  arrow::compute::JoinType join_type = arrow::compute::JoinType::RIGHT_OUTER;
+  arrow::acero::JoinType join_type = arrow::acero::JoinType::RIGHT_OUTER;
   size_t dop = 16;
   size_t num_threads = 7;
 
@@ -328,7 +330,7 @@ TEST(HashJoinTest, FollyFuture) {
   int batch_size = 4096;
   int num_build_batches = 128;
   int num_probe_batches = 128 * 8;
-  arrow::compute::JoinType join_type = arrow::compute::JoinType::RIGHT_OUTER;
+  arrow::acero::JoinType join_type = arrow::acero::JoinType::RIGHT_OUTER;
   size_t dop = 16;
   size_t num_threads = 7;
 
@@ -434,7 +436,7 @@ TEST(HashJoinTest, ArrowFuture) {
   int batch_size = 4096;
   int num_build_batches = 128;
   int num_probe_batches = 128 * 8;
-  arrow::compute::JoinType join_type = arrow::compute::JoinType::RIGHT_OUTER;
+  arrow::acero::JoinType join_type = arrow::acero::JoinType::RIGHT_OUTER;
   size_t dop = 16;
   size_t num_threads = 7;
 
@@ -464,12 +466,12 @@ using AsyncGenerator = arrow::AsyncGenerator<OptionalExecBatch>;
 
 struct FromAsyncGeneratorProber {
  private:
-  arrow::compute::HashJoinImpl* join;
+  arrow::acero::HashJoinImpl* join;
   AsyncGenerator gen;
   mutable std::mutex mutex;
 
  public:
-  FromAsyncGeneratorProber(arrow::compute::HashJoinImpl* join, AsyncGenerator gen)
+  FromAsyncGeneratorProber(arrow::acero::HashJoinImpl* join, AsyncGenerator gen)
       : join(join), gen(std::move(gen)) {}
 
   arrow::Status Probe(size_t dop, ArrowFutureTaskRunner& task_runner) const {
@@ -515,7 +517,7 @@ struct FromAsyncGeneratorProber {
 };
 
 FromAsyncGeneratorProber MakeFromVectorGeneratorProber(
-    arrow::compute::HashJoinImpl* join, arrow::util::AccumulationQueue&& probe_batches) {
+    arrow::acero::HashJoinImpl* join, arrow::acero::AccumulationQueue&& probe_batches) {
   std::vector<std::optional<arrow::compute::ExecBatch>> batches;
   for (size_t i = 0; i < probe_batches.batch_count(); i++) {
     batches.emplace_back(std::move(probe_batches[i]));
@@ -529,7 +531,7 @@ void HashJoinTestArrowFromAsyncGeneratorProber(FromAsyncGeneratorProberFactory f
   int batch_size = 4096;
   int num_build_batches = 128;
   int num_probe_batches = 128 * 8;
-  arrow::compute::JoinType join_type = arrow::compute::JoinType::RIGHT_OUTER;
+  arrow::acero::JoinType join_type = arrow::acero::JoinType::RIGHT_OUTER;
   size_t dop = 16;
   size_t num_threads = 7;
 
@@ -552,7 +554,7 @@ TEST(HashJoinTest, ArrowFromVectorGenerator) {
 
 struct AsAsyncGeneratorFromAsyncGeneratorProber {
  private:
-  arrow::compute::HashJoinImpl* join;
+  arrow::acero::HashJoinImpl* join;
   AsyncGenerator gen;
   const size_t dop;
   arrow::internal::Executor* exec;
@@ -560,7 +562,7 @@ struct AsAsyncGeneratorFromAsyncGeneratorProber {
   std::mutex mutex;
 
  public:
-  AsAsyncGeneratorFromAsyncGeneratorProber(arrow::compute::HashJoinImpl* join,
+  AsAsyncGeneratorFromAsyncGeneratorProber(arrow::acero::HashJoinImpl* join,
                                            AsyncGenerator gen, size_t dop,
                                            arrow::internal::Executor* exec)
       : join(join), gen(std::move(gen)), dop(dop), exec(exec) {}
@@ -605,7 +607,7 @@ struct AsAsyncGeneratorFromAsyncGeneratorProber {
 
 AsAsyncGeneratorFromAsyncGeneratorProber
 MakeAsAsyncGeneratorFromVectorAsyncGeneratorProber(
-    arrow::compute::HashJoinImpl* join, arrow::util::AccumulationQueue&& probe_batches,
+    arrow::acero::HashJoinImpl* join, arrow::acero::AccumulationQueue&& probe_batches,
     size_t dop, arrow::internal::Executor* exec) {
   std::vector<std::optional<arrow::compute::ExecBatch>> batches;
   for (size_t i = 0; i < probe_batches.batch_count(); i++) {
@@ -621,7 +623,7 @@ void HashJoinTestArrowAsAsyncGeneratorFromAsyncGeneratorProber(
   int batch_size = 4096;
   int num_build_batches = 128;
   int num_probe_batches = 128 * 8;
-  arrow::compute::JoinType join_type = arrow::compute::JoinType::RIGHT_OUTER;
+  arrow::acero::JoinType join_type = arrow::acero::JoinType::RIGHT_OUTER;
   size_t dop = 16;
   size_t num_threads = 7;
 
@@ -631,8 +633,8 @@ void HashJoinTestArrowAsAsyncGeneratorFromAsyncGeneratorProber(
   auto prober =
       join_case.GetProber(ProberFactory<AsAsyncGeneratorFromAsyncGeneratorProber>(
           [factory = std::move(factory), dop, exec = task_runner.GetThreadPool()](
-              arrow::compute::HashJoinImpl* join,
-              arrow::util::AccumulationQueue&& probe_batches) {
+              arrow::acero::HashJoinImpl* join,
+              arrow::acero::AccumulationQueue&& probe_batches) {
             return factory(join, std::move(probe_batches), dop, exec);
           }));
 
@@ -673,12 +675,12 @@ TEST(HashJoinTest, ArrowAsAsyncGeneratorFromVectorGenerator) {
 
 struct ErrorInjectionProber {
  private:
-  arrow::compute::HashJoinImpl* join;
+  arrow::acero::HashJoinImpl* join;
   AsyncGenerator gen;
   mutable std::mutex mutex;
 
  public:
-  ErrorInjectionProber(arrow::compute::HashJoinImpl* join, AsyncGenerator gen)
+  ErrorInjectionProber(arrow::acero::HashJoinImpl* join, AsyncGenerator gen)
       : join(join), gen(std::move(gen)) {}
 
   arrow::Status Probe(size_t dop, arrow::internal::Executor* exec) const {
@@ -720,7 +722,7 @@ struct ErrorInjectionProber {
 };
 
 ErrorInjectionProber MakeErrorInjectionProber(
-    arrow::compute::HashJoinImpl* join, arrow::util::AccumulationQueue&& probe_batches) {
+    arrow::acero::HashJoinImpl* join, arrow::acero::AccumulationQueue&& probe_batches) {
   std::vector<std::optional<arrow::compute::ExecBatch>> batches;
   for (size_t i = 0; i < probe_batches.batch_count(); i++) {
     batches.emplace_back(std::move(probe_batches[i]));
@@ -734,7 +736,7 @@ void HashJoinTestErrorInjectionProber(ErrorInjectionProberFactory factory) {
   int batch_size = 4096;
   int num_build_batches = 128;
   int num_probe_batches = 128 * 8;
-  arrow::compute::JoinType join_type = arrow::compute::JoinType::RIGHT_OUTER;
+  arrow::acero::JoinType join_type = arrow::acero::JoinType::RIGHT_OUTER;
   size_t dop = 16;
   size_t num_threads = 7;
 
@@ -759,7 +761,7 @@ TEST(HashJoinTest, ArrowErrorInjection) {
 
 struct CancelProber {
  private:
-  arrow::compute::HashJoinImpl* join;
+  arrow::acero::HashJoinImpl* join;
   AsyncGenerator gen;
   const size_t num_batches;
   mutable std::atomic<bool> cancelled;
@@ -768,7 +770,7 @@ struct CancelProber {
   mutable std::mutex mutex;
 
  public:
-  CancelProber(arrow::compute::HashJoinImpl* join, AsyncGenerator gen, size_t num_batches)
+  CancelProber(arrow::acero::HashJoinImpl* join, AsyncGenerator gen, size_t num_batches)
       : join(join),
         gen(std::move(gen)),
         num_batches(num_batches),
@@ -839,8 +841,8 @@ struct CancelProber {
   }
 };
 
-CancelProber MakeCancelProber(arrow::compute::HashJoinImpl* join,
-                              arrow::util::AccumulationQueue&& probe_batches) {
+CancelProber MakeCancelProber(arrow::acero::HashJoinImpl* join,
+                              arrow::acero::AccumulationQueue&& probe_batches) {
   std::vector<std::optional<arrow::compute::ExecBatch>> batches;
   for (size_t i = 0; i < probe_batches.batch_count(); i++) {
     batches.emplace_back(std::move(probe_batches[i]));
@@ -855,7 +857,7 @@ void HashJoinTestCancelProber(CancelProberFactory factory) {
   int batch_size = 4096;
   int num_build_batches = 128;
   int num_probe_batches = 128 * 8;
-  arrow::compute::JoinType join_type = arrow::compute::JoinType::RIGHT_OUTER;
+  arrow::acero::JoinType join_type = arrow::acero::JoinType::RIGHT_OUTER;
   size_t dop = 16;
   size_t num_threads = 7;
 

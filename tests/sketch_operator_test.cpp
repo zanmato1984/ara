@@ -18,12 +18,13 @@
 /// all the corresponding tasks when one of them meets error, should be hidden from the
 /// operator implementation.
 
+#include <arrow/acero/hash_join.h>
+#include <arrow/acero/hash_join_node.h>
 #include <arrow/api.h>
-#include <arrow/compute/exec/hash_join.h>
-#include <arrow/compute/exec/hash_join_node.h>
-#include <arrow/compute/exec/test_util.h>
 #include <arrow/util/future.h>
 #include <gtest/gtest.h>
+
+#include "arrow/acero/test_util_internal.h"
 
 enum class OperatorStatusCode : char {
   RUNNING = 0,
@@ -247,18 +248,18 @@ class FutureTaskGroupsExecutor : public TaskGroupsExecutor {
 
 TEST(OperatorTest, HashJoinBreakAndFinish) {
   struct HashJoinCase {
-    arrow::compute::JoinType join_type;
+    arrow::acero::JoinType join_type;
     size_t dop;
-    std::vector<arrow::compute::JoinKeyCmp> key_cmp;
+    std::vector<arrow::acero::JoinKeyCmp> key_cmp;
     arrow::compute::Expression filter;
-    std::unique_ptr<arrow::compute::HashJoinSchema> schema_mgr;
-    std::unique_ptr<arrow::compute::QueryContext> ctx;
+    std::unique_ptr<arrow::acero::HashJoinSchema> schema_mgr;
+    std::unique_ptr<arrow::acero::QueryContext> ctx;
 
-    arrow::util::AccumulationQueue l_batches;
-    arrow::util::AccumulationQueue r_batches;
+    arrow::acero::AccumulationQueue l_batches;
+    arrow::acero::AccumulationQueue r_batches;
 
     HashJoinCase(int batch_size, int num_build_batches, int num_probe_batches,
-                 arrow::compute::JoinType join_type, size_t dop)
+                 arrow::acero::JoinType join_type, size_t dop)
         : join_type(join_type), dop(dop) {
       std::vector<std::shared_ptr<arrow::DataType>> key_types = {arrow::int32()};
       std::vector<std::shared_ptr<arrow::DataType>> build_payload_types = {
@@ -271,7 +272,7 @@ TEST(OperatorTest, HashJoinBreakAndFinish) {
 
       arrow::SchemaBuilder l_schema_builder, r_schema_builder;
       std::vector<arrow::FieldRef> left_keys, right_keys;
-      std::vector<arrow::compute::JoinKeyCmp> key_cmp;
+      std::vector<arrow::acero::JoinKeyCmp> key_cmp;
       for (size_t i = 0; i < key_types.size(); i++) {
         std::string l_name = "lk" + std::to_string(i);
         std::string r_name = "rk" + std::to_string(i);
@@ -309,7 +310,7 @@ TEST(OperatorTest, HashJoinBreakAndFinish) {
 
         left_keys.push_back(arrow::FieldRef(l_name));
         right_keys.push_back(arrow::FieldRef(r_name));
-        key_cmp.push_back(arrow::compute::JoinKeyCmp::EQ);
+        key_cmp.push_back(arrow::acero::JoinKeyCmp::EQ);
       }
 
       for (size_t i = 0; i < build_payload_types.size(); i++) {
@@ -325,10 +326,10 @@ TEST(OperatorTest, HashJoinBreakAndFinish) {
       auto l_schema = *l_schema_builder.Finish();
       auto r_schema = *r_schema_builder.Finish();
 
-      arrow::compute::BatchesWithSchema l_batches_with_schema =
-          arrow::compute::MakeRandomBatches(l_schema, num_probe_batches, batch_size);
-      arrow::compute::BatchesWithSchema r_batches_with_schema =
-          arrow::compute::MakeRandomBatches(r_schema, num_build_batches, batch_size);
+      arrow::acero::BatchesWithSchema l_batches_with_schema =
+          arrow::acero::MakeRandomBatches(l_schema, num_probe_batches, batch_size);
+      arrow::acero::BatchesWithSchema r_batches_with_schema =
+          arrow::acero::MakeRandomBatches(r_schema, num_build_batches, batch_size);
 
       for (arrow::compute::ExecBatch& batch : l_batches_with_schema.batches)
         l_batches.InsertBatch(std::move(batch));
@@ -336,14 +337,14 @@ TEST(OperatorTest, HashJoinBreakAndFinish) {
         r_batches.InsertBatch(std::move(batch));
 
       filter = arrow::compute::literal(true);
-      schema_mgr = std::make_unique<arrow::compute::HashJoinSchema>();
+      schema_mgr = std::make_unique<arrow::acero::HashJoinSchema>();
       DCHECK_OK(schema_mgr->Init(join_type, *l_batches_with_schema.schema, left_keys,
                                  *r_batches_with_schema.schema, right_keys, filter, "l_",
                                  "r_"));
 
       auto* memory_pool = arrow::default_memory_pool();
-      ctx = std::make_unique<arrow::compute::QueryContext>(
-          arrow::compute::QueryOptions{},
+      ctx = std::make_unique<arrow::acero::QueryContext>(
+          arrow::acero::QueryOptions{},
           arrow::compute::ExecContext(memory_pool, NULLPTR, NULLPTR));
       DCHECK_OK(ctx->Init(dop, NULLPTR));
     }
@@ -598,7 +599,7 @@ TEST(OperatorTest, HashJoinBreakAndFinish) {
     int batch_size = 32769;
     int num_build_batches = 1;
     int num_probe_batches = 1;
-    arrow::compute::JoinType join_type = arrow::compute::JoinType::RIGHT_OUTER;
+    arrow::acero::JoinType join_type = arrow::acero::JoinType::RIGHT_OUTER;
     size_t dop = 16;
     size_t num_threads = 7;
 
@@ -612,7 +613,7 @@ TEST(OperatorTest, HashJoinBreakAndFinish) {
     HashJoinProbeResultHolder holder(dop);
 
     auto join_impl = []() {
-      auto join_impl = arrow::compute::HashJoinImpl::MakeSwiss();
+      auto join_impl = arrow::acero::HashJoinImpl::MakeSwiss();
       ARROW_DCHECK_OK(join_impl.status());
       return std::move(*join_impl);
     }();
@@ -628,8 +629,9 @@ TEST(OperatorTest, HashJoinBreakAndFinish) {
         },
         [&](int64_t thread_id, arrow::compute::ExecBatch batch) {
           holder.Emplace(thread_id, std::move(batch));
+          return arrow::Status::OK();
         },
-        [](int64_t x) {}));
+        [](int64_t x) { return arrow::Status::OK(); }));
 
     dispatcher->Seal(
         [&](int64_t thread_id) {

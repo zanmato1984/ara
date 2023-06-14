@@ -1,6 +1,7 @@
-#include "swiss_join.h"
-#include <arrow/compute/exec/accumulation_queue.h>
-#include <arrow/compute/exec/query_context.h>
+#include <arrow/acero/accumulation_queue.h>
+#include <arrow/acero/query_context.h>
+
+#include "arrow/acero/swiss_join.h"
 
 namespace arra {
 
