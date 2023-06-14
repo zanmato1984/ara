@@ -358,6 +358,7 @@ class SwissJoin {
             num_output_rows, key_ids_buf.mutable_data(), payload_ids_buf.mutable_data(),
             [&](ExecBatch batch) {
             //   output_batch_callback_(static_cast<int64_t>(thread_id), std::move(batch));
+            return arrow::Status::OK();
             });
         RETURN_NOT_OK(CancelIfNotOK(status));
         if (!status.ok()) {
