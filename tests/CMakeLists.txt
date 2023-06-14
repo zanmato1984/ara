@@ -51,3 +51,7 @@ configure_test(sketch_task_test "${SKETCH_TASK_TEST_SRC}")
 set(SKETCH_FUTURE_TEST_SRC
         "${CMAKE_CURRENT_SOURCE_DIR}/sketch_future_test.cpp")
 configure_test(sketch_future_test "${SKETCH_FUTURE_TEST_SRC}")
+
+set(SKETCH_SWISS_JOIN_TEST_SRC
+        "${CMAKE_CURRENT_SOURCE_DIR}/sketch_swiss_join_test.cpp")
+configure_test(sketch_swiss_join_test "${SKETCH_SWISS_JOIN_TEST_SRC}")
