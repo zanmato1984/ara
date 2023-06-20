@@ -13,12 +13,17 @@ class ProbeProcessor {
  public:
   using OutputBatchFn = std::function<Status(int64_t, ExecBatch)>;
 
-  void Init(int num_key_columns, JoinType join_type, SwissTableForJoin* hash_table,
-            std::vector<JoinResultMaterialize*> materialize,
-            const std::vector<JoinKeyCmp>* cmp);
+  void Init(int num_key_columns, JoinType join_type, const std::vector<JoinKeyCmp>* cmp,
+            SwissTableForJoin* hash_table, JoinResultMaterialize* materialize,
+            arrow::util::TempVectorStack* temp_stack);
+
+  std::optional<ExecBatch> ProbeMinibatch(
+      int64_t thread_id, arrow::util::TempVectorStack* temp_stack,
+      std::vector<KeyColumnArray>* temp_column_arrays);
+
   Status ProbeBatch(int64_t thread_id, const ExecBatch& keypayload_batch,
-                     arrow::util::TempVectorStack* temp_stack,
-                     std::vector<KeyColumnArray>* temp_column_arrays);
+                    arrow::util::TempVectorStack* temp_stack,
+                    std::vector<KeyColumnArray>* temp_column_arrays);
 
   // Must be called by a single-thread having exclusive access to the instance
   // of this class. The caller is responsible for ensuring that.
@@ -28,12 +33,22 @@ class ProbeProcessor {
  private:
   int num_key_columns_;
   JoinType join_type_;
+  const std::vector<JoinKeyCmp>* cmp_;
 
   SwissTableForJoin* hash_table_;
-  // One element per thread
-  //
-  std::vector<JoinResultMaterialize*> materialize_;
-  const std::vector<JoinKeyCmp>* cmp_;
+  JoinResultMaterialize* materialize_;
+
+  std::optional<arrow::util::TempVectorHolder<uint32_t>> hashes_buf_;
+  std::optional<arrow::util::TempVectorHolder<uint8_t>> match_bitvector_buf_;
+  std::optional<arrow::util::TempVectorHolder<uint32_t>> key_ids_buf_;
+  std::optional<arrow::util::TempVectorHolder<uint16_t>> materialize_batch_ids_buf_;
+  std::optional<arrow::util::TempVectorHolder<uint32_t>> materialize_key_ids_buf_;
+  std::optional<arrow::util::TempVectorHolder<uint32_t>> materialize_payload_ids_buf_;
+
+  std::optional<ExecBatch> current_batch_ = std::nullopt;
+  int minibatch_start_ = 0;
+  std::optional<JoinMatchIterator> match_iterator_ = std::nullopt;
+
   OutputBatchFn output_batch_fn_;
 };
 
@@ -55,6 +70,7 @@ class HashJoin {
 
   struct ThreadLocalState {
     JoinResultMaterialize materialize;
+    ProbeProcessor probe_processor;
     std::vector<KeyColumnArray> temp_column_arrays;
     int64_t num_output_batches;
     bool hash_table_ready;
@@ -62,7 +78,6 @@ class HashJoin {
   std::vector<ThreadLocalState> local_states_;
 
   SwissTableForJoin hash_table_;
-  ProbeProcessor probe_processor_;
   SwissTableForJoinBuild hash_table_build_;
   AccumulationQueue build_side_batches_;
 };
