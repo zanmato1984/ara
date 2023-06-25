@@ -17,11 +17,11 @@ class ProbeProcessor {
             SwissTableForJoin* hash_table, JoinResultMaterialize* materialize,
             arrow::util::TempVectorStack* temp_stack);
 
-  std::optional<ExecBatch> ProbeMinibatch(
-      int64_t thread_id, arrow::util::TempVectorStack* temp_stack,
-      std::vector<KeyColumnArray>* temp_column_arrays);
+  // std::optional<ExecBatch> ProbeMinibatch(
+  //     int64_t thread_id, arrow::util::TempVectorStack* temp_stack,
+  //     std::vector<KeyColumnArray>* temp_column_arrays);
 
-  Status ProbeBatch(int64_t thread_id, const ExecBatch& keypayload_batch,
+  Status ProbeBatch(int64_t thread_id, ExecBatch keypayload_batch,
                     arrow::util::TempVectorStack* temp_stack,
                     std::vector<KeyColumnArray>* temp_column_arrays);
 
@@ -31,6 +31,13 @@ class ProbeProcessor {
   Status OnFinished();
 
  private:
+  std::optional<ExecBatch> LeftSemiOrAnti(
+      int64_t thread_id, ExecBatch keypayload_batch,
+      arrow::util::TempVectorStack* temp_stack,
+      std::vector<KeyColumnArray>* temp_column_arrays);
+  Status RightSemiOrAnti(int64_t thread_id, ExecBatch keypayload_batch,
+                         arrow::util::TempVectorStack* temp_stack,
+                         std::vector<KeyColumnArray>* temp_column_arrays);
   int num_key_columns_;
   JoinType join_type_;
   const std::vector<JoinKeyCmp>* cmp_;
@@ -47,6 +54,7 @@ class ProbeProcessor {
 
   std::optional<ExecBatch> current_batch_ = std::nullopt;
   int minibatch_start_ = 0;
+  bool last_unfinished_ = false;
   std::optional<JoinMatchIterator> match_iterator_ = std::nullopt;
 
   OutputBatchFn output_batch_fn_;
