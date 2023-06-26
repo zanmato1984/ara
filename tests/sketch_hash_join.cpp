@@ -65,9 +65,9 @@ Status ProbeProcessor::ProbeBatch(int64_t thread_id, std::optional<ExecBatch> in
   }
 }
 
-Status ProbeProcessor::InnerOrOuter(int64_t thread_id, TempVectorStack* temp_stack,
-                                    std::vector<KeyColumnArray>* temp_column_arrays,
-                                    std::optional<ExecBatch>& output, State& state_next) {
+Status ProbeProcessor::InnerOuter(int64_t thread_id, TempVectorStack* temp_stack,
+                                  std::vector<KeyColumnArray>* temp_column_arrays,
+                                  std::optional<ExecBatch>& output, State& state_next) {
   int num_rows = static_cast<int>(input_->batch.length);
   state_next = State::CLEAN;
 
@@ -192,10 +192,9 @@ Status ProbeProcessor::InnerOrOuter(int64_t thread_id, TempVectorStack* temp_sta
   return Status::OK();
 }
 
-Status ProbeProcessor::LeftSemiOrAnti(int64_t thread_id, TempVectorStack* temp_stack,
-                                      std::vector<KeyColumnArray>* temp_column_arrays,
-                                      std::optional<ExecBatch>& output,
-                                      State& state_next) {
+Status ProbeProcessor::LeftSemiAnti(int64_t thread_id, TempVectorStack* temp_stack,
+                                    std::vector<KeyColumnArray>* temp_column_arrays,
+                                    std::optional<ExecBatch>& output, State& state_next) {
   int num_rows = static_cast<int>(input_->batch.length);
   state_next = State::CLEAN;
 
@@ -259,10 +258,10 @@ Status ProbeProcessor::LeftSemiOrAnti(int64_t thread_id, TempVectorStack* temp_s
   return Status::OK();
 }
 
-Status ProbeProcessor::RightSemiOrAnti(int64_t thread_id, TempVectorStack* temp_stack,
-                                       std::vector<KeyColumnArray>* temp_column_arrays,
-                                       std::optional<ExecBatch>& output,
-                                       State& state_next) {
+Status ProbeProcessor::RightSemiAnti(int64_t thread_id, TempVectorStack* temp_stack,
+                                     std::vector<KeyColumnArray>* temp_column_arrays,
+                                     std::optional<ExecBatch>& output,
+                                     State& state_next) {
   int num_rows = static_cast<int>(input_->batch.length);
   state_next = State::CLEAN;
 

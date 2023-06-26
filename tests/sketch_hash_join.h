@@ -170,15 +170,15 @@ class ProbeProcessor {
   };
   std::optional<Input> input_;
 
-  Status InnerOrOuter(int64_t thread_id, TempVectorStack* temp_stack,
+  Status InnerOuter(int64_t thread_id, TempVectorStack* temp_stack,
+                    std::vector<KeyColumnArray>* temp_column_arrays,
+                    std::optional<ExecBatch>& output, State& state_next);
+  Status LeftSemiAnti(int64_t thread_id, TempVectorStack* temp_stack,
                       std::vector<KeyColumnArray>* temp_column_arrays,
                       std::optional<ExecBatch>& output, State& state_next);
-  Status LeftSemiOrAnti(int64_t thread_id, TempVectorStack* temp_stack,
-                        std::vector<KeyColumnArray>* temp_column_arrays,
-                        std::optional<ExecBatch>& output, State& state_next);
-  Status RightSemiOrAnti(int64_t thread_id, TempVectorStack* temp_stack,
-                         std::vector<KeyColumnArray>* temp_column_arrays,
-                         std::optional<ExecBatch>& output, State& state_next);
+  Status RightSemiAnti(int64_t thread_id, TempVectorStack* temp_stack,
+                       std::vector<KeyColumnArray>* temp_column_arrays,
+                       std::optional<ExecBatch>& output, State& state_next);
 };
 
 class HashJoin {
