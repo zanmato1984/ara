@@ -33,8 +33,8 @@ Status ProbeProcessor::ProbeBatch(int64_t thread_id, std::optional<ExecBatch> in
           [&](int64_t thread_id, TempVectorStack* temp_stack,
               std::vector<KeyColumnArray>* temp_column_arrays,
               std::optional<ExecBatch>& output, State& state_next) -> Status {
-            return InnerOrOuter(thread_id, temp_stack, temp_column_arrays, output,
-                                state_next);
+            return InnerOuter(thread_id, temp_stack, temp_column_arrays, output,
+                              state_next);
           });
       break;
     }
@@ -45,8 +45,8 @@ Status ProbeProcessor::ProbeBatch(int64_t thread_id, std::optional<ExecBatch> in
           [&](int64_t thread_id, TempVectorStack* temp_stack,
               std::vector<KeyColumnArray>* temp_column_arrays,
               std::optional<ExecBatch>& output, State& state_next) -> Status {
-            return LeftSemiOrAnti(thread_id, temp_stack, temp_column_arrays, output,
-                                  state_next);
+            return LeftSemiAnti(thread_id, temp_stack, temp_column_arrays, output,
+                                state_next);
           });
       break;
     }
@@ -57,8 +57,8 @@ Status ProbeProcessor::ProbeBatch(int64_t thread_id, std::optional<ExecBatch> in
           [&](int64_t thread_id, TempVectorStack* temp_stack,
               std::vector<KeyColumnArray>* temp_column_arrays,
               std::optional<ExecBatch>& output, State& state_next) -> Status {
-            return RightSemiOrAnti(thread_id, temp_stack, temp_column_arrays, output,
-                                   state_next);
+            return RightSemiAnti(thread_id, temp_stack, temp_column_arrays, output,
+                                 state_next);
           });
       break;
     }
