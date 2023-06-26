@@ -56,7 +56,6 @@ std::optional<ExecBatch> ProbeProcessor::LeftSemiOrAnti(
                                input_->match_bitvector_buf.mutable_data());
       }
 
-      // Semi-joins
       int num_passing_ids = 0;
       arrow::util::bit_util::bits_to_indexes(
           (join_type_ == JoinType::LEFT_ANTI) ? 0 : 1, hardware_flags,
@@ -89,6 +88,125 @@ std::optional<ExecBatch> ProbeProcessor::LeftSemiOrAnti(
     }
 
     return state_next;
+  };
+
+  // Process.
+  State state_next = State::CLEAN;
+  switch (state_) {
+    case State::CLEAN: {
+      // Some check.
+      DCHECK(!input_.has_value());
+      DCHECK(materialize_->num_rows() == 0);
+
+      // Prepare input.
+      auto batch_length = input.length;
+      input_ = Input{
+          std::move(input),
+          ExecBatch({}, batch_length),
+          0,
+          arrow::util::TempVectorHolder<uint32_t>(temp_stack, minibatch_size),
+          arrow::util::TempVectorHolder<uint8_t>(
+              temp_stack, static_cast<uint32_t>(bit_util::BytesForBits(minibatch_size))),
+          arrow::util::TempVectorHolder<uint32_t>(temp_stack, minibatch_size),
+          arrow::util::TempVectorHolder<uint16_t>(temp_stack, minibatch_size),
+          arrow::util::TempVectorHolder<uint32_t>(temp_stack, minibatch_size),
+          arrow::util::TempVectorHolder<uint32_t>(temp_stack, minibatch_size)};
+      input_->key_batch.values.resize(num_key_columns_);
+      for (int i = 0; i < num_key_columns_; ++i) {
+        input_->key_batch.values[i] = input_->batch.values[i];
+      }
+
+      // Process input.
+      state_next = process();
+
+      break;
+    }
+    case State::HAS_MORE: {
+      // Some check.
+      DCHECK(input_.has_value());
+      DCHECK(materialize_->num_rows() > 0);
+
+      // Process input.
+      state_next = process();
+
+      break;
+    }
+  }
+
+  // Transition.
+  switch (state_next) {
+    case State::CLEAN: {
+      input_.reset();
+      break;
+    }
+    case State::HAS_MORE: {
+      break;
+    }
+  }
+
+  state_ = state_next;
+
+  return output;
+}
+
+std::optional<ExecBatch> ProbeProcessor::RightSemiOrAnti(
+    int64_t thread_id, ExecBatch input, arrow::util::TempVectorStack* temp_stack,
+    std::vector<KeyColumnArray>* temp_column_arrays) {
+  const SwissTable* swiss_table = hash_table_->keys()->swiss_table();
+  int64_t hardware_flags = swiss_table->hardware_flags();
+  int minibatch_size = swiss_table->minibatch_size();
+
+  std::optional<ExecBatch> output;
+  auto process = [&]() -> State {
+    int num_rows = static_cast<int>(input_->batch.length);
+
+    // Break into minibatches
+    for (; input_->minibatch_start < num_rows;) {
+      uint32_t minibatch_size_next =
+          std::min(minibatch_size, num_rows - input_->minibatch_start);
+
+      // Calculate hash and matches for this minibatch.
+      {
+        SwissTableWithKeys::Input hash_table_input(
+            &input_->key_batch, input_->minibatch_start,
+            input_->minibatch_start + minibatch_size_next, temp_stack,
+            temp_column_arrays);
+        hash_table_->keys()->Hash(&hash_table_input, input_->hashes_buf.mutable_data(),
+                                  hardware_flags);
+        hash_table_->keys()->MapReadOnly(&hash_table_input,
+                                         input_->hashes_buf.mutable_data(),
+                                         input_->match_bitvector_buf.mutable_data(),
+                                         input_->key_ids_buf.mutable_data());
+      }
+
+      // AND bit vector with null key filter for join
+      {
+        bool ignored;
+        JoinNullFilter::Filter(input_->key_batch, input_->minibatch_start,
+                               minibatch_size_next, *cmp_, &ignored,
+                               /*and_with_input=*/true,
+                               input_->match_bitvector_buf.mutable_data());
+      }
+
+      int num_passing_ids = 0;
+      arrow::util::bit_util::bits_to_indexes(
+          (join_type_ == JoinType::LEFT_ANTI) ? 0 : 1, hardware_flags,
+          minibatch_size_next, input_->match_bitvector_buf.mutable_data(),
+          &num_passing_ids, input_->materialize_batch_ids_buf.mutable_data());
+
+      // For right-semi, right-anti joins: update has-match flags for the rows
+      // in hash table.
+      for (int i = 0; i < num_passing_ids; ++i) {
+        uint16_t id = input_->materialize_batch_ids_buf.mutable_data()[i];
+        input_->key_ids_buf.mutable_data()[i] = input_->key_ids_buf.mutable_data()[id];
+      }
+      hash_table_->UpdateHasMatchForKeys(thread_id, num_passing_ids,
+                                         input_->key_ids_buf.mutable_data());
+
+      input_->minibatch_start += minibatch_size_next;
+    }
+
+    return State::CLEAN;
   };
 
   // Process.

@@ -30,9 +30,10 @@ class ProbeProcessor {
       int64_t thread_id, ExecBatch keypayload_batch,
       arrow::util::TempVectorStack* temp_stack,
       std::vector<KeyColumnArray>* temp_column_arrays);
-  Status RightSemiOrAnti(int64_t thread_id, ExecBatch keypayload_batch,
-                         arrow::util::TempVectorStack* temp_stack,
-                         std::vector<KeyColumnArray>* temp_column_arrays);
+  std::optional<ExecBatch> RightSemiOrAnti(
+      int64_t thread_id, ExecBatch keypayload_batch,
+      arrow::util::TempVectorStack* temp_stack,
+      std::vector<KeyColumnArray>* temp_column_arrays);
   int num_key_columns_;
   JoinType join_type_;
   const std::vector<JoinKeyCmp>* cmp_;
