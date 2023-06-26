@@ -36,7 +36,6 @@ Status ProbeProcessor::ProbeBatch(int64_t thread_id, std::optional<ExecBatch> in
             return InnerOuter(thread_id, temp_stack, temp_column_arrays, output,
                               state_next);
           });
-      break;
     }
     case JoinType::LEFT_SEMI:
     case JoinType::LEFT_ANTI: {
@@ -48,7 +47,6 @@ Status ProbeProcessor::ProbeBatch(int64_t thread_id, std::optional<ExecBatch> in
             return LeftSemiAnti(thread_id, temp_stack, temp_column_arrays, output,
                                 state_next);
           });
-      break;
     }
     case JoinType::RIGHT_SEMI:
     case JoinType::RIGHT_ANTI: {
@@ -60,7 +58,6 @@ Status ProbeProcessor::ProbeBatch(int64_t thread_id, std::optional<ExecBatch> in
             return RightSemiAnti(thread_id, temp_stack, temp_column_arrays, output,
                                  state_next);
           });
-      break;
     }
   }
 }
