@@ -25,11 +25,6 @@ class ProbeProcessor {
                     arrow::util::TempVectorStack* temp_stack,
                     std::vector<KeyColumnArray>* temp_column_arrays);
 
-  // Must be called by a single-thread having exclusive access to the instance
-  // of this class. The caller is responsible for ensuring that.
-  //
-  Status OnFinished();
-
  private:
   std::optional<ExecBatch> LeftSemiOrAnti(
       int64_t thread_id, ExecBatch keypayload_batch,
@@ -45,16 +40,21 @@ class ProbeProcessor {
   SwissTableForJoin* hash_table_;
   JoinResultMaterialize* materialize_;
 
-  std::optional<arrow::util::TempVectorHolder<uint32_t>> hashes_buf_;
-  std::optional<arrow::util::TempVectorHolder<uint8_t>> match_bitvector_buf_;
-  std::optional<arrow::util::TempVectorHolder<uint32_t>> key_ids_buf_;
-  std::optional<arrow::util::TempVectorHolder<uint16_t>> materialize_batch_ids_buf_;
-  std::optional<arrow::util::TempVectorHolder<uint32_t>> materialize_key_ids_buf_;
-  std::optional<arrow::util::TempVectorHolder<uint32_t>> materialize_payload_ids_buf_;
+  enum class State { CLEAN, HAS_MORE } state_ = State::CLEAN;
+  struct Input {
+    ExecBatch batch;
+    ExecBatch key_batch;
+    int minibatch_start = 0;
 
-  std::optional<ExecBatch> current_batch_ = std::nullopt;
-  int minibatch_start_ = 0;
-  bool last_unfinished_ = false;
+    arrow::util::TempVectorHolder<uint32_t> hashes_buf;
+    arrow::util::TempVectorHolder<uint8_t> match_bitvector_buf;
+    arrow::util::TempVectorHolder<uint32_t> key_ids_buf;
+    arrow::util::TempVectorHolder<uint16_t> materialize_batch_ids_buf;
+    arrow::util::TempVectorHolder<uint32_t> materialize_key_ids_buf;
+    arrow::util::TempVectorHolder<uint32_t> materialize_payload_ids_buf;
+  };
+
+  std::optional<Input> input_;
   std::optional<JoinMatchIterator> match_iterator_ = std::nullopt;
 
   OutputBatchFn output_batch_fn_;

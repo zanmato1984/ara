@@ -14,453 +14,138 @@ void ProbeProcessor::Init(int num_key_columns, JoinType join_type,
   cmp_ = cmp;
   hash_table_ = hash_table;
   materialize_ = materialize;
-
-  auto minibatch_size = hash_table_->keys()->swiss_table()->minibatch_size();
-
-  hashes_buf_ = arrow::util::TempVectorHolder<uint32_t>(temp_stack, minibatch_size);
-  match_bitvector_buf_ = arrow::util::TempVectorHolder<uint8_t>(
-      temp_stack, static_cast<uint32_t>(bit_util::BytesForBits(minibatch_size)));
-  key_ids_buf_ = arrow::util::TempVectorHolder<uint32_t>(temp_stack, minibatch_size);
-  materialize_batch_ids_buf_ =
-      arrow::util::TempVectorHolder<uint16_t>(temp_stack, minibatch_size);
-  materialize_key_ids_buf_ =
-      arrow::util::TempVectorHolder<uint32_t>(temp_stack, minibatch_size);
-  materialize_payload_ids_buf_ =
-      arrow::util::TempVectorHolder<uint32_t>(temp_stack, minibatch_size);
-}
-
-// std::optional<ExecBatch> ProbeProcessor::ProbeMinibatch(
-//     int64_t thread_id, arrow::util::TempVectorStack* temp_stack,
-//     std::vector<KeyColumnArray>* temp_column_arrays) {
-//   if (!current_batch_.has_value()) {
-//     return std::nullopt;
-//   }
-
-//   const ExecBatch& keypayload_batch = current_batch_.value();
-//   const SwissTable* swiss_table = hash_table_->keys()->swiss_table();
-//   int64_t hardware_flags = swiss_table->hardware_flags();
-//   int minibatch_size = swiss_table->minibatch_size();
-//   int num_rows = static_cast<int>(keypayload_batch.length);
-
-//   ExecBatch key_batch({}, keypayload_batch.length);
-//   key_batch.values.resize(num_key_columns_);
-//   for (int i = 0; i < num_key_columns_; ++i) {
-//     key_batch.values[i] = keypayload_batch.values[i];
-//   }
-//   uint32_t minibatch_size_next = std::min(minibatch_size, num_rows - minibatch_start_);
-
-//   if (join_type_ != JoinType::LEFT_SEMI && join_type_ != JoinType::LEFT_ANTI &&
-//       join_type_ != JoinType::RIGHT_SEMI && join_type_ != JoinType::RIGHT_ANTI) {
-//     bool no_duplicate_keys = (hash_table_->key_to_payload() == nullptr);
-//     bool no_payload_columns = (hash_table_->payloads() == nullptr);
-
-//     if (!match_iterator_.has_value()) {
-//       match_iterator_.emplace();
-//       match_iterator_->SetLookupResult(minibatch_size_next, minibatch_start_,
-//                                        match_bitvector_buf_.value().mutable_data(),
-//                                        key_ids_buf_.value().mutable_data(),
-//                                        no_duplicate_keys,
-//                                        hash_table_->key_to_payload());
-//     }
-
-//     int num_matches_next;
-//     bool has_next = (match_iterator_.value().GetNextBatch(
-//         minibatch_size, &num_matches_next,
-//         materialize_batch_ids_buf_.value().mutable_data(),
-//         materialize_key_ids_buf_.value().mutable_data(),
-//         materialize_payload_ids_buf_.value().mutable_data()));
-
-//     if (has_next) {
-//       const uint16_t* materialize_batch_ids =
-//           materialize_batch_ids_buf_.value().mutable_data();
-//       const uint32_t* materialize_key_ids =
-//           materialize_key_ids_buf_.value().mutable_data();
-//       const uint32_t* materialize_payload_ids =
-//           no_duplicate_keys || no_payload_columns
-//               ? materialize_key_ids_buf_.value().mutable_data()
-//               : materialize_payload_ids_buf_.value().mutable_data();
-//       // For right-outer, full-outer joins we need to update has-match flags
-//       // for the rows in hash table.
-//       //
-//       if (join_type_ == JoinType::RIGHT_OUTER || join_type_ == JoinType::FULL_OUTER) {
-//         hash_table_->UpdateHasMatchForKeys(thread_id, num_matches_next,
-//                                            materialize_key_ids);
-//       }
-
-//       // Call materialize for resulting id tuples pointing to matching pairs
-//       // of rows.
-//       //
-//       RETURN_NOT_OK(materialize_->Append(
-//           keypayload_batch, num_matches_next, materialize_batch_ids,
-//           materialize_key_ids, materialize_payload_ids, [&](ExecBatch batch) {
-//             return output_batch_fn_(thread_id, std::move(batch));
-//           }));
-//     }
-//   }
-// }
-
-// // Semi-joins
-// //
-// if (join_type_ == JoinType::LEFT_SEMI || join_type_ == JoinType::LEFT_ANTI ||
-//     join_type_ == JoinType::RIGHT_SEMI || join_type_ == JoinType::RIGHT_ANTI) {
-//   int num_passing_ids = 0;
-//   arrow::util::bit_util::bits_to_indexes(
-//       (join_type_ == JoinType::LEFT_ANTI) ? 0 : 1, hardware_flags, minibatch_size_next,
-//       match_bitvector_buf_.value().mutable_data(), &num_passing_ids,
-//       materialize_batch_ids_buf_.value().mutable_data());
-
-//   // For right-semi, right-anti joins: update has-match flags for the rows
-//   // in hash table.
-//   //
-//   if (join_type_ == JoinType::RIGHT_SEMI || join_type_ == JoinType::RIGHT_ANTI) {
-//     for (int i = 0; i < num_passing_ids; ++i) {
-//       uint16_t id = materialize_batch_ids_buf_.value().mutable_data()[i];
-//       key_ids_buf_.value().mutable_data()[i] = key_ids_buf_.value().mutable_data()[id];
-//     }
-//     hash_table_->UpdateHasMatchForKeys(thread_id, num_passing_ids,
-//                                        key_ids_buf_.value().mutable_data());
-//   } else {
-//     // For left-semi, left-anti joins: call materialize using match
-//     // bit-vector.
-//     //
-
-//     // Add base batch row index.
-//     //
-//     for (int i = 0; i < num_passing_ids; ++i) {
-//       materialize_batch_ids_buf_.value().mutable_data()[i] +=
-//           static_cast<uint16_t>(minibatch_start);
-//     }
-
-//     RETURN_NOT_OK(materialize_->AppendProbeOnly(
-//         keypayload_batch, num_passing_ids,
-//         materialize_batch_ids_buf_.value().mutable_data(),
-//         [&](ExecBatch batch) { return output_batch_fn_(thread_id, std::move(batch));
-//         }));
-//   }
-// } else {
-//   // We need to output matching pairs of rows from both sides of the join.
-//   // Since every hash table lookup for an input row might have multiple
-//   // matches we use a helper class that implements enumerating all of them.
-//   //
-//   bool no_duplicate_keys = (hash_table_->key_to_payload() == nullptr);
-//   bool no_payload_columns = (hash_table_->payloads() == nullptr);
-//   JoinMatchIterator match_iterator;
-//   match_iterator.SetLookupResult(minibatch_size_next, minibatch_start,
-//                                  match_bitvector_buf_.value().mutable_data(),
-//                                  key_ids_buf_.value().mutable_data(),
-//                                  no_duplicate_keys, hash_table_->key_to_payload());
-//   int num_matches_next;
-//   while (
-//       match_iterator.GetNextBatch(minibatch_size, &num_matches_next,
-//                                   materialize_batch_ids_buf_.value().mutable_data(),
-//                                   materialize_key_ids_buf_.value().mutable_data(),
-//                                   materialize_payload_ids_buf_.value().mutable_data()))
-//                                   {
-//     const uint16_t* materialize_batch_ids =
-//         materialize_batch_ids_buf_.value().mutable_data();
-//     const uint32_t* materialize_key_ids =
-//     materialize_key_ids_buf_.value().mutable_data(); const uint32_t*
-//     materialize_payload_ids =
-//         no_duplicate_keys || no_payload_columns
-//             ? materialize_key_ids_buf_.value().mutable_data()
-//             : materialize_payload_ids_buf_.value().mutable_data();
-
-//     // For right-outer, full-outer joins we need to update has-match flags
-//     // for the rows in hash table.
-//     //
-//     if (join_type_ == JoinType::RIGHT_OUTER || join_type_ == JoinType::FULL_OUTER) {
-//       hash_table_->UpdateHasMatchForKeys(thread_id, num_matches_next,
-//                                          materialize_key_ids);
-//     }
-
-//     // Call materialize for resulting id tuples pointing to matching pairs
-//     // of rows.
-//     //
-//     RETURN_NOT_OK(materialize_->Append(
-//         keypayload_batch, num_matches_next, materialize_batch_ids, materialize_key_ids,
-//         materialize_payload_ids,
-//         [&](ExecBatch batch) { return output_batch_fn_(thread_id, std::move(batch));
-//         }));
-//   }
-
-//   // For left-outer and full-outer joins output non-matches.
-//   //
-//   // Call materialize. Nulls will be output in all columns that come from
-//   // the other side of the join.
-//   //
-//   if (join_type_ == JoinType::LEFT_OUTER || join_type_ == JoinType::FULL_OUTER) {
-//     int num_passing_ids = 0;
-//     arrow::util::bit_util::bits_to_indexes(
-//         /*bit_to_search=*/0, hardware_flags, minibatch_size_next,
-//         match_bitvector_buf_.value().mutable_data(), &num_passing_ids,
-//         materialize_batch_ids_buf_.value().mutable_data());
-
-//     // Add base batch row index.
-//     //
-//     for (int i = 0; i < num_passing_ids; ++i) {
-//       materialize_batch_ids_buf_.value().mutable_data()[i] +=
-//           static_cast<uint16_t>(minibatch_start);
-//     }
-
-//     RETURN_NOT_OK(materialize_->AppendProbeOnly(
-//         keypayload_batch, num_passing_ids,
-//         materialize_batch_ids_buf_.value().mutable_data(),
-//         [&](ExecBatch batch) { return output_batch_fn_(thread_id, std::move(batch));
-//         }));
-//   }
-// }
-
-// minibatch_start_ += minibatch_size_next;
-// if (minibatch_start_ >= num_rows) {
-//   current_batch_ = std::nullopt;
-//   minibatch_start_ = 0;
-// }
-// }
-
-Status ProbeProcessor::ProbeBatch(int64_t thread_id, ExecBatch keypayload_batch,
-                                  arrow::util::TempVectorStack* temp_stack,
-                                  std::vector<KeyColumnArray>* temp_column_arrays) {
-  const SwissTable* swiss_table = hash_table_->keys()->swiss_table();
-  int64_t hardware_flags = swiss_table->hardware_flags();
-  int minibatch_size = swiss_table->minibatch_size();
-  int num_rows = static_cast<int>(keypayload_batch.length);
-
-  ExecBatch key_batch({}, keypayload_batch.length);
-  key_batch.values.resize(num_key_columns_);
-  for (int i = 0; i < num_key_columns_; ++i) {
-    key_batch.values[i] = keypayload_batch.values[i];
-  }
-
-  // Break into mini-batches
-
-  for (int minibatch_start = 0; minibatch_start < num_rows;) {
-    uint32_t minibatch_size_next = std::min(minibatch_size, num_rows - minibatch_start);
-
-    SwissTableWithKeys::Input input(&key_batch, minibatch_start,
-                                    minibatch_start + minibatch_size_next, temp_stack,
-                                    temp_column_arrays);
-    hash_table_->keys()->Hash(&input, hashes_buf_.value().mutable_data(), hardware_flags);
-    hash_table_->keys()->MapReadOnly(&input, hashes_buf_.value().mutable_data(),
-                                     match_bitvector_buf_.value().mutable_data(),
-                                     key_ids_buf_.value().mutable_data());
-
-    // AND bit vector with null key filter for join
-    //
-    bool ignored;
-    JoinNullFilter::Filter(
-        key_batch, minibatch_start, minibatch_size_next, *cmp_, &ignored,
-        /*and_with_input=*/true, match_bitvector_buf_.value().mutable_data());
-    // Semi-joins
-    //
-    if (join_type_ == JoinType::LEFT_SEMI || join_type_ == JoinType::LEFT_ANTI ||
-        join_type_ == JoinType::RIGHT_SEMI || join_type_ == JoinType::RIGHT_ANTI) {
-      int num_passing_ids = 0;
-      arrow::util::bit_util::bits_to_indexes(
-          (join_type_ == JoinType::LEFT_ANTI) ? 0 : 1, hardware_flags,
-          minibatch_size_next, match_bitvector_buf_.value().mutable_data(),
-          &num_passing_ids, materialize_batch_ids_buf_.value().mutable_data());
-
-      // For right-semi, right-anti joins: update has-match flags for the rows
-      // in hash table.
-      //
-      if (join_type_ == JoinType::RIGHT_SEMI || join_type_ == JoinType::RIGHT_ANTI) {
-        for (int i = 0; i < num_passing_ids; ++i) {
-          uint16_t id = materialize_batch_ids_buf_.value().mutable_data()[i];
-          key_ids_buf_.value().mutable_data()[i] =
-              key_ids_buf_.value().mutable_data()[id];
-        }
-        hash_table_->UpdateHasMatchForKeys(thread_id, num_passing_ids,
-                                           key_ids_buf_.value().mutable_data());
-      } else {
-        // For left-semi, left-anti joins: call materialize using match
-        // bit-vector.
-        //
-
-        // Add base batch row index.
-        //
-        for (int i = 0; i < num_passing_ids; ++i) {
-          materialize_batch_ids_buf_.value().mutable_data()[i] +=
-              static_cast<uint16_t>(minibatch_start);
-        }
-
-        RETURN_NOT_OK(materialize_->AppendProbeOnly(
-            keypayload_batch, num_passing_ids,
-            materialize_batch_ids_buf_.value().mutable_data(), [&](ExecBatch batch) {
-              return output_batch_fn_(thread_id, std::move(batch));
-            }));
-      }
-    } else {
-      // We need to output matching pairs of rows from both sides of the join.
-      // Since every hash table lookup for an input row might have multiple
-      // matches we use a helper class that implements enumerating all of them.
-      //
-      bool no_duplicate_keys = (hash_table_->key_to_payload() == nullptr);
-      bool no_payload_columns = (hash_table_->payloads() == nullptr);
-      JoinMatchIterator match_iterator;
-      match_iterator.SetLookupResult(minibatch_size_next, minibatch_start,
-                                     match_bitvector_buf_.value().mutable_data(),
-                                     key_ids_buf_.value().mutable_data(),
-                                     no_duplicate_keys, hash_table_->key_to_payload());
-      int num_matches_next;
-      while (match_iterator.GetNextBatch(
-          minibatch_size, &num_matches_next,
-          materialize_batch_ids_buf_.value().mutable_data(),
-          materialize_key_ids_buf_.value().mutable_data(),
-          materialize_payload_ids_buf_.value().mutable_data())) {
-        const uint16_t* materialize_batch_ids =
-            materialize_batch_ids_buf_.value().mutable_data();
-        const uint32_t* materialize_key_ids =
-            materialize_key_ids_buf_.value().mutable_data();
-        const uint32_t* materialize_payload_ids =
-            no_duplicate_keys || no_payload_columns
-                ? materialize_key_ids_buf_.value().mutable_data()
-                : materialize_payload_ids_buf_.value().mutable_data();
-
-        // For right-outer, full-outer joins we need to update has-match flags
-        // for the rows in hash table.
-        //
-        if (join_type_ == JoinType::RIGHT_OUTER || join_type_ == JoinType::FULL_OUTER) {
-          hash_table_->UpdateHasMatchForKeys(thread_id, num_matches_next,
-                                             materialize_key_ids);
-        }
-
-        // Call materialize for resulting id tuples pointing to matching pairs
-        // of rows.
-        //
-        RETURN_NOT_OK(materialize_->Append(
-            keypayload_batch, num_matches_next, materialize_batch_ids,
-            materialize_key_ids, materialize_payload_ids, [&](ExecBatch batch) {
-              return output_batch_fn_(thread_id, std::move(batch));
-            }));
-      }
-
-      // For left-outer and full-outer joins output non-matches.
-      //
-      // Call materialize. Nulls will be output in all columns that come from
-      // the other side of the join.
-      //
-      if (join_type_ == JoinType::LEFT_OUTER || join_type_ == JoinType::FULL_OUTER) {
-        int num_passing_ids = 0;
-        arrow::util::bit_util::bits_to_indexes(
-            /*bit_to_search=*/0, hardware_flags, minibatch_size_next,
-            match_bitvector_buf_.value().mutable_data(), &num_passing_ids,
-            materialize_batch_ids_buf_.value().mutable_data());
-
-        // Add base batch row index.
-        //
-        for (int i = 0; i < num_passing_ids; ++i) {
-          materialize_batch_ids_buf_.value().mutable_data()[i] +=
-              static_cast<uint16_t>(minibatch_start);
-        }
-
-        RETURN_NOT_OK(materialize_->AppendProbeOnly(
-            keypayload_batch, num_passing_ids,
-            materialize_batch_ids_buf_.value().mutable_data(), [&](ExecBatch batch) {
-              return output_batch_fn_(thread_id, std::move(batch));
-            }));
-      }
-    }
-
-    minibatch_start_ += minibatch_size_next;
-  }
-
-  return Status::OK();
-}
-
-Status ProbeProcessor::OnFinished() {
-  // Flush all instances of materialize that have
-  // non-zero accumulated output rows.
-  //
-  RETURN_NOT_OK(materialize_->Flush(
-      [&](ExecBatch batch) { return output_batch_fn_(0, std::move(batch)); }));
-
-  return Status::OK();
 }
 
 std::optional<ExecBatch> ProbeProcessor::LeftSemiOrAnti(
-    int64_t thread_id, ExecBatch keypayload_batch,
-    arrow::util::TempVectorStack* temp_stack,
+    int64_t thread_id, ExecBatch input, arrow::util::TempVectorStack* temp_stack,
     std::vector<KeyColumnArray>* temp_column_arrays) {
   const SwissTable* swiss_table = hash_table_->keys()->swiss_table();
   int64_t hardware_flags = swiss_table->hardware_flags();
   int minibatch_size = swiss_table->minibatch_size();
-  int num_rows = static_cast<int>(keypayload_batch.length);
-
-  ExecBatch key_batch({}, keypayload_batch.length);
-  key_batch.values.resize(num_key_columns_);
-  for (int i = 0; i < num_key_columns_; ++i) {
-    key_batch.values[i] = keypayload_batch.values[i];
-  }
 
   std::optional<ExecBatch> output;
+  auto process = [&]() -> State {
+    int num_rows = static_cast<int>(input_->batch.length);
 
-  // Break into mini-batches
-  for (; minibatch_start_ < num_rows;) {
-    uint32_t minibatch_size_next = std::min(minibatch_size, num_rows - minibatch_start_);
+    // Break into minibatches
+    State state_next = State::CLEAN;
+    for (; input_->minibatch_start < num_rows && state_next == State::CLEAN;) {
+      uint32_t minibatch_size_next =
+          std::min(minibatch_size, num_rows - input_->minibatch_start);
 
-    SwissTableWithKeys::Input input(&key_batch, minibatch_start_,
-                                    minibatch_start_ + minibatch_size_next, temp_stack,
-                                    temp_column_arrays);
-    hash_table_->keys()->Hash(&input, hashes_buf_.value().mutable_data(), hardware_flags);
-    hash_table_->keys()->MapReadOnly(&input, hashes_buf_.value().mutable_data(),
-                                     match_bitvector_buf_.value().mutable_data(),
-                                     key_ids_buf_.value().mutable_data());
+      // Calculate hash and matches for this minibatch.
+      {
+        SwissTableWithKeys::Input hash_table_input(
+            &input_->key_batch, input_->minibatch_start,
+            input_->minibatch_start + minibatch_size_next, temp_stack,
+            temp_column_arrays);
+        hash_table_->keys()->Hash(&hash_table_input, input_->hashes_buf.mutable_data(),
+                                  hardware_flags);
+        hash_table_->keys()->MapReadOnly(&hash_table_input,
+                                         input_->hashes_buf.mutable_data(),
+                                         input_->match_bitvector_buf.mutable_data(),
+                                         input_->key_ids_buf.mutable_data());
+      }
 
-    // AND bit vector with null key filter for join
-    //
-    bool ignored;
-    JoinNullFilter::Filter(
-        key_batch, minibatch_start_, minibatch_size_next, *cmp_, &ignored,
-        /*and_with_input=*/true, match_bitvector_buf_.value().mutable_data());
-    // Semi-joins
-    //
-    int num_passing_ids = 0;
-    arrow::util::bit_util::bits_to_indexes(
-        (join_type_ == JoinType::LEFT_ANTI) ? 0 : 1, hardware_flags, minibatch_size_next,
-        match_bitvector_buf_.value().mutable_data(), &num_passing_ids,
-        materialize_batch_ids_buf_.value().mutable_data());
+      // AND bit vector with null key filter for join
+      {
+        bool ignored;
+        JoinNullFilter::Filter(input_->key_batch, input_->minibatch_start,
+                               minibatch_size_next, *cmp_, &ignored,
+                               /*and_with_input=*/true,
+                               input_->match_bitvector_buf.mutable_data());
+      }
 
-    // For left-semi, left-anti joins: call materialize using match
-    // bit-vector.
-    //
+      // Semi-joins
+      int num_passing_ids = 0;
+      arrow::util::bit_util::bits_to_indexes(
+          (join_type_ == JoinType::LEFT_ANTI) ? 0 : 1, hardware_flags,
+          minibatch_size_next, input_->match_bitvector_buf.mutable_data(),
+          &num_passing_ids, input_->materialize_batch_ids_buf.mutable_data());
 
-    // Add base batch row index.
-    //
-    for (int i = 0; i < num_passing_ids; ++i) {
-      materialize_batch_ids_buf_.value().mutable_data()[i] +=
-          static_cast<uint16_t>(minibatch_start_);
+      // Add base batch row index.
+      for (int i = 0; i < num_passing_ids; ++i) {
+        input_->materialize_batch_ids_buf.mutable_data()[i] +=
+            static_cast<uint16_t>(input_->minibatch_start);
+      }
+
+      // If we are to exceed the maximum number of rows per batch, output.
+      if (materialize_->num_rows() + num_passing_ids > kMaxRowsPerBatch) {
+        DCHECK_OK(materialize_->Flush([&](ExecBatch batch) {
+          output.emplace(std::move(batch));
+          return Status::OK();
+        }));
+        state_next = State::HAS_MORE;
+      }
+
+      {
+        int ignored;
+        DCHECK_OK(materialize_->AppendProbeOnly(
+            input_->batch, num_passing_ids,
+            input_->materialize_batch_ids_buf.mutable_data(), &ignored));
+      }
+
+      input_->minibatch_start += minibatch_size_next;
     }
 
-    if (materialize_->num_rows() + num_passing_ids > kMaxRowsPerBatch) {
-      // Flush all instances of materialize that have
-      // non-zero accumulated output rows.
-      //
-      DCHECK_OK(materialize_->Flush([&](ExecBatch batch) {
-        output = std::move(batch);
-        return Status::OK();
-      }));
-      last_unfinished_ = true;
-    }
+    return state_next;
+  };
 
-    int foo;
-    DCHECK_OK(materialize_->AppendProbeOnly(
-        keypayload_batch, num_passing_ids,
-        materialize_batch_ids_buf_.value().mutable_data(), &foo));
-    minibatch_start_ += minibatch_size_next;
-    if (last_unfinished_) {
+  // Process.
+  State state_next = State::CLEAN;
+  switch (state_) {
+    case State::CLEAN: {
+      // Some check.
+      DCHECK(!input_.has_value());
+      DCHECK(materialize_->num_rows() == 0);
+
+      // Prepare input.
+      auto batch_length = input.length;
+      input_ = Input{
+          std::move(input),
+          ExecBatch({}, batch_length),
+          0,
+          arrow::util::TempVectorHolder<uint32_t>(temp_stack, minibatch_size),
+          arrow::util::TempVectorHolder<uint8_t>(
+              temp_stack, static_cast<uint32_t>(bit_util::BytesForBits(minibatch_size))),
+          arrow::util::TempVectorHolder<uint32_t>(temp_stack, minibatch_size),
+          arrow::util::TempVectorHolder<uint16_t>(temp_stack, minibatch_size),
+          arrow::util::TempVectorHolder<uint32_t>(temp_stack, minibatch_size),
+          arrow::util::TempVectorHolder<uint32_t>(temp_stack, minibatch_size)};
+      input_->key_batch.values.resize(num_key_columns_);
+      for (int i = 0; i < num_key_columns_; ++i) {
+        input_->key_batch.values[i] = input_->batch.values[i];
+      }
+
+      // Process input.
+      state_next = process();
+
+      break;
+    }
+    case State::HAS_MORE: {
+      // Some check.
+      DCHECK(input_.has_value());
+      DCHECK(materialize_->num_rows() > 0);
+
+      // Process input.
+      state_next = process();
+
       break;
     }
   }
 
-  if (!last_unfinished_) {
-    // Flush all instances of materialize that have
-    // non-zero accumulated output rows.
-    //
-    DCHECK_OK(materialize_->Flush([&](ExecBatch batch) {
-      output = std::move(batch);
-      return Status::OK();
-    }));
+  // Transition.
+  switch (state_next) {
+    case State::CLEAN: {
+      input_.reset();
+      break;
+    }
+    case State::HAS_MORE: {
+      break;
+    }
   }
+
+  state_ = state_next;
 
   return output;
 }
