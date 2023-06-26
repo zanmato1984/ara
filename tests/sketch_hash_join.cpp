@@ -4,60 +4,163 @@ namespace arra::detail {
 
 static constexpr size_t kMaxRowsPerBatch = 4096;
 
-void ProbeProcessor::Init(int num_key_columns, JoinType join_type,
-                          const std::vector<JoinKeyCmp>* cmp,
-                          SwissTableForJoin* hash_table,
-                          JoinResultMaterialize* materialize,
-                          TempVectorStack* temp_stack) {
+Result<ExecBatch> KeyPayloadFromInput(const HashJoinProjectionMaps* schema,
+                                      MemoryPool* pool, ExecBatch* input) {
+  ExecBatch projected({}, input->length);
+  int num_key_cols = schema->num_cols(HashJoinProjection::KEY);
+  int num_payload_cols = schema->num_cols(HashJoinProjection::PAYLOAD);
+  projected.values.resize(num_key_cols + num_payload_cols);
+
+  auto key_to_input = schema->map(HashJoinProjection::KEY, HashJoinProjection::INPUT);
+  for (int icol = 0; icol < num_key_cols; ++icol) {
+    const Datum& value_in = input->values[key_to_input.get(icol)];
+    if (value_in.is_scalar()) {
+      ARROW_ASSIGN_OR_RAISE(
+          projected.values[icol],
+          MakeArrayFromScalar(*value_in.scalar(), projected.length, pool));
+    } else {
+      projected.values[icol] = value_in;
+    }
+  }
+  auto payload_to_input =
+      schema->map(HashJoinProjection::PAYLOAD, HashJoinProjection::INPUT);
+  for (int icol = 0; icol < num_payload_cols; ++icol) {
+    const Datum& value_in = input->values[payload_to_input.get(icol)];
+    if (value_in.is_scalar()) {
+      ARROW_ASSIGN_OR_RAISE(
+          projected.values[num_key_cols + icol],
+          MakeArrayFromScalar(*value_in.scalar(), projected.length, pool));
+    } else {
+      projected.values[num_key_cols + icol] = value_in;
+    }
+  }
+
+  return projected;
+}
+
+Status BuildProcessor::Init(const HashJoinProjectionMaps* schema, int num_threads,
+                            MemoryPool* pool, SwissTableForJoinBuild* hash_table_build,
+                            AccumulationQueue* batches) {
+  schema_ = schema;
+  num_threads_ = num_threads;
+  pool_ = pool;
+  hash_table_build_ = hash_table_build;
+  batches_ = batches;
+
+  round_ = 0;
+
+  return Status::OK();
+}
+
+Status BuildProcessor::Build(int64_t thread_id, TempVectorStack* temp_stack,
+                             OperatorStatus& status) {
+  status = OperatorStatus::HasOutput(std::nullopt);
+  auto batch_id = num_threads_ * round_ + thread_id;
+  if (batch_id >= batches_->batch_count()) {
+    status = OperatorStatus::Finished();
+    return Status::OK();
+  }
+  round_++;
+
+  bool no_payload = hash_table_build_->no_payload();
+
+  ExecBatch input_batch;
+  ARROW_ASSIGN_OR_RAISE(input_batch,
+                        KeyPayloadFromInput(schema_, pool_, &(*batches_)[batch_id]));
+
+  if (input_batch.length == 0) {
+    return Status::OK();
+  }
+
+  // Split batch into key batch and optional payload batch
+  //
+  // Input batch is key-payload batch (key columns followed by payload
+  // columns). We split it into two separate batches.
+  //
+  // TODO: Change SwissTableForJoinBuild interface to use key-payload
+  // batch instead to avoid this operation, which involves increasing
+  // shared pointer ref counts.
+  //
+  ExecBatch key_batch({}, input_batch.length);
+  key_batch.values.resize(schema_->num_cols(HashJoinProjection::KEY));
+  for (size_t icol = 0; icol < key_batch.values.size(); ++icol) {
+    key_batch.values[icol] = input_batch.values[icol];
+  }
+  ExecBatch payload_batch({}, input_batch.length);
+
+  if (!no_payload) {
+    payload_batch.values.resize(schema_->num_cols(HashJoinProjection::PAYLOAD));
+    for (size_t icol = 0; icol < payload_batch.values.size(); ++icol) {
+      payload_batch.values[icol] =
+          input_batch.values[schema_->num_cols(HashJoinProjection::KEY) + icol];
+    }
+  }
+  ARRA_RETURN_NOT_OK(hash_table_build_->PushNextBatch(
+      static_cast<int64_t>(thread_id), key_batch, no_payload ? nullptr : &payload_batch,
+      temp_stack));
+
+  // Release input batch
+  //
+  input_batch.values.clear();
+
+  return Status::OK();
+}
+
+Status ProbeProcessor::Init(int64_t hardware_flags, int num_key_columns,
+                            JoinType join_type, const std::vector<JoinKeyCmp>* cmp,
+                            SwissTableForJoin* hash_table,
+                            JoinResultMaterialize* materialize) {
+  hardware_flags_ = hardware_flags;
+
   num_key_columns_ = num_key_columns;
   join_type_ = join_type;
   cmp_ = cmp;
+
   hash_table_ = hash_table;
   materialize_ = materialize;
   swiss_table_ = hash_table_->keys()->swiss_table();
-  hardware_flags_ = swiss_table_->hardware_flags();
+
   minibatch_size_ = swiss_table_->minibatch_size();
+
+  return Status::OK();
 }
 
-Status ProbeProcessor::ProbeBatch(int64_t thread_id, std::optional<ExecBatch> input,
-                                  TempVectorStack* temp_stack,
-                                  std::vector<KeyColumnArray>* temp_column_arrays,
-                                  OperatorStatus& status) {
+Status ProbeProcessor::Probe(int64_t thread_id, std::optional<ExecBatch> input,
+                             TempVectorStack* temp_stack,
+                             std::vector<KeyColumnArray>* temp_column_arrays,
+                             OperatorStatus& status) {
   switch (join_type_) {
     case JoinType::INNER:
     case JoinType::LEFT_OUTER:
     case JoinType::RIGHT_OUTER:
     case JoinType::FULL_OUTER: {
-      return ProbeBatch(
-          thread_id, std::move(input), temp_stack, temp_column_arrays, status,
-          [&](int64_t thread_id, TempVectorStack* temp_stack,
-              std::vector<KeyColumnArray>* temp_column_arrays,
-              std::optional<ExecBatch>& output, State& state_next) -> Status {
-            return InnerOuter(thread_id, temp_stack, temp_column_arrays, output,
-                              state_next);
-          });
+      return Probe(thread_id, std::move(input), temp_stack, temp_column_arrays, status,
+                   [&](int64_t thread_id, TempVectorStack* temp_stack,
+                       std::vector<KeyColumnArray>* temp_column_arrays,
+                       std::optional<ExecBatch>& output, State& state_next) -> Status {
+                     return InnerOuter(thread_id, temp_stack, temp_column_arrays, output,
+                                       state_next);
+                   });
     }
     case JoinType::LEFT_SEMI:
     case JoinType::LEFT_ANTI: {
-      return ProbeBatch(
-          thread_id, std::move(input), temp_stack, temp_column_arrays, status,
-          [&](int64_t thread_id, TempVectorStack* temp_stack,
-              std::vector<KeyColumnArray>* temp_column_arrays,
-              std::optional<ExecBatch>& output, State& state_next) -> Status {
-            return LeftSemiAnti(thread_id, temp_stack, temp_column_arrays, output,
-                                state_next);
-          });
+      return Probe(thread_id, std::move(input), temp_stack, temp_column_arrays, status,
+                   [&](int64_t thread_id, TempVectorStack* temp_stack,
+                       std::vector<KeyColumnArray>* temp_column_arrays,
+                       std::optional<ExecBatch>& output, State& state_next) -> Status {
+                     return LeftSemiAnti(thread_id, temp_stack, temp_column_arrays,
+                                         output, state_next);
+                   });
     }
     case JoinType::RIGHT_SEMI:
     case JoinType::RIGHT_ANTI: {
-      return ProbeBatch(
-          thread_id, std::move(input), temp_stack, temp_column_arrays, status,
-          [&](int64_t thread_id, TempVectorStack* temp_stack,
-              std::vector<KeyColumnArray>* temp_column_arrays,
-              std::optional<ExecBatch>& output, State& state_next) -> Status {
-            return RightSemiAnti(thread_id, temp_stack, temp_column_arrays, output,
-                                 state_next);
-          });
+      return Probe(thread_id, std::move(input), temp_stack, temp_column_arrays, status,
+                   [&](int64_t thread_id, TempVectorStack* temp_stack,
+                       std::vector<KeyColumnArray>* temp_column_arrays,
+                       std::optional<ExecBatch>& output, State& state_next) -> Status {
+                     return RightSemiAnti(thread_id, temp_stack, temp_column_arrays,
+                                          output, state_next);
+                   });
     }
   }
 }
@@ -327,17 +430,41 @@ Status HashJoin::Init(QueryContext* ctx, JoinType join_type, size_t num_threads,
   schema_[0] = proj_map_left;
   schema_[1] = proj_map_right;
 
+  // Initialize thread local states and associated probe processors.
   local_states_.resize(num_threads_);
   for (int i = 0; i < num_threads_; ++i) {
-    local_states_[i].hash_table_ready = false;
-    local_states_[i].num_output_batches = 0;
     local_states_[i].materialize.Init(pool_, proj_map_left, proj_map_right);
-    ARROW_ASSIGN_OR_RAISE(arrow::util::TempVectorStack * temp_stack,
-                          ctx_->GetTempStack(i));
-    local_states_[i].probe_processor.Init(
-        proj_map_left->num_cols(HashJoinProjection::KEY), join_type_, &key_cmp_,
-        &hash_table_, &local_states_[i].materialize, temp_stack);
+    ARRA_RETURN_NOT_OK(local_states_[i].build_processor.Init(
+        schema_[1], num_threads_, pool_, &hash_table_build_, &build_side_batches_));
+    ARRA_RETURN_NOT_OK(local_states_[i].probe_processor.Init(
+        hardware_flags_, proj_map_left->num_cols(HashJoinProjection::KEY), join_type_,
+        &key_cmp_, &hash_table_, &local_states_[i].materialize));
   }
+
+  // Initialize hash table.
+  const HashJoinProjectionMaps* schema = schema_[1];
+  bool reject_duplicate_keys =
+      join_type_ == JoinType::LEFT_SEMI || join_type_ == JoinType::LEFT_ANTI;
+  bool no_payload =
+      reject_duplicate_keys || schema->num_cols(HashJoinProjection::PAYLOAD) == 0;
+
+  std::vector<KeyColumnMetadata> key_types;
+  for (int i = 0; i < schema->num_cols(HashJoinProjection::KEY); ++i) {
+    ARROW_ASSIGN_OR_RAISE(
+        KeyColumnMetadata metadata,
+        ColumnMetadataFromDataType(schema->data_type(HashJoinProjection::KEY, i)));
+    key_types.push_back(metadata);
+  }
+  std::vector<KeyColumnMetadata> payload_types;
+  for (int i = 0; i < schema->num_cols(HashJoinProjection::PAYLOAD); ++i) {
+    ARROW_ASSIGN_OR_RAISE(
+        KeyColumnMetadata metadata,
+        ColumnMetadataFromDataType(schema->data_type(HashJoinProjection::PAYLOAD, i)));
+    payload_types.push_back(metadata);
+  }
+  ARRA_RETURN_NOT_OK(hash_table_build_.Init(
+      &hash_table_, num_threads_, build_side_batches_.row_count(), reject_duplicate_keys,
+      no_payload, key_types, payload_types, pool_, hardware_flags_));
 
   return Status::OK();
 }
