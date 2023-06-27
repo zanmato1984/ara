@@ -79,20 +79,28 @@ using arrow::util::TempVectorStack;
 
 class BuildProcessor {
  public:
-  Status Init(int64_t hardware_flags, MemoryPool* pool, size_t dop,
+  Status Init(int64_t hardware_flags, MemoryPool* pool,
               const HashJoinProjectionMaps* schema, JoinType join_type,
               SwissTableForJoinBuild* hash_table_build, SwissTableForJoin* hash_table,
               AccumulationQueue* batches,
-              std::vector<JoinResultMaterialize*> materialize);
+              const std::vector<JoinResultMaterialize*>& materialize);
 
-  Status InitHashTable();
+  // Could execute in driver thread.
+  Status StartBuild();
 
+  // Must execute in task thread.
   Status Build(ThreadId thread_id, TempVectorStack* temp_stack, OperatorStatus& status);
 
+  // Could execute in driver thread.
   Status FinishBuild();
 
+  // Could execute in driver thread.
+  Status StartMerge();
+
+  // Must execute in task thread.
   Status Merge(ThreadId thread_id, TempVectorStack* temp_stack, OperatorStatus& status);
 
+  // Must execute in task thread.
   Status FinishMerge(TempVectorStack* temp_stack);
 
  private:
@@ -105,10 +113,10 @@ class BuildProcessor {
   SwissTableForJoinBuild* hash_table_build_;
   SwissTableForJoin* hash_table_;
   AccumulationQueue* batches_;
-  std::vector<JoinResultMaterialize*> materialize_;
 
   struct ThreadLocalState {
-    size_t round;
+    size_t round = 0;
+    JoinResultMaterialize* materialize = nullptr;
   };
   std::vector<ThreadLocalState> local_states_;
 };
@@ -117,8 +125,9 @@ class ProbeProcessor {
  public:
   Status Init(int64_t hardware_flags, int num_key_columns, JoinType join_type,
               const std::vector<JoinKeyCmp>* cmp, SwissTableForJoin* hash_table,
-              std::vector<JoinResultMaterialize*> materialize);
+              const std::vector<JoinResultMaterialize*>& materialize);
 
+  // Must execute in task thread.
   Status Probe(ThreadId thread_id, std::optional<ExecBatch> input,
                TempVectorStack* temp_stack,
                std::vector<KeyColumnArray>* temp_column_arrays, OperatorStatus& status);
@@ -133,7 +142,6 @@ class ProbeProcessor {
 
   SwissTableForJoin* hash_table_;
   const SwissTable* swiss_table_;
-  std::vector<JoinResultMaterialize*> materialize_;
 
  private:
   template <typename JOIN_FN>
@@ -144,15 +152,15 @@ class ProbeProcessor {
     // Process.
     std::optional<ExecBatch> output;
     State state_next = State::CLEAN;
-    switch (state_) {
+    switch (local_states_[thread_id].state) {
       case State::CLEAN: {
         // Some check.
-        ARRA_DCHECK(!input_.has_value());
-        ARRA_DCHECK(materialize_[thread_id]->num_rows() == 0);
+        ARRA_DCHECK(!local_states_[thread_id].input.has_value());
+        ARRA_DCHECK(local_states_[thread_id].materialize->num_rows() == 0);
 
         // Prepare input.
         auto batch_length = input->length;
-        input_ =
+        local_states_[thread_id].input =
             Input{std::move(input.value()),
                   ExecBatch({}, batch_length),
                   0,
@@ -164,9 +172,10 @@ class ProbeProcessor {
                   TempVectorHolder<uint32_t>(temp_stack, minibatch_size_),
                   TempVectorHolder<uint32_t>(temp_stack, minibatch_size_),
                   {}};
-        input_->key_batch.values.resize(num_key_columns_);
+        local_states_[thread_id].input->key_batch.values.resize(num_key_columns_);
         for (int i = 0; i < num_key_columns_; ++i) {
-          input_->key_batch.values[i] = input_->batch.values[i];
+          local_states_[thread_id].input->key_batch.values[i] =
+              local_states_[thread_id].input->batch.values[i];
         }
 
         // Process input.
@@ -179,8 +188,8 @@ class ProbeProcessor {
       case State::MINIBATCH_HAS_MORE:
       case State::MATCH_HAS_MORE: {
         // Some check.
-        ARRA_DCHECK(input_.has_value());
-        ARRA_DCHECK(materialize_[thread_id]->num_rows() > 0);
+        ARRA_DCHECK(local_states_[thread_id].input.has_value());
+        ARRA_DCHECK(local_states_[thread_id].materialize->num_rows() > 0);
 
         // Process input.
         ARRA_SET_AND_RETURN_NOT_OK(
@@ -194,7 +203,7 @@ class ProbeProcessor {
     // Transition.
     switch (state_next) {
       case State::CLEAN: {
-        input_.reset();
+        local_states_[thread_id].input.reset();
         status = OperatorStatus::HasOutput(std::move(output));
         break;
       }
@@ -205,12 +214,13 @@ class ProbeProcessor {
       }
     }
 
-    state_ = state_next;
+    local_states_[thread_id].state = state_next;
 
     return Status::OK();
   }
 
-  enum class State { CLEAN, MINIBATCH_HAS_MORE, MATCH_HAS_MORE } state_ = State::CLEAN;
+  enum class State { CLEAN, MINIBATCH_HAS_MORE, MATCH_HAS_MORE };
+
   struct Input {
     ExecBatch batch;
     ExecBatch key_batch;
@@ -225,7 +235,13 @@ class ProbeProcessor {
 
     JoinMatchIterator match_iterator;
   };
-  std::optional<Input> input_;
+
+  struct ThreadLocalState {
+    State state = State::CLEAN;
+    std::optional<Input> input = std::nullopt;
+    JoinResultMaterialize* materialize = nullptr;
+  };
+  std::vector<ThreadLocalState> local_states_;
 
   Status InnerOuter(ThreadId thread_id, TempVectorStack* temp_stack,
                     std::vector<KeyColumnArray>* temp_column_arrays,
@@ -238,18 +254,53 @@ class ProbeProcessor {
                        std::optional<ExecBatch>& output, State& state_next);
 };
 
-class HashJoin;
+class ScanProcessor {
+ public:
+  Status Init(JoinType join_type, SwissTableForJoin* hash_table,
+              const std::vector<JoinResultMaterialize*>& materialize);
+
+  // Must execute in task thread.
+  Status StartScan();
+
+  // Must execute in task thread.
+  Status Scan(ThreadId thread_id, TempVectorStack* temp_stack,
+              std::vector<KeyColumnArray>* temp_column_arrays, OperatorStatus& status);
+
+ private:
+  size_t dop_;
+  size_t num_rows_per_thread_;
+
+  JoinType join_type_;
+
+  SwissTableForJoin* hash_table_;
+
+  std::vector<JoinResultMaterialize*> materialize_;
+
+ private:
+  enum class State { CLEAN, HAS_MORE };
+
+  struct Input {
+    int minibatch_start = 0;
+  };
+
+  struct ThreadLocalState {
+    State state = State::CLEAN;
+    std::optional<Input> input = std::nullopt;
+    JoinResultMaterialize* materialize = nullptr;
+  };
+  std::vector<ThreadLocalState> local_states_;
+};
 
 class HashJoinScanSource {
  public:
-  Status Init(HashJoin* hash_join);
+  Status Init(ScanProcessor* scan_processor);
 
   TaskGroups ScanSourceBackend();
 
   std::pair<TaskGroups, PipelineTaskPipe> ScanSourceFrontend();
 
  private:
-  HashJoin* hash_join_;
+  ScanProcessor* scan_processor_;
 };
 
 class HashJoin {
@@ -285,14 +336,13 @@ class HashJoin {
 
   BuildProcessor build_processor_;
   ProbeProcessor probe_processor_;
+  ScanProcessor scan_processor_;
 
   SwissTableForJoin hash_table_;
   SwissTableForJoinBuild hash_table_build_;
   AccumulationQueue build_side_batches_;
 
   std::optional<HashJoinScanSource> scan_source_;
-
-  friend class ScanSource;
 };
 
 }  // namespace detail
