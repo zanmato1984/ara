@@ -471,6 +471,11 @@ Status ProbeProcessor::RightSemiAnti(ThreadId thread_id, TempVectorStack* temp_s
   return Status::OK();
 }
 
+Status HashJoinScanSource::Init(HashJoin* hash_join) {
+  hash_join_ = hash_join;
+  return Status::OK();
+}
+
 Status HashJoin::Init(QueryContext* ctx, JoinType join_type, size_t dop,
                       const HashJoinProjectionMaps* proj_map_left,
                       const HashJoinProjectionMaps* proj_map_right,
@@ -506,6 +511,12 @@ Status HashJoin::Init(QueryContext* ctx, JoinType join_type, size_t dop,
   ARRA_RETURN_NOT_OK(probe_processor_.Init(
       hardware_flags_, proj_map_left->num_cols(HashJoinProjection::KEY), join_type_,
       &key_cmp_, &hash_table_, std::move(materialize)));
+
+  if (join_type_ == JoinType::RIGHT_SEMI || join_type_ == JoinType::RIGHT_ANTI ||
+      join_type_ == JoinType::RIGHT_OUTER || join_type_ == JoinType::FULL_OUTER) {
+    scan_source_.emplace();
+    ARRA_RETURN_NOT_OK(scan_source_->Init(this));
+  }
 
   return Status::OK();
 }

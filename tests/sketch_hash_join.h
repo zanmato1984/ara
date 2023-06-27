@@ -49,9 +49,19 @@ using TaskGroupId = size_t;
 using TaskId = size_t;
 using ThreadId = size_t;
 
-using Task = std::function<arrow::Status(TaskId, OperatorStatus&)>;
+enum class ResourcePreference {
+  CPU = 0,
+  MEMORY = 1,
+  IO = 2,
+  DISK = 3,
+  NETWORK = 4,
+  GPU = 5,
+};
+
+using Task =
+    std::pair<std::function<arrow::Status(TaskId, OperatorStatus&)>, ResourcePreference>;
 using TaskCont = std::function<arrow::Status(TaskId)>;
-using TaskGroup = std::tuple<Task, size_t, TaskCont>;
+using TaskGroup = std::tuple<Task, size_t, std::optional<TaskCont>>;
 using TaskGroups = std::vector<TaskGroup>;
 
 using PipelineTaskSource = std::function<arrow::Status(ThreadId, OperatorStatus&)>;
@@ -228,6 +238,20 @@ class ProbeProcessor {
                        std::optional<ExecBatch>& output, State& state_next);
 };
 
+class HashJoin;
+
+class HashJoinScanSource {
+ public:
+  Status Init(HashJoin* hash_join);
+
+  TaskGroups ScanSourceBackend();
+
+  std::pair<TaskGroups, PipelineTaskPipe> ScanSourceFrontend();
+
+ private:
+  HashJoin* hash_join_;
+};
+
 class HashJoin {
  public:
   Status Init(QueryContext* ctx, JoinType join_type, size_t dop,
@@ -241,7 +265,7 @@ class HashJoin {
 
   PipelineTaskPipe ProbePipe();
 
-  std::optional<PipelineTaskSource> ProbeSource();
+  std::optional<HashJoinScanSource> ScanSource();
 
  private:
   QueryContext* ctx_;
@@ -265,6 +289,10 @@ class HashJoin {
   SwissTableForJoin hash_table_;
   SwissTableForJoinBuild hash_table_build_;
   AccumulationQueue build_side_batches_;
+
+  std::optional<HashJoinScanSource> scan_source_;
+
+  friend class ScanSource;
 };
 
 }  // namespace detail
