@@ -69,13 +69,13 @@ using arrow::util::TempVectorStack;
 
 class BuildProcessor {
  public:
-  Status Init(const HashJoinProjectionMaps* schema, int num_threads, MemoryPool* pool,
+  Status Init(const HashJoinProjectionMaps* schema, size_t dop, MemoryPool* pool,
               SwissTableForJoinBuild* hash_table_build, AccumulationQueue* batches);
 
   Status Build(int64_t thread_id, TempVectorStack* temp_stack, OperatorStatus& status);
 
  private:
-  int num_threads_;
+  size_t dop_;
   MemoryPool* pool_;
   const HashJoinProjectionMaps* schema_;
   SwissTableForJoinBuild* hash_table_build_;
@@ -212,7 +212,7 @@ class ProbeProcessor {
 
 class HashJoin {
  public:
-  Status Init(QueryContext* ctx, JoinType join_type, size_t num_threads,
+  Status Init(QueryContext* ctx, JoinType join_type, size_t dop,
               const HashJoinProjectionMaps* proj_map_left,
               const HashJoinProjectionMaps* proj_map_right,
               std::vector<JoinKeyCmp> key_cmp, Expression filter);
@@ -225,7 +225,7 @@ class HashJoin {
   QueryContext* ctx_;
   int64_t hardware_flags_;
   MemoryPool* pool_;
-  int num_threads_;
+  size_t dop_;
   JoinType join_type_;
   std::vector<JoinKeyCmp> key_cmp_;
   const HashJoinProjectionMaps* schema_[2];

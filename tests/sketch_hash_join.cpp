@@ -38,11 +38,11 @@ Result<ExecBatch> KeyPayloadFromInput(const HashJoinProjectionMaps* schema,
   return projected;
 }
 
-Status BuildProcessor::Init(const HashJoinProjectionMaps* schema, int num_threads,
+Status BuildProcessor::Init(const HashJoinProjectionMaps* schema, size_t dop,
                             MemoryPool* pool, SwissTableForJoinBuild* hash_table_build,
                             AccumulationQueue* batches) {
   schema_ = schema;
-  num_threads_ = num_threads;
+  dop_ = dop;
   pool_ = pool;
   hash_table_build_ = hash_table_build;
   batches_ = batches;
@@ -55,7 +55,7 @@ Status BuildProcessor::Init(const HashJoinProjectionMaps* schema, int num_thread
 Status BuildProcessor::Build(int64_t thread_id, TempVectorStack* temp_stack,
                              OperatorStatus& status) {
   status = OperatorStatus::HasOutput(std::nullopt);
-  auto batch_id = num_threads_ * round_ + thread_id;
+  auto batch_id = dop_ * round_ + thread_id;
   if (batch_id >= batches_->batch_count()) {
     status = OperatorStatus::Finished();
     return Status::OK();
@@ -412,11 +412,11 @@ Status ProbeProcessor::RightSemiAnti(int64_t thread_id, TempVectorStack* temp_st
   return Status::OK();
 }
 
-Status HashJoin::Init(QueryContext* ctx, JoinType join_type, size_t num_threads,
+Status HashJoin::Init(QueryContext* ctx, JoinType join_type, size_t dop,
                       const HashJoinProjectionMaps* proj_map_left,
                       const HashJoinProjectionMaps* proj_map_right,
                       std::vector<JoinKeyCmp> key_cmp, Expression filter) {
-  num_threads_ = static_cast<int>(num_threads);
+  dop_ = dop;
   ctx_ = ctx;
   hardware_flags_ = ctx->cpu_info()->hardware_flags();
   pool_ = ctx->memory_pool();
@@ -431,11 +431,11 @@ Status HashJoin::Init(QueryContext* ctx, JoinType join_type, size_t num_threads,
   schema_[1] = proj_map_right;
 
   // Initialize thread local states and associated probe processors.
-  local_states_.resize(num_threads_);
-  for (int i = 0; i < num_threads_; ++i) {
+  local_states_.resize(dop_);
+  for (int i = 0; i < dop_; ++i) {
     local_states_[i].materialize.Init(pool_, proj_map_left, proj_map_right);
     ARRA_RETURN_NOT_OK(local_states_[i].build_processor.Init(
-        schema_[1], num_threads_, pool_, &hash_table_build_, &build_side_batches_));
+        schema_[1], dop_, pool_, &hash_table_build_, &build_side_batches_));
     ARRA_RETURN_NOT_OK(local_states_[i].probe_processor.Init(
         hardware_flags_, proj_map_left->num_cols(HashJoinProjection::KEY), join_type_,
         &key_cmp_, &hash_table_, &local_states_[i].materialize));
@@ -463,7 +463,7 @@ Status HashJoin::Init(QueryContext* ctx, JoinType join_type, size_t num_threads,
     payload_types.push_back(metadata);
   }
   ARRA_RETURN_NOT_OK(hash_table_build_.Init(
-      &hash_table_, num_threads_, build_side_batches_.row_count(), reject_duplicate_keys,
+      &hash_table_, dop_, build_side_batches_.row_count(), reject_duplicate_keys,
       no_payload, key_types, payload_types, pool_, hardware_flags_));
 
   return Status::OK();
