@@ -38,29 +38,67 @@ Result<ExecBatch> KeyPayloadFromInput(const HashJoinProjectionMaps* schema,
   return projected;
 }
 
-Status BuildProcessor::Init(const HashJoinProjectionMaps* schema, size_t dop,
-                            MemoryPool* pool, SwissTableForJoinBuild* hash_table_build,
-                            AccumulationQueue* batches) {
-  schema_ = schema;
-  dop_ = dop;
+Status BuildProcessor::Init(int64_t hardware_flags, MemoryPool* pool, size_t dop,
+                            const HashJoinProjectionMaps* schema, JoinType join_type,
+                            SwissTableForJoinBuild* hash_table_build,
+                            SwissTableForJoin* hash_table, AccumulationQueue* batches) {
+  hardware_flags_ = hardware_flags;
   pool_ = pool;
+  dop_ = dop;
+
+  schema_ = schema;
+  join_type_ = join_type;
   hash_table_build_ = hash_table_build;
+  hash_table_ = hash_table;
   batches_ = batches;
 
-  round_ = 0;
+  local_states_.resize(dop_);
+  for (int i = 0; i < dop_; i++) {
+    local_states_[i].round = 0;
+  }
 
   return Status::OK();
 }
 
-Status BuildProcessor::Build(int64_t thread_id, TempVectorStack* temp_stack,
+Status BuildProcessor::PrepareBuild(OperatorStatus& status) {
+  status = OperatorStatus::HasOutput(std::nullopt);
+
+  bool reject_duplicate_keys =
+      join_type_ == JoinType::LEFT_SEMI || join_type_ == JoinType::LEFT_ANTI;
+  bool no_payload =
+      reject_duplicate_keys || schema_->num_cols(HashJoinProjection::PAYLOAD) == 0;
+
+  std::vector<KeyColumnMetadata> key_types;
+  for (int i = 0; i < schema_->num_cols(HashJoinProjection::KEY); ++i) {
+    ARROW_ASSIGN_OR_RAISE(
+        KeyColumnMetadata metadata,
+        ColumnMetadataFromDataType(schema_->data_type(HashJoinProjection::KEY, i)));
+    key_types.push_back(metadata);
+  }
+  std::vector<KeyColumnMetadata> payload_types;
+  for (int i = 0; i < schema_->num_cols(HashJoinProjection::PAYLOAD); ++i) {
+    ARROW_ASSIGN_OR_RAISE(
+        KeyColumnMetadata metadata,
+        ColumnMetadataFromDataType(schema_->data_type(HashJoinProjection::PAYLOAD, i)));
+    payload_types.push_back(metadata);
+  }
+  ARRA_SET_AND_RETURN_NOT_OK(
+      hash_table_build_->Init(hash_table_, dop_, batches_->row_count(),
+                              reject_duplicate_keys, no_payload, key_types, payload_types,
+                              pool_, hardware_flags_),
+      { status = OperatorStatus::Other(__s); });
+  return Status::OK();
+}
+
+Status BuildProcessor::Build(ThreadId thread_id, TempVectorStack* temp_stack,
                              OperatorStatus& status) {
   status = OperatorStatus::HasOutput(std::nullopt);
-  auto batch_id = dop_ * round_ + thread_id;
+  auto batch_id = dop_ * local_states_[thread_id].round + thread_id;
   if (batch_id >= batches_->batch_count()) {
     status = OperatorStatus::Finished();
     return Status::OK();
   }
-  round_++;
+  local_states_[thread_id].round++;
 
   bool no_payload = hash_table_build_->no_payload();
 
@@ -95,9 +133,10 @@ Status BuildProcessor::Build(int64_t thread_id, TempVectorStack* temp_stack,
           input_batch.values[schema_->num_cols(HashJoinProjection::KEY) + icol];
     }
   }
-  ARRA_RETURN_NOT_OK(hash_table_build_->PushNextBatch(
-      static_cast<int64_t>(thread_id), key_batch, no_payload ? nullptr : &payload_batch,
-      temp_stack));
+  ARRA_SET_AND_RETURN_NOT_OK(
+      hash_table_build_->PushNextBatch(static_cast<int64_t>(thread_id), key_batch,
+                                       no_payload ? nullptr : &payload_batch, temp_stack),
+      { status = OperatorStatus::Other(__s); });
 
   // Release input batch
   //
@@ -106,10 +145,17 @@ Status BuildProcessor::Build(int64_t thread_id, TempVectorStack* temp_stack,
   return Status::OK();
 }
 
+Status BuildProcessor::PrepareMerge(OperatorStatus& status) {
+  status = OperatorStatus::HasOutput(std::nullopt);
+  ARRA_SET_AND_RETURN_NOT_OK(hash_table_build_->PreparePrtnMerge(),
+                             { status = OperatorStatus::Other(__s); });
+  return Status::OK();
+}
+
 Status ProbeProcessor::Init(int64_t hardware_flags, int num_key_columns,
                             JoinType join_type, const std::vector<JoinKeyCmp>* cmp,
                             SwissTableForJoin* hash_table,
-                            JoinResultMaterialize* materialize) {
+                            std::vector<JoinResultMaterialize*> materialize) {
   hardware_flags_ = hardware_flags;
 
   num_key_columns_ = num_key_columns;
@@ -117,15 +163,15 @@ Status ProbeProcessor::Init(int64_t hardware_flags, int num_key_columns,
   cmp_ = cmp;
 
   hash_table_ = hash_table;
-  materialize_ = materialize;
   swiss_table_ = hash_table_->keys()->swiss_table();
+  materialize_ = std::move(materialize);
 
   minibatch_size_ = swiss_table_->minibatch_size();
 
   return Status::OK();
 }
 
-Status ProbeProcessor::Probe(int64_t thread_id, std::optional<ExecBatch> input,
+Status ProbeProcessor::Probe(ThreadId thread_id, std::optional<ExecBatch> input,
                              TempVectorStack* temp_stack,
                              std::vector<KeyColumnArray>* temp_column_arrays,
                              OperatorStatus& status) {
@@ -135,7 +181,7 @@ Status ProbeProcessor::Probe(int64_t thread_id, std::optional<ExecBatch> input,
     case JoinType::RIGHT_OUTER:
     case JoinType::FULL_OUTER: {
       return Probe(thread_id, std::move(input), temp_stack, temp_column_arrays, status,
-                   [&](int64_t thread_id, TempVectorStack* temp_stack,
+                   [&](ThreadId thread_id, TempVectorStack* temp_stack,
                        std::vector<KeyColumnArray>* temp_column_arrays,
                        std::optional<ExecBatch>& output, State& state_next) -> Status {
                      return InnerOuter(thread_id, temp_stack, temp_column_arrays, output,
@@ -145,7 +191,7 @@ Status ProbeProcessor::Probe(int64_t thread_id, std::optional<ExecBatch> input,
     case JoinType::LEFT_SEMI:
     case JoinType::LEFT_ANTI: {
       return Probe(thread_id, std::move(input), temp_stack, temp_column_arrays, status,
-                   [&](int64_t thread_id, TempVectorStack* temp_stack,
+                   [&](ThreadId thread_id, TempVectorStack* temp_stack,
                        std::vector<KeyColumnArray>* temp_column_arrays,
                        std::optional<ExecBatch>& output, State& state_next) -> Status {
                      return LeftSemiAnti(thread_id, temp_stack, temp_column_arrays,
@@ -155,7 +201,7 @@ Status ProbeProcessor::Probe(int64_t thread_id, std::optional<ExecBatch> input,
     case JoinType::RIGHT_SEMI:
     case JoinType::RIGHT_ANTI: {
       return Probe(thread_id, std::move(input), temp_stack, temp_column_arrays, status,
-                   [&](int64_t thread_id, TempVectorStack* temp_stack,
+                   [&](ThreadId thread_id, TempVectorStack* temp_stack,
                        std::vector<KeyColumnArray>* temp_column_arrays,
                        std::optional<ExecBatch>& output, State& state_next) -> Status {
                      return RightSemiAnti(thread_id, temp_stack, temp_column_arrays,
@@ -165,7 +211,7 @@ Status ProbeProcessor::Probe(int64_t thread_id, std::optional<ExecBatch> input,
   }
 }
 
-Status ProbeProcessor::InnerOuter(int64_t thread_id, TempVectorStack* temp_stack,
+Status ProbeProcessor::InnerOuter(ThreadId thread_id, TempVectorStack* temp_stack,
                                   std::vector<KeyColumnArray>* temp_column_arrays,
                                   std::optional<ExecBatch>& output, State& state_next) {
   int num_rows = static_cast<int>(input_->batch.length);
@@ -230,8 +276,8 @@ Status ProbeProcessor::InnerOuter(int64_t thread_id, TempVectorStack* temp_stack
         }
 
         // If we are to exceed the maximum number of rows per batch, output.
-        if (materialize_->num_rows() + num_matches_next > kMaxRowsPerBatch) {
-          ARRA_RETURN_NOT_OK(materialize_->Flush([&](ExecBatch batch) {
+        if (materialize_[thread_id]->num_rows() + num_matches_next > kMaxRowsPerBatch) {
+          ARRA_RETURN_NOT_OK(materialize_[thread_id]->Flush([&](ExecBatch batch) {
             output.emplace(std::move(batch));
             return Status::OK();
           }));
@@ -242,7 +288,7 @@ Status ProbeProcessor::InnerOuter(int64_t thread_id, TempVectorStack* temp_stack
         // of rows.
         {
           int ignored;
-          ARRA_RETURN_NOT_OK(materialize_->Append(
+          ARRA_RETURN_NOT_OK(materialize_[thread_id]->Append(
               input_->batch, num_matches_next, materialize_batch_ids, materialize_key_ids,
               materialize_payload_ids, &ignored));
         }
@@ -269,8 +315,8 @@ Status ProbeProcessor::InnerOuter(int64_t thread_id, TempVectorStack* temp_stack
         }
 
         // If we are to exceed the maximum number of rows per batch, output.
-        if (materialize_->num_rows() + num_passing_ids > kMaxRowsPerBatch) {
-          ARRA_RETURN_NOT_OK(materialize_->Flush([&](ExecBatch batch) {
+        if (materialize_[thread_id]->num_rows() + num_passing_ids > kMaxRowsPerBatch) {
+          ARRA_RETURN_NOT_OK(materialize_[thread_id]->Flush([&](ExecBatch batch) {
             output.emplace(std::move(batch));
             return Status::OK();
           }));
@@ -279,7 +325,7 @@ Status ProbeProcessor::InnerOuter(int64_t thread_id, TempVectorStack* temp_stack
 
         {
           int ignored;
-          ARRA_RETURN_NOT_OK(materialize_[thread_id].AppendProbeOnly(
+          ARRA_RETURN_NOT_OK(materialize_[thread_id]->AppendProbeOnly(
               input_->batch, num_passing_ids,
               input_->materialize_batch_ids_buf.mutable_data(), &ignored));
         }
@@ -292,7 +338,7 @@ Status ProbeProcessor::InnerOuter(int64_t thread_id, TempVectorStack* temp_stack
   return Status::OK();
 }
 
-Status ProbeProcessor::LeftSemiAnti(int64_t thread_id, TempVectorStack* temp_stack,
+Status ProbeProcessor::LeftSemiAnti(ThreadId thread_id, TempVectorStack* temp_stack,
                                     std::vector<KeyColumnArray>* temp_column_arrays,
                                     std::optional<ExecBatch>& output, State& state_next) {
   int num_rows = static_cast<int>(input_->batch.length);
@@ -337,8 +383,8 @@ Status ProbeProcessor::LeftSemiAnti(int64_t thread_id, TempVectorStack* temp_sta
     }
 
     // If we are to exceed the maximum number of rows per batch, output.
-    if (materialize_->num_rows() + num_passing_ids > kMaxRowsPerBatch) {
-      ARRA_RETURN_NOT_OK(materialize_->Flush([&](ExecBatch batch) {
+    if (materialize_[thread_id]->num_rows() + num_passing_ids > kMaxRowsPerBatch) {
+      ARRA_RETURN_NOT_OK(materialize_[thread_id]->Flush([&](ExecBatch batch) {
         output.emplace(std::move(batch));
         return Status::OK();
       }));
@@ -347,7 +393,7 @@ Status ProbeProcessor::LeftSemiAnti(int64_t thread_id, TempVectorStack* temp_sta
 
     {
       int ignored;
-      ARRA_RETURN_NOT_OK(materialize_->AppendProbeOnly(
+      ARRA_RETURN_NOT_OK(materialize_[thread_id]->AppendProbeOnly(
           input_->batch, num_passing_ids,
           input_->materialize_batch_ids_buf.mutable_data(), &ignored));
     }
@@ -358,7 +404,7 @@ Status ProbeProcessor::LeftSemiAnti(int64_t thread_id, TempVectorStack* temp_sta
   return Status::OK();
 }
 
-Status ProbeProcessor::RightSemiAnti(int64_t thread_id, TempVectorStack* temp_stack,
+Status ProbeProcessor::RightSemiAnti(ThreadId thread_id, TempVectorStack* temp_stack,
                                      std::vector<KeyColumnArray>* temp_column_arrays,
                                      std::optional<ExecBatch>& output,
                                      State& state_next) {
@@ -434,37 +480,20 @@ Status HashJoin::Init(QueryContext* ctx, JoinType join_type, size_t dop,
   local_states_.resize(dop_);
   for (int i = 0; i < dop_; ++i) {
     local_states_[i].materialize.Init(pool_, proj_map_left, proj_map_right);
-    ARRA_RETURN_NOT_OK(local_states_[i].build_processor.Init(
-        schema_[1], dop_, pool_, &hash_table_build_, &build_side_batches_));
-    ARRA_RETURN_NOT_OK(local_states_[i].probe_processor.Init(
-        hardware_flags_, proj_map_left->num_cols(HashJoinProjection::KEY), join_type_,
-        &key_cmp_, &hash_table_, &local_states_[i].materialize));
   }
 
-  // Initialize hash table.
-  const HashJoinProjectionMaps* schema = schema_[1];
-  bool reject_duplicate_keys =
-      join_type_ == JoinType::LEFT_SEMI || join_type_ == JoinType::LEFT_ANTI;
-  bool no_payload =
-      reject_duplicate_keys || schema->num_cols(HashJoinProjection::PAYLOAD) == 0;
+  ARRA_RETURN_NOT_OK(build_processor_.Init(hardware_flags_, pool_, dop_, schema_[1],
+                                           join_type_, &hash_table_build_, &hash_table_,
+                                           &build_side_batches_));
 
-  std::vector<KeyColumnMetadata> key_types;
-  for (int i = 0; i < schema->num_cols(HashJoinProjection::KEY); ++i) {
-    ARROW_ASSIGN_OR_RAISE(
-        KeyColumnMetadata metadata,
-        ColumnMetadataFromDataType(schema->data_type(HashJoinProjection::KEY, i)));
-    key_types.push_back(metadata);
+  std::vector<JoinResultMaterialize*> materialize;
+  materialize.resize(dop_);
+  for (int i = 0; i < dop_; ++i) {
+    materialize[i] = &local_states_[i].materialize;
   }
-  std::vector<KeyColumnMetadata> payload_types;
-  for (int i = 0; i < schema->num_cols(HashJoinProjection::PAYLOAD); ++i) {
-    ARROW_ASSIGN_OR_RAISE(
-        KeyColumnMetadata metadata,
-        ColumnMetadataFromDataType(schema->data_type(HashJoinProjection::PAYLOAD, i)));
-    payload_types.push_back(metadata);
-  }
-  ARRA_RETURN_NOT_OK(hash_table_build_.Init(
-      &hash_table_, dop_, build_side_batches_.row_count(), reject_duplicate_keys,
-      no_payload, key_types, payload_types, pool_, hardware_flags_));
+  ARRA_RETURN_NOT_OK(probe_processor_.Init(
+      hardware_flags_, proj_map_left->num_cols(HashJoinProjection::KEY), join_type_,
+      &key_cmp_, &hash_table_, std::move(materialize)));
 
   return Status::OK();
 }

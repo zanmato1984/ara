@@ -46,17 +46,16 @@ struct OperatorStatus {
 };
 
 using TaskGroupId = size_t;
+using ThreadId = size_t;
 
-// TODO: Add task group continueation.
+using Task = std::function<arrow::Status(ThreadId, OperatorStatus&)>;
+using TaskCont = std::function<arrow::Status(ThreadId)>;
+using TaskGroup = std::tuple<Task, size_t, TaskCont>;
+using TaskGroups = std::vector<std::tuple<Task, size_t, TaskCont>>;
 
-using BreakerTask = std::function<arrow::Status(OperatorStatus&)>;
-using BreakerTaskGroup = std::pair<TaskGroupId, std::vector<BreakerTask>>;
-using BreakerTaskGroups = std::vector<BreakerTask>;
-
-using PipelineTask =
-    std::function<arrow::Status(std::optional<arrow::ExecBatch>, OperatorStatus&)>;
-using PipelineTaskGroup = std::pair<TaskGroupId, std::vector<PipelineTask>>;
-using PipelineTaskGroups = std::vector<PipelineTask>;
+using PipelineTaskSource = std::function<arrow::Status(ThreadId, OperatorStatus&)>;
+using PipelineTaskPipe = std::function<arrow::Status(
+    ThreadId, std::optional<arrow::ExecBatch>, OperatorStatus&)>;
 
 namespace detail {
 using namespace arrow;
@@ -69,28 +68,41 @@ using arrow::util::TempVectorStack;
 
 class BuildProcessor {
  public:
-  Status Init(const HashJoinProjectionMaps* schema, size_t dop, MemoryPool* pool,
-              SwissTableForJoinBuild* hash_table_build, AccumulationQueue* batches);
+  Status Init(int64_t hardware_flags, MemoryPool* pool, size_t dop,
+              const HashJoinProjectionMaps* schema, JoinType join_type,
+              SwissTableForJoinBuild* hash_table_build, SwissTableForJoin* hash_table,
+              AccumulationQueue* batches);
 
-  Status Build(int64_t thread_id, TempVectorStack* temp_stack, OperatorStatus& status);
+  Status PrepareBuild(OperatorStatus& status);
+
+  Status Build(ThreadId thread_id, TempVectorStack* temp_stack, OperatorStatus& status);
+
+  Status PrepareMerge(OperatorStatus& status);
 
  private:
-  size_t dop_;
+  int64_t hardware_flags_;
   MemoryPool* pool_;
+  size_t dop_;
+
   const HashJoinProjectionMaps* schema_;
+  JoinType join_type_;
   SwissTableForJoinBuild* hash_table_build_;
+  SwissTableForJoin* hash_table_;
   AccumulationQueue* batches_;
 
-  size_t round_;
+  struct ThreadLocalState {
+    size_t round;
+  };
+  std::vector<ThreadLocalState> local_states_;
 };
 
 class ProbeProcessor {
  public:
   Status Init(int64_t hardware_flags, int num_key_columns, JoinType join_type,
               const std::vector<JoinKeyCmp>* cmp, SwissTableForJoin* hash_table,
-              JoinResultMaterialize* materialize);
+              std::vector<JoinResultMaterialize*> materialize);
 
-  Status Probe(int64_t thread_id, std::optional<ExecBatch> input,
+  Status Probe(ThreadId thread_id, std::optional<ExecBatch> input,
                TempVectorStack* temp_stack,
                std::vector<KeyColumnArray>* temp_column_arrays, OperatorStatus& status);
 
@@ -104,12 +116,11 @@ class ProbeProcessor {
 
   SwissTableForJoin* hash_table_;
   const SwissTable* swiss_table_;
-
-  JoinResultMaterialize* materialize_;
+  std::vector<JoinResultMaterialize*> materialize_;
 
  private:
   template <typename JOIN_FN>
-  Status Probe(int64_t thread_id, std::optional<ExecBatch> input,
+  Status Probe(ThreadId thread_id, std::optional<ExecBatch> input,
                TempVectorStack* temp_stack,
                std::vector<KeyColumnArray>* temp_column_arrays, OperatorStatus& status,
                const JOIN_FN& join_fn) {
@@ -120,7 +131,7 @@ class ProbeProcessor {
       case State::CLEAN: {
         // Some check.
         ARRA_DCHECK(!input_.has_value());
-        ARRA_DCHECK(materialize_->num_rows() == 0);
+        ARRA_DCHECK(materialize_[thread_id]->num_rows() == 0);
 
         // Prepare input.
         auto batch_length = input->length;
@@ -152,7 +163,7 @@ class ProbeProcessor {
       case State::MATCH_HAS_MORE: {
         // Some check.
         ARRA_DCHECK(input_.has_value());
-        ARRA_DCHECK(materialize_->num_rows() > 0);
+        ARRA_DCHECK(materialize_[thread_id]->num_rows() > 0);
 
         // Process input.
         ARRA_SET_AND_RETURN_NOT_OK(
@@ -199,13 +210,13 @@ class ProbeProcessor {
   };
   std::optional<Input> input_;
 
-  Status InnerOuter(int64_t thread_id, TempVectorStack* temp_stack,
+  Status InnerOuter(ThreadId thread_id, TempVectorStack* temp_stack,
                     std::vector<KeyColumnArray>* temp_column_arrays,
                     std::optional<ExecBatch>& output, State& state_next);
-  Status LeftSemiAnti(int64_t thread_id, TempVectorStack* temp_stack,
+  Status LeftSemiAnti(ThreadId thread_id, TempVectorStack* temp_stack,
                       std::vector<KeyColumnArray>* temp_column_arrays,
                       std::optional<ExecBatch>& output, State& state_next);
-  Status RightSemiAnti(int64_t thread_id, TempVectorStack* temp_stack,
+  Status RightSemiAnti(ThreadId thread_id, TempVectorStack* temp_stack,
                        std::vector<KeyColumnArray>* temp_column_arrays,
                        std::optional<ExecBatch>& output, State& state_next);
 };
@@ -217,9 +228,13 @@ class HashJoin {
               const HashJoinProjectionMaps* proj_map_right,
               std::vector<JoinKeyCmp> key_cmp, Expression filter);
 
-  BreakerTaskGroups BreakerTaskGroups();
+  PipelineTaskPipe BuildPipe();
 
-  PipelineTaskGroups PipelineTaskGroups();
+  TaskGroups BuildBreak();
+
+  PipelineTaskPipe ProbePipe();
+
+  std::optional<PipelineTaskSource> ProbeSource();
 
  private:
   QueryContext* ctx_;
@@ -232,12 +247,13 @@ class HashJoin {
 
   struct ThreadLocalState {
     JoinResultMaterialize materialize;
-    BuildProcessor build_processor;
-    ProbeProcessor probe_processor;
     std::vector<KeyColumnArray> temp_column_arrays;
     // int64_t num_output_batches;
   };
   std::vector<ThreadLocalState> local_states_;
+
+  BuildProcessor build_processor_;
+  ProbeProcessor probe_processor_;
 
   SwissTableForJoin hash_table_;
   SwissTableForJoinBuild hash_table_build_;
@@ -245,7 +261,5 @@ class HashJoin {
 };
 
 }  // namespace detail
-
-using HashJoin = arra::detail::HashJoin;
 
 }  // namespace arra
