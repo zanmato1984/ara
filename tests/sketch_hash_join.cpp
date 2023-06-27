@@ -41,7 +41,8 @@ Result<ExecBatch> KeyPayloadFromInput(const HashJoinProjectionMaps* schema,
 Status BuildProcessor::Init(int64_t hardware_flags, MemoryPool* pool, size_t dop,
                             const HashJoinProjectionMaps* schema, JoinType join_type,
                             SwissTableForJoinBuild* hash_table_build,
-                            SwissTableForJoin* hash_table, AccumulationQueue* batches) {
+                            SwissTableForJoin* hash_table, AccumulationQueue* batches,
+                            std::vector<JoinResultMaterialize*> materialize) {
   hardware_flags_ = hardware_flags;
   pool_ = pool;
   dop_ = dop;
@@ -51,18 +52,17 @@ Status BuildProcessor::Init(int64_t hardware_flags, MemoryPool* pool, size_t dop
   hash_table_build_ = hash_table_build;
   hash_table_ = hash_table;
   batches_ = batches;
+  materialize_ = std::move(materialize);
 
   local_states_.resize(dop_);
-  for (int i = 0; i < dop_; i++) {
+  for (int i = 0; i < dop_; ++i) {
     local_states_[i].round = 0;
   }
 
   return Status::OK();
 }
 
-Status BuildProcessor::PrepareBuild(OperatorStatus& status) {
-  status = OperatorStatus::HasOutput(std::nullopt);
-
+Status BuildProcessor::InitHashTable() {
   bool reject_duplicate_keys =
       join_type_ == JoinType::LEFT_SEMI || join_type_ == JoinType::LEFT_ANTI;
   bool no_payload =
@@ -82,12 +82,9 @@ Status BuildProcessor::PrepareBuild(OperatorStatus& status) {
         ColumnMetadataFromDataType(schema_->data_type(HashJoinProjection::PAYLOAD, i)));
     payload_types.push_back(metadata);
   }
-  ARRA_SET_AND_RETURN_NOT_OK(
-      hash_table_build_->Init(hash_table_, dop_, batches_->row_count(),
-                              reject_duplicate_keys, no_payload, key_types, payload_types,
-                              pool_, hardware_flags_),
-      { status = OperatorStatus::Other(__s); });
-  return Status::OK();
+  return hash_table_build_->Init(hash_table_, dop_, batches_->row_count(),
+                                 reject_duplicate_keys, no_payload, key_types,
+                                 payload_types, pool_, hardware_flags_);
 }
 
 Status BuildProcessor::Build(ThreadId thread_id, TempVectorStack* temp_stack,
@@ -145,10 +142,26 @@ Status BuildProcessor::Build(ThreadId thread_id, TempVectorStack* temp_stack,
   return Status::OK();
 }
 
-Status BuildProcessor::PrepareMerge(OperatorStatus& status) {
+Status BuildProcessor::FinishBuild() {
+  batches_->Clear();
+  return hash_table_build_->PreparePrtnMerge();
+}
+
+Status BuildProcessor::Merge(ThreadId thread_id, TempVectorStack* temp_stack,
+                             OperatorStatus& status) {
   status = OperatorStatus::HasOutput(std::nullopt);
-  ARRA_SET_AND_RETURN_NOT_OK(hash_table_build_->PreparePrtnMerge(),
-                             { status = OperatorStatus::Other(__s); });
+  hash_table_build_->PrtnMerge(static_cast<int>(thread_id));
+  return Status::OK();
+}
+
+Status BuildProcessor::FinishMerge(TempVectorStack* temp_stack) {
+  hash_table_build_->FinishPrtnMerge(temp_stack);
+
+  for (int i = 0; i < materialize_.size(); ++i) {
+    materialize_[i]->SetBuildSide(hash_table_->keys()->keys(), hash_table_->payloads(),
+                                  hash_table_->key_to_payload() == nullptr);
+  }
+
   return Status::OK();
 }
 
@@ -482,15 +495,14 @@ Status HashJoin::Init(QueryContext* ctx, JoinType join_type, size_t dop,
     local_states_[i].materialize.Init(pool_, proj_map_left, proj_map_right);
   }
 
-  ARRA_RETURN_NOT_OK(build_processor_.Init(hardware_flags_, pool_, dop_, schema_[1],
-                                           join_type_, &hash_table_build_, &hash_table_,
-                                           &build_side_batches_));
-
   std::vector<JoinResultMaterialize*> materialize;
   materialize.resize(dop_);
   for (int i = 0; i < dop_; ++i) {
     materialize[i] = &local_states_[i].materialize;
   }
+  ARRA_RETURN_NOT_OK(build_processor_.Init(hardware_flags_, pool_, dop_, schema_[1],
+                                           join_type_, &hash_table_build_, &hash_table_,
+                                           &build_side_batches_, materialize));
   ARRA_RETURN_NOT_OK(probe_processor_.Init(
       hardware_flags_, proj_map_left->num_cols(HashJoinProjection::KEY), join_type_,
       &key_cmp_, &hash_table_, std::move(materialize)));

@@ -46,12 +46,13 @@ struct OperatorStatus {
 };
 
 using TaskGroupId = size_t;
+using TaskId = size_t;
 using ThreadId = size_t;
 
-using Task = std::function<arrow::Status(ThreadId, OperatorStatus&)>;
-using TaskCont = std::function<arrow::Status(ThreadId)>;
+using Task = std::function<arrow::Status(TaskId, OperatorStatus&)>;
+using TaskCont = std::function<arrow::Status(TaskId)>;
 using TaskGroup = std::tuple<Task, size_t, TaskCont>;
-using TaskGroups = std::vector<std::tuple<Task, size_t, TaskCont>>;
+using TaskGroups = std::vector<TaskGroup>;
 
 using PipelineTaskSource = std::function<arrow::Status(ThreadId, OperatorStatus&)>;
 using PipelineTaskPipe = std::function<arrow::Status(
@@ -71,13 +72,18 @@ class BuildProcessor {
   Status Init(int64_t hardware_flags, MemoryPool* pool, size_t dop,
               const HashJoinProjectionMaps* schema, JoinType join_type,
               SwissTableForJoinBuild* hash_table_build, SwissTableForJoin* hash_table,
-              AccumulationQueue* batches);
+              AccumulationQueue* batches,
+              std::vector<JoinResultMaterialize*> materialize);
 
-  Status PrepareBuild(OperatorStatus& status);
+  Status InitHashTable();
 
   Status Build(ThreadId thread_id, TempVectorStack* temp_stack, OperatorStatus& status);
 
-  Status PrepareMerge(OperatorStatus& status);
+  Status FinishBuild();
+
+  Status Merge(ThreadId thread_id, TempVectorStack* temp_stack, OperatorStatus& status);
+
+  Status FinishMerge(TempVectorStack* temp_stack);
 
  private:
   int64_t hardware_flags_;
@@ -89,6 +95,7 @@ class BuildProcessor {
   SwissTableForJoinBuild* hash_table_build_;
   SwissTableForJoin* hash_table_;
   AccumulationQueue* batches_;
+  std::vector<JoinResultMaterialize*> materialize_;
 
   struct ThreadLocalState {
     size_t round;
