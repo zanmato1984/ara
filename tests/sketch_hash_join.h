@@ -78,9 +78,6 @@ using arrow::util::MiniBatch;
 using arrow::util::TempVectorHolder;
 using arrow::util::TempVectorStack;
 
-Result<ExecBatch> KeyPayloadFromInput(const HashJoinProjectionMaps* schema,
-                                      MemoryPool* pool, ExecBatch* input);
-
 class BuildProcessor {
  public:
   Status Init(int64_t hardware_flags, MemoryPool* pool,
