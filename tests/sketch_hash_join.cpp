@@ -589,6 +589,7 @@ Status ScanProcessor::Scan(ThreadId thread_id, TempVectorStack* temp_stack,
       }
     }
 
+    bool has_output = false;
     if (local_states_[thread_id].materialize->num_rows() + num_output_rows >
         kMaxRowsPerBatch) {
       std::optional<ExecBatch> output;
@@ -599,6 +600,7 @@ Status ScanProcessor::Scan(ThreadId thread_id, TempVectorStack* temp_stack,
           }),
           { status = OperatorStatus::Other(__s); });
       status = OperatorStatus::HasMoreOutput(std::move(output));
+      has_output = true;
     }
 
     if (num_output_rows > 0) {
@@ -613,6 +615,10 @@ Status ScanProcessor::Scan(ThreadId thread_id, TempVectorStack* temp_stack,
 
     mini_batch_start += mini_batch_size_next;
     local_states_[thread_id].current_start_ += mini_batch_size_next;
+
+    if (has_output) {
+      break;
+    }
   }
 
   // TODO: Final flush?
