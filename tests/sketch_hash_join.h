@@ -1,4 +1,5 @@
-#include <arrow/acero/hash_join.h>
+#include <arrow/acero/accumulation_queue.h>
+#include <arrow/acero/hash_join_node.h>
 #include <arrow/api.h>
 
 #include "arrow/acero/swiss_join_internal.h"
@@ -71,6 +72,7 @@ using PipelineTaskPipe = std::function<arrow::Status(
 namespace detail {
 using namespace arrow;
 using namespace arrow::acero;
+using namespace arrow::acero::util;
 using namespace arrow::compute;
 using namespace arrow::bit_util;
 using arrow::util::bit_util;
@@ -243,10 +245,8 @@ class HashJoinScanSource {
 
 class HashJoin {
  public:
-  Status Init(QueryContext* ctx, JoinType join_type, size_t dop,
-              const HashJoinProjectionMaps* proj_map_left,
-              const HashJoinProjectionMaps* proj_map_right,
-              std::vector<JoinKeyCmp> key_cmp, Expression filter);
+  Status Init(QueryContext* ctx, size_t dop, const HashJoinNodeOptions& options,
+              const Schema& left_schema, const Schema& right_schema);
 
   PipelineTaskPipe BuildPipe();
 
@@ -263,8 +263,10 @@ class HashJoin {
   int64_t hardware_flags_;
   MemoryPool* pool_;
   size_t dop_;
+
   JoinType join_type_;
   std::vector<JoinKeyCmp> key_cmp_;
+  HashJoinSchema schema_mgr_;
   const HashJoinProjectionMaps* schema_[2];
 
   struct ThreadLocalState {
@@ -287,5 +289,7 @@ class HashJoin {
 };
 
 }  // namespace detail
+
+using HashJoin = detail::HashJoin;
 
 }  // namespace arra

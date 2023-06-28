@@ -1,8 +1,24 @@
+#include <arrow/acero/query_context.h>
+
 #include "sketch_hash_join.h"
 
 namespace arra::detail {
 
 static constexpr size_t kMaxRowsPerBatch = 4096;
+
+Status ValidateHashJoinNodeOptions(const HashJoinNodeOptions& join_options) {
+  if (join_options.key_cmp.empty() || join_options.left_keys.empty() ||
+      join_options.right_keys.empty()) {
+    return Status::Invalid("key_cmp and keys cannot be empty");
+  }
+
+  if ((join_options.key_cmp.size() != join_options.left_keys.size()) ||
+      (join_options.key_cmp.size() != join_options.right_keys.size())) {
+    return Status::Invalid("key_cmp and keys must have the same size");
+  }
+
+  return Status::OK();
+}
 
 Result<ExecBatch> KeyPayloadFromInput(const HashJoinProjectionMaps* schema,
                                       MemoryPool* pool, ExecBatch* input) {
@@ -741,28 +757,37 @@ Status ScanProcessor::Scan(ThreadId thread_id, TempVectorStack* temp_stack,
   return Status::OK();
 }
 
-Status HashJoin::Init(QueryContext* ctx, JoinType join_type, size_t dop,
-                      const HashJoinProjectionMaps* proj_map_left,
-                      const HashJoinProjectionMaps* proj_map_right,
-                      std::vector<JoinKeyCmp> key_cmp, Expression filter) {
-  dop_ = dop;
+Status HashJoin::Init(QueryContext* ctx, size_t dop, const HashJoinNodeOptions& options,
+                      const Schema& left_schema, const Schema& right_schema) {
   ctx_ = ctx;
   hardware_flags_ = ctx->cpu_info()->hardware_flags();
   pool_ = ctx->memory_pool();
+  dop_ = dop;
 
-  join_type_ = join_type;
-  key_cmp_.resize(key_cmp.size());
-  for (size_t i = 0; i < key_cmp.size(); ++i) {
-    key_cmp_[i] = key_cmp[i];
+  join_type_ = options.join_type;
+  key_cmp_ = options.key_cmp;
+
+  ARRA_RETURN_NOT_OK(ValidateHashJoinNodeOptions(options));
+
+  if (options.output_all) {
+    ARRA_RETURN_NOT_OK(schema_mgr_.Init(options.join_type, left_schema, options.left_keys,
+                                        right_schema, options.right_keys, options.filter,
+                                        options.output_suffix_for_left,
+                                        options.output_suffix_for_right));
+  } else {
+    ARRA_RETURN_NOT_OK(schema_mgr_.Init(
+        options.join_type, left_schema, options.left_keys, options.left_output,
+        right_schema, options.right_keys, options.right_output, options.filter,
+        options.output_suffix_for_left, options.output_suffix_for_right));
   }
 
-  schema_[0] = proj_map_left;
-  schema_[1] = proj_map_right;
+  schema_[0] = &schema_mgr_.proj_maps[0];
+  schema_[1] = &schema_mgr_.proj_maps[1];
 
   // Initialize thread local states and associated probe processors.
   local_states_.resize(dop_);
   for (int i = 0; i < dop_; ++i) {
-    local_states_[i].materialize.Init(pool_, proj_map_left, proj_map_right);
+    local_states_[i].materialize.Init(pool_, schema_[0], schema_[1]);
   }
 
   std::vector<JoinResultMaterialize*> materialize;
@@ -774,8 +799,8 @@ Status HashJoin::Init(QueryContext* ctx, JoinType join_type, size_t dop,
                                            &hash_table_build_, &hash_table_,
                                            &build_side_batches_, materialize));
   ARRA_RETURN_NOT_OK(probe_processor_.Init(
-      hardware_flags_, pool_, proj_map_left->num_cols(HashJoinProjection::KEY),
-      schema_[0], join_type_, &key_cmp_, &hash_table_, materialize));
+      hardware_flags_, pool_, schema_[0]->num_cols(HashJoinProjection::KEY), schema_[0],
+      join_type_, &key_cmp_, &hash_table_, materialize));
   ARRA_RETURN_NOT_OK(scan_processor_.Init(join_type_, &hash_table_, materialize));
 
   if (NeedToScan(join_type_)) {
