@@ -35,8 +35,8 @@ struct OperatorStatus {
   static OperatorStatus HasMoreOutput(std::optional<arrow::ExecBatch> output) {
     return OperatorStatus{OperatorStatusCode::HAS_MORE_OUTPUT, std::move(output)};
   }
-  static OperatorStatus Finished() {
-    return OperatorStatus{OperatorStatusCode::FINISHED, std::nullopt};
+  static OperatorStatus Finished(std::optional<arrow::ExecBatch> output) {
+    return OperatorStatus{OperatorStatusCode::FINISHED, std::move(output)};
   }
   static OperatorStatus Spilling() {
     return OperatorStatus{OperatorStatusCode::SPILLING, std::nullopt};
@@ -133,6 +133,9 @@ class ProbeProcessor {
   Status Probe(ThreadId thread_id, std::optional<ExecBatch> input,
                TempVectorStack* temp_stack,
                std::vector<KeyColumnArray>* temp_column_arrays, OperatorStatus& status);
+
+  // Must execute in task thread.
+  Status Drain(ThreadId thread_id, OperatorStatus& status);
 
  private:
   int64_t hardware_flags_;
@@ -250,6 +253,8 @@ class HashJoin {
   TaskGroups BuildBreak();
 
   PipelineTaskPipe ProbePipe();
+
+  PipelineTaskPipe ProbeDrain();
 
   std::optional<HashJoinScanSource> ScanSource();
 

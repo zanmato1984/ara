@@ -38,6 +38,11 @@ Result<ExecBatch> KeyPayloadFromInput(const HashJoinProjectionMaps* schema,
   return projected;
 }
 
+bool NeedToScan(JoinType join_type) {
+  return join_type == JoinType::RIGHT_SEMI || join_type == JoinType::RIGHT_ANTI ||
+         join_type == JoinType::RIGHT_OUTER || join_type == JoinType::FULL_OUTER;
+}
+
 Status BuildProcessor::Init(int64_t hardware_flags, MemoryPool* pool,
                             const HashJoinProjectionMaps* schema, JoinType join_type,
                             SwissTableForJoinBuild* hash_table_build,
@@ -91,7 +96,7 @@ Status BuildProcessor::Build(ThreadId thread_id, TempVectorStack* temp_stack,
   status = OperatorStatus::HasOutput(std::nullopt);
   auto batch_id = dop_ * local_states_[thread_id].round + thread_id;
   if (batch_id >= batches_->batch_count()) {
-    status = OperatorStatus::Finished();
+    status = OperatorStatus::Finished(std::nullopt);
     return Status::OK();
   }
   local_states_[thread_id].round++;
@@ -229,6 +234,27 @@ Status ProbeProcessor::Probe(ThreadId thread_id, std::optional<ExecBatch> input,
                    });
     }
   }
+}
+
+Status ProbeProcessor::Drain(ThreadId thread_id, OperatorStatus& status) {
+  if (!NeedToScan(join_type_)) {
+    // No need to drain now, scan will output the remaining rows in materialize.
+    status = OperatorStatus::Finished(std::nullopt);
+    return Status::OK();
+  }
+
+  std::optional<ExecBatch> output;
+  if (local_states_[thread_id].materialize->num_rows() > 0) {
+    ARRA_SET_AND_RETURN_NOT_OK(
+        local_states_[thread_id].materialize->Flush([&](ExecBatch batch) {
+          output.emplace(std::move(batch));
+          return Status::OK();
+        }),
+        { status = OperatorStatus::Other(__s); });
+  }
+  status = OperatorStatus::Finished(std::move(output));
+
+  return Status::OK();
 }
 
 Status ProbeProcessor::Probe(ThreadId thread_id, std::optional<ExecBatch> input,
@@ -396,7 +422,7 @@ Status ProbeProcessor::InnerOuter(ThreadId thread_id, TempVectorStack* temp_stac
 
         // Call materialize for resulting id tuples pointing to matching pairs
         // of rows.
-        {
+        if (num_matches_next > 0) {
           int ignored;
           ARRA_RETURN_NOT_OK(local_states_[thread_id].materialize->Append(
               local_states_[thread_id].input->batch, num_matches_next,
@@ -437,7 +463,7 @@ Status ProbeProcessor::InnerOuter(ThreadId thread_id, TempVectorStack* temp_stac
           state_next = State::MINIBATCH_HAS_MORE;
         }
 
-        {
+        if (num_passing_ids > 0) {
           int ignored;
           ARRA_RETURN_NOT_OK(local_states_[thread_id].materialize->AppendProbeOnly(
               local_states_[thread_id].input->batch, num_passing_ids,
@@ -517,7 +543,7 @@ Status ProbeProcessor::LeftSemiAnti(ThreadId thread_id, TempVectorStack* temp_st
       state_next = State::MINIBATCH_HAS_MORE;
     }
 
-    {
+    if (num_passing_ids > 0) {
       int ignored;
       ARRA_RETURN_NOT_OK(local_states_[thread_id].materialize->AppendProbeOnly(
           local_states_[thread_id].input->batch, num_passing_ids,
@@ -608,8 +634,6 @@ Status ScanProcessor::Init(JoinType join_type, SwissTableForJoin* hash_table,
 }
 
 Status ScanProcessor::StartScan() {
-  ARRA_DCHECK(join_type_ == JoinType::RIGHT_SEMI || join_type_ == JoinType::RIGHT_ANTI ||
-              join_type_ == JoinType::RIGHT_OUTER || join_type_ == JoinType::FULL_OUTER);
   hash_table_->MergeHasMatch();
 
   num_rows_per_thread_ = CeilDiv(hash_table_->num_rows(), dop_);
@@ -627,6 +651,20 @@ Status ScanProcessor::Scan(ThreadId thread_id, TempVectorStack* temp_stack,
       num_rows_per_thread_ * thread_id + local_states_[thread_id].current_start_;
   int64_t end_row = std::min(num_rows_per_thread_ * (thread_id + 1),
                              static_cast<size_t>(hash_table_->num_rows()));
+
+  if (start_row >= end_row) {
+    std::optional<ExecBatch> output;
+    if (local_states_[thread_id].materialize->num_rows() > 0) {
+      ARRA_SET_AND_RETURN_NOT_OK(
+          local_states_[thread_id].materialize->Flush([&](ExecBatch batch) {
+            output.emplace(std::move(batch));
+            return Status::OK();
+          }),
+          { status = OperatorStatus::Other(__s); });
+    }
+    status = OperatorStatus::Finished(std::move(output));
+    return Status::OK();
+  }
 
   // Split into mini-batches
   //
@@ -700,9 +738,6 @@ Status ScanProcessor::Scan(ThreadId thread_id, TempVectorStack* temp_stack,
     }
   }
 
-  // TODO: Final flush?
-  // TODO: HasOutput and Finished?
-
   return Status::OK();
 }
 
@@ -743,8 +778,7 @@ Status HashJoin::Init(QueryContext* ctx, JoinType join_type, size_t dop,
       schema_[0], join_type_, &key_cmp_, &hash_table_, materialize));
   ARRA_RETURN_NOT_OK(scan_processor_.Init(join_type_, &hash_table_, materialize));
 
-  if (join_type_ == JoinType::RIGHT_SEMI || join_type_ == JoinType::RIGHT_ANTI ||
-      join_type_ == JoinType::RIGHT_OUTER || join_type_ == JoinType::FULL_OUTER) {
+  if (NeedToScan(join_type_)) {
     scan_source_.emplace();
     ARRA_RETURN_NOT_OK(scan_source_->Init(ctx_, &scan_processor_));
   }
@@ -803,6 +837,15 @@ PipelineTaskPipe HashJoin::ProbePipe() {
                                   temp_column_arrays, status);
   };
 }
+
+PipelineTaskPipe HashJoin::ProbeDrain() {
+  return
+      [&](ThreadId thread_id, std::optional<arrow::ExecBatch>, OperatorStatus& status) {
+        return probe_processor_.Drain(thread_id, status);
+      };
+}
+
+std::optional<HashJoinScanSource> HashJoin::ScanSource() { return scan_source_; }
 
 Status HashJoinScanSource::Init(QueryContext* ctx, ScanProcessor* scan_processor) {
   ctx_ = ctx;
