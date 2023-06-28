@@ -538,7 +538,6 @@ Status ScanProcessor::StartScan() {
 }
 
 Status ScanProcessor::Scan(ThreadId thread_id, TempVectorStack* temp_stack,
-                           std::vector<KeyColumnArray>* temp_column_arrays,
                            OperatorStatus& status) {
   // Should we output matches or non-matches?
   //
@@ -627,12 +626,6 @@ Status ScanProcessor::Scan(ThreadId thread_id, TempVectorStack* temp_stack,
   return Status::OK();
 }
 
-Status HashJoinScanSource::Init(ScanProcessor* scan_processor) {
-  scan_processor_ = scan_processor;
-
-  return Status::OK();
-}
-
 Status HashJoin::Init(QueryContext* ctx, JoinType join_type, size_t dop,
                       const HashJoinProjectionMaps* proj_map_left,
                       const HashJoinProjectionMaps* proj_map_right,
@@ -673,10 +666,85 @@ Status HashJoin::Init(QueryContext* ctx, JoinType join_type, size_t dop,
   if (join_type_ == JoinType::RIGHT_SEMI || join_type_ == JoinType::RIGHT_ANTI ||
       join_type_ == JoinType::RIGHT_OUTER || join_type_ == JoinType::FULL_OUTER) {
     scan_source_.emplace();
-    ARRA_RETURN_NOT_OK(scan_source_->Init(&scan_processor_));
+    ARRA_RETURN_NOT_OK(scan_source_->Init(ctx_, &scan_processor_));
   }
 
   return Status::OK();
+}
+
+PipelineTaskPipe HashJoin::BuildPipe() {
+  return [&](ThreadId thread_id, std::optional<arrow::ExecBatch> input,
+             OperatorStatus& status) {
+    if (!input.has_value()) {
+      return Status::OK();
+    }
+    std::lock_guard<std::mutex> guard(build_side_mutex_);
+    build_side_batches_.InsertBatch(std::move(input.value()));
+    return Status::OK();
+  };
+}
+
+TaskGroups HashJoin::BuildBreak() {
+  ARRA_DCHECK_OK(build_processor_.StartBuild());
+
+  auto build_task = [&](TaskId task_id, OperatorStatus& status) {
+    ARROW_ASSIGN_OR_RAISE(TempVectorStack * temp_stack, ctx_->GetTempStack(task_id));
+    return build_processor_.Build(task_id, temp_stack, status);
+  };
+  auto build_task_cont = [&](TaskId) {
+    ARRA_RETURN_NOT_OK(build_processor_.FinishBuild());
+    return build_processor_.StartMerge();
+  };
+
+  auto merge_task = [&](TaskId task_id, OperatorStatus& status) {
+    ARROW_ASSIGN_OR_RAISE(TempVectorStack * temp_stack, ctx_->GetTempStack(task_id));
+    return build_processor_.Merge(task_id, temp_stack, status);
+  };
+  auto num_merge_tasks = hash_table_build_.num_prtns();
+
+  auto finish_merge_task = [&](TaskId task_id, OperatorStatus& status) {
+    ARROW_ASSIGN_OR_RAISE(TempVectorStack * temp_stack, ctx_->GetTempStack(task_id));
+    return build_processor_.FinishMerge(temp_stack);
+  };
+
+  return {
+      {std::move(build_task), dop_, std::move(build_task_cont)},
+      {std::move(merge_task), num_merge_tasks, std::nullopt},
+      {std::move(finish_merge_task), 1, std::nullopt},
+  };
+}
+
+PipelineTaskPipe HashJoin::ProbePipe() {
+  return [&](ThreadId thread_id, std::optional<arrow::ExecBatch> input,
+             OperatorStatus& status) {
+    ARROW_ASSIGN_OR_RAISE(TempVectorStack * temp_stack, ctx_->GetTempStack(thread_id));
+    auto temp_column_arrays = &local_states_[thread_id].temp_column_arrays;
+    return probe_processor_.Probe(thread_id, std::move(input), temp_stack,
+                                  temp_column_arrays, status);
+  };
+}
+
+Status HashJoinScanSource::Init(QueryContext* ctx, ScanProcessor* scan_processor) {
+  ctx_ = ctx;
+  scan_processor_ = scan_processor;
+
+  return Status::OK();
+}
+
+TaskGroups HashJoinScanSource::ScanSourceBackend() { return {}; }
+
+std::pair<TaskGroups, PipelineTaskSource> HashJoinScanSource::ScanSourceFrontend() {
+  auto start_scan_task = [&](TaskId, OperatorStatus&) {
+    return scan_processor_->StartScan();
+  };
+  TaskGroups start_scan_task_groups{{std::move(start_scan_task), 1, std::nullopt}};
+
+  auto scan_source = [&](ThreadId thread_id, OperatorStatus& status) {
+    ARROW_ASSIGN_OR_RAISE(TempVectorStack * temp_stack, ctx_->GetTempStack(thread_id));
+    return scan_processor_->Scan(thread_id, temp_stack, status);
+  };
+
+  return {std::move(start_scan_task_groups), std::move(scan_source)};
 }
 
 }  // namespace arra::detail

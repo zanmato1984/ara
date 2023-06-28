@@ -13,6 +13,7 @@
   } while (false)
 
 #define ARRA_DCHECK ARROW_DCHECK
+#define ARRA_DCHECK_OK ARROW_DCHECK_OK
 
 namespace arra {
 
@@ -58,8 +59,7 @@ enum class ResourcePreference {
   GPU = 5,
 };
 
-using Task =
-    std::pair<std::function<arrow::Status(TaskId, OperatorStatus&)>, ResourcePreference>;
+using Task = std::function<arrow::Status(TaskId, OperatorStatus&)>;
 using TaskCont = std::function<arrow::Status(TaskId)>;
 using TaskGroup = std::tuple<Task, size_t, std::optional<TaskCont>>;
 using TaskGroups = std::vector<TaskGroup>;
@@ -264,8 +264,7 @@ class ScanProcessor {
   Status StartScan();
 
   // Must execute in task thread.
-  Status Scan(ThreadId thread_id, TempVectorStack* temp_stack,
-              std::vector<KeyColumnArray>* temp_column_arrays, OperatorStatus& status);
+  Status Scan(ThreadId thread_id, TempVectorStack* temp_stack, OperatorStatus& status);
 
  private:
   size_t dop_;
@@ -290,13 +289,15 @@ class ScanProcessor {
 
 class HashJoinScanSource {
  public:
-  Status Init(ScanProcessor* scan_processor);
+  Status Init(QueryContext* ctx, ScanProcessor* scan_processor);
 
   TaskGroups ScanSourceBackend();
 
-  std::pair<TaskGroups, PipelineTaskPipe> ScanSourceFrontend();
+  std::pair<TaskGroups, PipelineTaskSource> ScanSourceFrontend();
 
  private:
+  QueryContext* ctx_;
+
   ScanProcessor* scan_processor_;
 };
 
@@ -337,6 +338,7 @@ class HashJoin {
 
   SwissTableForJoin hash_table_;
   SwissTableForJoinBuild hash_table_build_;
+  std::mutex build_side_mutex_;
   AccumulationQueue build_side_batches_;
 
   std::optional<HashJoinScanSource> scan_source_;
