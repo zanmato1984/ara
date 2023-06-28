@@ -74,6 +74,7 @@ using namespace arrow::acero;
 using namespace arrow::compute;
 using namespace arrow::bit_util;
 using arrow::util::bit_util;
+using arrow::util::MiniBatch;
 using arrow::util::TempVectorHolder;
 using arrow::util::TempVectorStack;
 
@@ -134,7 +135,6 @@ class ProbeProcessor {
 
  private:
   int64_t hardware_flags_;
-  int minibatch_size_;
 
   int num_key_columns_;
   JoinType join_type_;
@@ -164,13 +164,14 @@ class ProbeProcessor {
             Input{std::move(input.value()),
                   ExecBatch({}, batch_length),
                   0,
-                  TempVectorHolder<uint32_t>(temp_stack, minibatch_size_),
+                  TempVectorHolder<uint32_t>(temp_stack, MiniBatch::kMiniBatchLength),
                   TempVectorHolder<uint8_t>(
-                      temp_stack, static_cast<uint32_t>(BytesForBits(minibatch_size_))),
-                  TempVectorHolder<uint32_t>(temp_stack, minibatch_size_),
-                  TempVectorHolder<uint16_t>(temp_stack, minibatch_size_),
-                  TempVectorHolder<uint32_t>(temp_stack, minibatch_size_),
-                  TempVectorHolder<uint32_t>(temp_stack, minibatch_size_),
+                      temp_stack,
+                      static_cast<uint32_t>(BytesForBits(MiniBatch::kMiniBatchLength))),
+                  TempVectorHolder<uint32_t>(temp_stack, MiniBatch::kMiniBatchLength),
+                  TempVectorHolder<uint16_t>(temp_stack, MiniBatch::kMiniBatchLength),
+                  TempVectorHolder<uint32_t>(temp_stack, MiniBatch::kMiniBatchLength),
+                  TempVectorHolder<uint32_t>(temp_stack, MiniBatch::kMiniBatchLength),
                   {}};
         local_states_[thread_id].input->key_batch.values.resize(num_key_columns_);
         for (int i = 0; i < num_key_columns_; ++i) {
@@ -279,13 +280,9 @@ class ScanProcessor {
  private:
   enum class State { CLEAN, HAS_MORE };
 
-  struct Input {
-    int minibatch_start = 0;
-  };
-
   struct ThreadLocalState {
     State state = State::CLEAN;
-    std::optional<Input> input = std::nullopt;
+    int current_start_ = 0;
     JoinResultMaterialize* materialize = nullptr;
   };
   std::vector<ThreadLocalState> local_states_;

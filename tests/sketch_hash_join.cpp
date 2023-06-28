@@ -185,8 +185,6 @@ Status ProbeProcessor::Init(int64_t hardware_flags, int num_key_columns,
     local_states_[i].materialize = materialize[i];
   }
 
-  minibatch_size_ = swiss_table_->minibatch_size();
-
   return Status::OK();
 }
 
@@ -239,8 +237,9 @@ Status ProbeProcessor::InnerOuter(ThreadId thread_id, TempVectorStack* temp_stac
   // Break into minibatches
   for (; local_states_[thread_id].input->minibatch_start < num_rows &&
          state_next == State::CLEAN;) {
-    uint32_t minibatch_size_next = std::min(
-        minibatch_size_, num_rows - local_states_[thread_id].input->minibatch_start);
+    uint32_t minibatch_size_next =
+        std::min(MiniBatch::kMiniBatchLength,
+                 num_rows - local_states_[thread_id].input->minibatch_start);
     bool no_duplicate_keys = (hash_table_->key_to_payload() == nullptr);
     bool no_payload_columns = (hash_table_->payloads() == nullptr);
 
@@ -282,7 +281,7 @@ Status ProbeProcessor::InnerOuter(ThreadId thread_id, TempVectorStack* temp_stac
       int num_matches_next;
       while (state_next != State::MATCH_HAS_MORE &&
              local_states_[thread_id].input->match_iterator.GetNextBatch(
-                 minibatch_size_, &num_matches_next,
+                 MiniBatch::kMiniBatchLength, &num_matches_next,
                  local_states_[thread_id].input->materialize_batch_ids_buf.mutable_data(),
                  local_states_[thread_id].input->materialize_key_ids_buf.mutable_data(),
                  local_states_[thread_id]
@@ -383,8 +382,9 @@ Status ProbeProcessor::LeftSemiAnti(ThreadId thread_id, TempVectorStack* temp_st
   // Break into minibatches
   for (; local_states_[thread_id].input->minibatch_start < num_rows &&
          state_next == State::CLEAN;) {
-    uint32_t minibatch_size_next = std::min(
-        minibatch_size_, num_rows - local_states_[thread_id].input->minibatch_start);
+    uint32_t minibatch_size_next =
+        std::min(MiniBatch::kMiniBatchLength,
+                 num_rows - local_states_[thread_id].input->minibatch_start);
 
     // Calculate hash and matches for this minibatch.
     {
@@ -460,8 +460,9 @@ Status ProbeProcessor::RightSemiAnti(ThreadId thread_id, TempVectorStack* temp_s
 
   // Break into minibatches
   for (; local_states_[thread_id].input->minibatch_start < num_rows;) {
-    uint32_t minibatch_size_next = std::min(
-        minibatch_size_, num_rows - local_states_[thread_id].input->minibatch_start);
+    uint32_t minibatch_size_next =
+        std::min(MiniBatch::kMiniBatchLength,
+                 num_rows - local_states_[thread_id].input->minibatch_start);
 
     // Calculate hash and matches for this minibatch.
     {
@@ -531,7 +532,7 @@ Status ScanProcessor::StartScan() {
               join_type_ == JoinType::RIGHT_OUTER || join_type_ == JoinType::FULL_OUTER);
   hash_table_->MergeHasMatch();
 
-  num_rows_per_thread_ = bit_util::CeilDiv(hash_table_->num_rows(), dop_);
+  num_rows_per_thread_ = CeilDiv(hash_table_->num_rows(), dop_);
 
   return Status::OK();
 }
@@ -543,17 +544,18 @@ Status ScanProcessor::Scan(ThreadId thread_id, TempVectorStack* temp_stack,
   //
   bool bit_to_output = (join_type_ == JoinType::RIGHT_SEMI);
 
-  int64_t start_row = 0;
-  int64_t end_row = num_rows_per_thread_;
+  int64_t start_row =
+      num_rows_per_thread_ * thread_id + local_states_[thread_id].current_start_;
+  int64_t end_row = std::min(num_rows_per_thread_ * (thread_id + 1),
+                             static_cast<size_t>(hash_table_->num_rows()));
 
   // Split into mini-batches
   //
-  auto payload_ids_buf = arrow::util::TempVectorHolder<uint32_t>(
-      temp_stack, arrow::util::MiniBatch::kMiniBatchLength);
-  auto key_ids_buf = arrow::util::TempVectorHolder<uint32_t>(
-      temp_stack, arrow::util::MiniBatch::kMiniBatchLength);
-  auto selection_buf = arrow::util::TempVectorHolder<uint16_t>(
-      temp_stack, arrow::util::MiniBatch::kMiniBatchLength);
+  auto payload_ids_buf =
+      TempVectorHolder<uint32_t>(temp_stack, MiniBatch::kMiniBatchLength);
+  auto key_ids_buf = TempVectorHolder<uint32_t>(temp_stack, MiniBatch::kMiniBatchLength);
+  auto selection_buf =
+      TempVectorHolder<uint16_t>(temp_stack, MiniBatch::kMiniBatchLength);
   for (int64_t mini_batch_start = start_row; mini_batch_start < end_row;) {
     // Compute the size of the next mini-batch
     //
@@ -564,19 +566,20 @@ Status ScanProcessor::Scan(ThreadId thread_id, TempVectorStack* temp_stack,
     // Get the list of key and payload ids from this mini-batch to output.
     //
     uint32_t first_key_id =
-        hash_table_.payload_id_to_key_id(static_cast<uint32_t>(mini_batch_start));
-    uint32_t last_key_id = hash_table_.payload_id_to_key_id(
+        hash_table_->payload_id_to_key_id(static_cast<uint32_t>(mini_batch_start));
+    uint32_t last_key_id = hash_table_->payload_id_to_key_id(
         static_cast<uint32_t>(mini_batch_start + mini_batch_size_next - 1));
     int num_output_rows = 0;
     for (uint32_t key_id = first_key_id; key_id <= last_key_id; ++key_id) {
-      if (bit_util::GetBit(hash_table_.has_match(), key_id) == bit_to_output) {
-        uint32_t first_payload_for_key = std::max(
-            static_cast<uint32_t>(mini_batch_start),
-            hash_table_.key_to_payload() ? hash_table_.key_to_payload()[key_id] : key_id);
+      if (GetBit(hash_table_->has_match(), key_id) == bit_to_output) {
+        uint32_t first_payload_for_key =
+            std::max(static_cast<uint32_t>(mini_batch_start),
+                     hash_table_->key_to_payload() ? hash_table_->key_to_payload()[key_id]
+                                                   : key_id);
         uint32_t last_payload_for_key = std::min(
             static_cast<uint32_t>(mini_batch_start + mini_batch_size_next - 1),
-            hash_table_.key_to_payload() ? hash_table_.key_to_payload()[key_id + 1] - 1
-                                         : key_id);
+            hash_table_->key_to_payload() ? hash_table_->key_to_payload()[key_id + 1] - 1
+                                          : key_id);
         uint32_t num_payloads_for_key = last_payload_for_key - first_payload_for_key + 1;
         for (uint32_t i = 0; i < num_payloads_for_key; ++i) {
           key_ids_buf.mutable_data()[num_output_rows + i] = key_id;
@@ -586,23 +589,34 @@ Status ScanProcessor::Scan(ThreadId thread_id, TempVectorStack* temp_stack,
       }
     }
 
+    if (local_states_[thread_id].materialize->num_rows() + num_output_rows >
+        kMaxRowsPerBatch) {
+      std::optional<ExecBatch> output;
+      ARRA_SET_AND_RETURN_NOT_OK(
+          local_states_[thread_id].materialize->Flush([&](ExecBatch batch) {
+            output.emplace(std::move(batch));
+            return Status::OK();
+          }),
+          { status = OperatorStatus::Other(__s); });
+      status = OperatorStatus::HasMoreOutput(std::move(output));
+    }
+
     if (num_output_rows > 0) {
       // Materialize (and output whenever buffers get full) hash table
       // values according to the generated list of ids.
       //
-      Status status = local_states_[thread_id].materialize.AppendBuildOnly(
+      int ignored;
+      Status status = local_states_[thread_id].materialize->AppendBuildOnly(
           num_output_rows, key_ids_buf.mutable_data(), payload_ids_buf.mutable_data(),
-          [&](ExecBatch batch) {
-            return output_batch_callback_(static_cast<int64_t>(thread_id),
-                                          std::move(batch));
-          });
-      RETURN_NOT_OK(CancelIfNotOK(status));
-      if (!status.ok()) {
-        break;
-      }
+          &ignored);
     }
+
     mini_batch_start += mini_batch_size_next;
+    local_states_[thread_id].current_start_ += mini_batch_size_next;
   }
+
+  // TODO: Final flush?
+  // TODO: HasOutput and Finished?
 
   return Status::OK();
 }
