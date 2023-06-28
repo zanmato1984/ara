@@ -167,13 +167,16 @@ Status BuildProcessor::FinishMerge(TempVectorStack* temp_stack) {
   return Status::OK();
 }
 
-Status ProbeProcessor::Init(int64_t hardware_flags, int num_key_columns,
-                            JoinType join_type, const std::vector<JoinKeyCmp>* cmp,
+Status ProbeProcessor::Init(int64_t hardware_flags, MemoryPool* pool, int num_key_columns,
+                            const HashJoinProjectionMaps* schema, JoinType join_type,
+                            const std::vector<JoinKeyCmp>* cmp,
                             SwissTableForJoin* hash_table,
                             const std::vector<JoinResultMaterialize*>& materialize) {
   hardware_flags_ = hardware_flags;
+  pool_ = pool;
 
   num_key_columns_ = num_key_columns;
+  schema_ = schema;
   join_type_ = join_type;
   cmp_ = cmp;
 
@@ -226,6 +229,83 @@ Status ProbeProcessor::Probe(ThreadId thread_id, std::optional<ExecBatch> input,
                    });
     }
   }
+}
+
+Status ProbeProcessor::Probe(ThreadId thread_id, std::optional<ExecBatch> input,
+                             TempVectorStack* temp_stack,
+                             std::vector<KeyColumnArray>* temp_column_arrays,
+                             OperatorStatus& status, const JoinFn& join_fn) {
+  // Process.
+  std::optional<ExecBatch> output;
+  State state_next = State::CLEAN;
+  switch (local_states_[thread_id].state) {
+    case State::CLEAN: {
+      // Some check.
+      ARRA_DCHECK(!local_states_[thread_id].input.has_value());
+      ARRA_DCHECK(local_states_[thread_id].materialize->num_rows() == 0);
+
+      // Prepare input.
+      ExecBatch batch;
+      ARROW_ASSIGN_OR_RAISE(batch, KeyPayloadFromInput(schema_, pool_, &input.value()));
+
+      auto batch_length = input->length;
+      local_states_[thread_id].input =
+          Input{std::move(batch),
+                ExecBatch({}, batch_length),
+                0,
+                TempVectorHolder<uint32_t>(temp_stack, MiniBatch::kMiniBatchLength),
+                TempVectorHolder<uint8_t>(temp_stack, static_cast<uint32_t>(BytesForBits(
+                                                          MiniBatch::kMiniBatchLength))),
+                TempVectorHolder<uint32_t>(temp_stack, MiniBatch::kMiniBatchLength),
+                TempVectorHolder<uint16_t>(temp_stack, MiniBatch::kMiniBatchLength),
+                TempVectorHolder<uint32_t>(temp_stack, MiniBatch::kMiniBatchLength),
+                TempVectorHolder<uint32_t>(temp_stack, MiniBatch::kMiniBatchLength),
+                {}};
+      local_states_[thread_id].input->key_batch.values.resize(num_key_columns_);
+      for (int i = 0; i < num_key_columns_; ++i) {
+        local_states_[thread_id].input->key_batch.values[i] =
+            local_states_[thread_id].input->batch.values[i];
+      }
+
+      // Process input.
+      ARRA_SET_AND_RETURN_NOT_OK(
+          join_fn(thread_id, temp_stack, temp_column_arrays, output, state_next),
+          { status = OperatorStatus::Other(__s); });
+
+      break;
+    }
+    case State::MINIBATCH_HAS_MORE:
+    case State::MATCH_HAS_MORE: {
+      // Some check.
+      ARRA_DCHECK(local_states_[thread_id].input.has_value());
+      ARRA_DCHECK(local_states_[thread_id].materialize->num_rows() > 0);
+
+      // Process input.
+      ARRA_SET_AND_RETURN_NOT_OK(
+          join_fn(thread_id, temp_stack, temp_column_arrays, output, state_next),
+          { status = OperatorStatus::Other(__s); });
+
+      break;
+    }
+  }
+
+  // Transition.
+  switch (state_next) {
+    case State::CLEAN: {
+      local_states_[thread_id].input.reset();
+      status = OperatorStatus::HasOutput(std::move(output));
+      break;
+    }
+    case State::MINIBATCH_HAS_MORE:
+    case State::MATCH_HAS_MORE: {
+      status = OperatorStatus::HasMoreOutput(std::move(output));
+      break;
+    }
+  }
+
+  local_states_[thread_id].state = state_next;
+
+  return Status::OK();
 }
 
 Status ProbeProcessor::InnerOuter(ThreadId thread_id, TempVectorStack* temp_stack,
@@ -659,8 +739,8 @@ Status HashJoin::Init(QueryContext* ctx, JoinType join_type, size_t dop,
                                            &hash_table_build_, &hash_table_,
                                            &build_side_batches_, materialize));
   ARRA_RETURN_NOT_OK(probe_processor_.Init(
-      hardware_flags_, proj_map_left->num_cols(HashJoinProjection::KEY), join_type_,
-      &key_cmp_, &hash_table_, materialize));
+      hardware_flags_, pool_, proj_map_left->num_cols(HashJoinProjection::KEY),
+      schema_[0], join_type_, &key_cmp_, &hash_table_, materialize));
   ARRA_RETURN_NOT_OK(scan_processor_.Init(join_type_, &hash_table_, materialize));
 
   if (join_type_ == JoinType::RIGHT_SEMI || join_type_ == JoinType::RIGHT_ANTI ||

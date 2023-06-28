@@ -78,6 +78,9 @@ using arrow::util::MiniBatch;
 using arrow::util::TempVectorHolder;
 using arrow::util::TempVectorStack;
 
+Result<ExecBatch> KeyPayloadFromInput(const HashJoinProjectionMaps* schema,
+                                      MemoryPool* pool, ExecBatch* input);
+
 class BuildProcessor {
  public:
   Status Init(int64_t hardware_flags, MemoryPool* pool,
@@ -124,7 +127,8 @@ class BuildProcessor {
 
 class ProbeProcessor {
  public:
-  Status Init(int64_t hardware_flags, int num_key_columns, JoinType join_type,
+  Status Init(int64_t hardware_flags, MemoryPool* pool, int num_key_columns,
+              const HashJoinProjectionMaps* schema, JoinType join_type,
               const std::vector<JoinKeyCmp>* cmp, SwissTableForJoin* hash_table,
               const std::vector<JoinResultMaterialize*>& materialize);
 
@@ -135,8 +139,10 @@ class ProbeProcessor {
 
  private:
   int64_t hardware_flags_;
+  MemoryPool* pool_;
 
   int num_key_columns_;
+  const HashJoinProjectionMaps* schema_;
   JoinType join_type_;
   const std::vector<JoinKeyCmp>* cmp_;
 
@@ -144,82 +150,6 @@ class ProbeProcessor {
   const SwissTable* swiss_table_;
 
  private:
-  template <typename JOIN_FN>
-  Status Probe(ThreadId thread_id, std::optional<ExecBatch> input,
-               TempVectorStack* temp_stack,
-               std::vector<KeyColumnArray>* temp_column_arrays, OperatorStatus& status,
-               const JOIN_FN& join_fn) {
-    // Process.
-    std::optional<ExecBatch> output;
-    State state_next = State::CLEAN;
-    switch (local_states_[thread_id].state) {
-      case State::CLEAN: {
-        // Some check.
-        ARRA_DCHECK(!local_states_[thread_id].input.has_value());
-        ARRA_DCHECK(local_states_[thread_id].materialize->num_rows() == 0);
-
-        // Prepare input.
-        auto batch_length = input->length;
-        local_states_[thread_id].input =
-            Input{std::move(input.value()),
-                  ExecBatch({}, batch_length),
-                  0,
-                  TempVectorHolder<uint32_t>(temp_stack, MiniBatch::kMiniBatchLength),
-                  TempVectorHolder<uint8_t>(
-                      temp_stack,
-                      static_cast<uint32_t>(BytesForBits(MiniBatch::kMiniBatchLength))),
-                  TempVectorHolder<uint32_t>(temp_stack, MiniBatch::kMiniBatchLength),
-                  TempVectorHolder<uint16_t>(temp_stack, MiniBatch::kMiniBatchLength),
-                  TempVectorHolder<uint32_t>(temp_stack, MiniBatch::kMiniBatchLength),
-                  TempVectorHolder<uint32_t>(temp_stack, MiniBatch::kMiniBatchLength),
-                  {}};
-        local_states_[thread_id].input->key_batch.values.resize(num_key_columns_);
-        for (int i = 0; i < num_key_columns_; ++i) {
-          local_states_[thread_id].input->key_batch.values[i] =
-              local_states_[thread_id].input->batch.values[i];
-        }
-
-        // Process input.
-        ARRA_SET_AND_RETURN_NOT_OK(
-            join_fn(thread_id, temp_stack, temp_column_arrays, output, state_next),
-            { status = OperatorStatus::Other(__s); });
-
-        break;
-      }
-      case State::MINIBATCH_HAS_MORE:
-      case State::MATCH_HAS_MORE: {
-        // Some check.
-        ARRA_DCHECK(local_states_[thread_id].input.has_value());
-        ARRA_DCHECK(local_states_[thread_id].materialize->num_rows() > 0);
-
-        // Process input.
-        ARRA_SET_AND_RETURN_NOT_OK(
-            join_fn(thread_id, temp_stack, temp_column_arrays, output, state_next),
-            { status = OperatorStatus::Other(__s); });
-
-        break;
-      }
-    }
-
-    // Transition.
-    switch (state_next) {
-      case State::CLEAN: {
-        local_states_[thread_id].input.reset();
-        status = OperatorStatus::HasOutput(std::move(output));
-        break;
-      }
-      case State::MINIBATCH_HAS_MORE:
-      case State::MATCH_HAS_MORE: {
-        status = OperatorStatus::HasMoreOutput(std::move(output));
-        break;
-      }
-    }
-
-    local_states_[thread_id].state = state_next;
-
-    return Status::OK();
-  }
-
   enum class State { CLEAN, MINIBATCH_HAS_MORE, MATCH_HAS_MORE };
 
   struct Input {
@@ -243,6 +173,16 @@ class ProbeProcessor {
     JoinResultMaterialize* materialize = nullptr;
   };
   std::vector<ThreadLocalState> local_states_;
+
+  using JoinFn =
+      std::function<Status(ThreadId thread_id, TempVectorStack* temp_stack,
+                           std::vector<KeyColumnArray>* temp_column_arrays,
+                           std::optional<ExecBatch>& output, State& state_next)>;
+
+  Status Probe(ThreadId thread_id, std::optional<ExecBatch> input,
+               TempVectorStack* temp_stack,
+               std::vector<KeyColumnArray>* temp_column_arrays, OperatorStatus& status,
+               const JoinFn& join_fn);
 
   Status InnerOuter(ThreadId thread_id, TempVectorStack* temp_stack,
                     std::vector<KeyColumnArray>* temp_column_arrays,
