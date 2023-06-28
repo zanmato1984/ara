@@ -93,6 +93,7 @@
         "forward_list": "cpp",
         "numbers": "cpp",
         "semaphore": "cpp",
-        "strstream": "cpp"
+        "strstream": "cpp",
+        "__verbose_abort": "cpp"
     }
 }
