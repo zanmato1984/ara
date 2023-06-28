@@ -150,6 +150,7 @@ Status BuildProcessor::Build(ThreadId thread_id, TempVectorStack* temp_stack,
           input_batch.values[schema_->num_cols(HashJoinProjection::KEY) + icol];
     }
   }
+
   ARRA_SET_AND_RETURN_NOT_OK(
       hash_table_build_->PushNextBatch(static_cast<int64_t>(thread_id), key_batch,
                                        no_payload ? nullptr : &payload_batch, temp_stack),
@@ -171,8 +172,8 @@ Status BuildProcessor::StartMerge() { return hash_table_build_->PreparePrtnMerge
 
 Status BuildProcessor::Merge(ThreadId thread_id, TempVectorStack* temp_stack,
                              OperatorStatus& status) {
-  status = OperatorStatus::HasOutput(std::nullopt);
   hash_table_build_->PrtnMerge(static_cast<int>(thread_id));
+  status = OperatorStatus::Finished(std::nullopt);
   return Status::OK();
 }
 
@@ -642,6 +643,8 @@ Status ScanProcessor::Init(JoinType join_type, SwissTableForJoin* hash_table,
                            const std::vector<JoinResultMaterialize*>& materialize) {
   dop_ = materialize.size();
   join_type_ = join_type;
+
+  local_states_.resize(materialize.size());
   for (int i = 0; i < materialize.size(); i++) {
     local_states_[i].materialize = materialize[i];
   }
@@ -814,6 +817,7 @@ Status HashJoin::Init(QueryContext* ctx, size_t dop, const HashJoinNodeOptions& 
 PipelineTaskPipe HashJoin::BuildPipe() {
   return [&](ThreadId thread_id, std::optional<arrow::ExecBatch> input,
              OperatorStatus& status) {
+    status = OperatorStatus::HasOutput(std::nullopt);
     if (!input.has_value()) {
       return Status::OK();
     }

@@ -9,7 +9,9 @@
 #define ARRA_SET_AND_RETURN_NOT_OK(status, set)                       \
   do {                                                                \
     ::arrow::Status __s = ::arrow::internal::GenericToStatus(status); \
-    [&](const ::arrow::Status& __s) set(__s);                         \
+    if (!__s.ok()) {                                                  \
+      [&](const ::arrow::Status& __status) set(__s);                  \
+    }                                                                 \
     ARROW_RETURN_IF_(!__s.ok(), __s, ARROW_STRINGIFY(status));        \
   } while (false)
 
