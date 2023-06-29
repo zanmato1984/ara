@@ -67,55 +67,115 @@ void AssertBatchesEqual(const arrow::acero::BatchesWithSchema& out,
 }
 
 struct HashJoinCase {
+  HashJoinCase() = default;
+
+  HashJoinCase(size_t dop, arrow::acero::JoinType join_type, size_t multiplicity_intra,
+               size_t multiplicity_inter)
+      : dop_(dop),
+        multiplicity_intra_(multiplicity_intra),
+        multiplicity_inter_(multiplicity_inter) {
+    std::vector<arrow::FieldRef> left_out, right_out;
+
+    if (join_type != arrow::acero::JoinType::RIGHT_SEMI &&
+        join_type != arrow::acero::JoinType::RIGHT_ANTI) {
+      left_out = {{0}, {1}};
+    }
+    if (join_type != arrow::acero::JoinType::LEFT_SEMI &&
+        join_type != arrow::acero::JoinType::LEFT_ANTI) {
+      right_out = {{0}, {1}};
+    }
+
+    options_ = arrow::acero::HashJoinNodeOptions(
+        join_type, {{0}}, {{1}}, std::move(left_out), std::move(right_out));
+  }
+
+  static std::shared_ptr<arrow::Schema> LeftSchema() {
+    static auto left_schema = arrow::schema(
+        {arrow::field("l_i32", arrow::int32()), arrow::field("l_str", arrow::utf8())});
+    return left_schema;
+  }
+
+  static std::shared_ptr<arrow::Schema> RightSchema() {
+    static auto right_schema = arrow::schema(
+        {arrow::field("r_str", arrow::utf8()), arrow::field("r_i32", arrow::int32())});
+    return right_schema;
+  }
+
+  static arrow::acero::BatchesWithSchema LeftBatches(size_t multiplicity_intra,
+                                                     size_t multiplicity_inter) {
+    return GenerateBatchesFromString(
+        LeftSchema(),
+        {R"([null, "a"], [0, "b"], [1111, "c"], [2, "d"], [3333, "e"], [4, null], [5555, "f"], [6, "g"], [7, "h"], [8, "i"])"},
+        multiplicity_intra, multiplicity_inter);
+  }
+
+  static arrow::acero::BatchesWithSchema RightBatches(size_t multiplicity_intra,
+                                                      size_t multiplicity_inter) {
+    return GenerateBatchesFromString(
+        RightSchema(),
+        {R"(["i", null], ["h", 0], ["g", 1])", R"(["f", 2])", R"(["e", 2], ["d", 3])",
+         R"(["c", 3])", R"(["b", 4], ["a", 5], [null, 6])"},
+        multiplicity_intra, multiplicity_inter);
+  }
+
+  static size_t ResultRowCount(arrow::acero::JoinType join_type, size_t multiplicity_left,
+                               size_t multiplicity_right) {
+    constexpr size_t inner_match = 5;
+    switch (join_type) {
+      case arrow::acero::JoinType::INNER:
+        return inner_match * multiplicity_left * multiplicity_right;
+      case arrow::acero::JoinType::LEFT_OUTER:
+        return 9 * multiplicity_left * multiplicity_right;
+      case arrow::acero::JoinType::RIGHT_OUTER:
+        return 9 * multiplicity_left * multiplicity_right;
+      case arrow::acero::JoinType::FULL_OUTER:
+        return 9 * multiplicity_left * multiplicity_right;
+      case arrow::acero::JoinType::LEFT_SEMI:
+        return 9 * multiplicity_left * multiplicity_right;
+      case arrow::acero::JoinType::LEFT_ANTI:
+        return 9 * multiplicity_left * multiplicity_right;
+      case arrow::acero::JoinType::RIGHT_SEMI:
+        return 9 * multiplicity_left * multiplicity_right;
+      case arrow::acero::JoinType::RIGHT_ANTI:
+        return 9 * multiplicity_left * multiplicity_right;
+      default:
+        EXPECT_TRUE(false);
+    }
+  }
+
   size_t dop_;
-  const std::shared_ptr<arrow::Schema> left_schema_, right_schema_;
   arrow::acero::HashJoinNodeOptions options_;
   size_t multiplicity_intra_;
   size_t multiplicity_inter_;
+
+  std::vector<std::string> left_batches_seed_, right_batches_seed_;
 };
 
-HashJoinCase MakeHashJoinCase(size_t dop, arrow::acero::JoinType join_type,
-                              size_t multiplicity_intra, size_t multiplicity_inter) {
-  auto l_schema = arrow::schema(
-      {arrow::field("l_i32", arrow::int32()), arrow::field("l_str", arrow::utf8())});
-  auto r_schema = arrow::schema(
-      {arrow::field("r_str", arrow::utf8()), arrow::field("r_i32", arrow::int32())});
+auto HashJoinCaseName = [](const testing::TestParamInfo<HashJoinCase>& param_info) {
+  const HashJoinCase& join_case = param_info.param;
+  std::stringstream ss;
+  ss << param_info.index << "_" << join_case.dop_ << "_"
+     << arrow::acero::ToString(join_case.options_.join_type) << "_"
+     << join_case.multiplicity_intra_ << "_" << join_case.multiplicity_inter_;
+  return ss.str();
+};
 
-  std::vector<arrow::FieldRef> left_out, right_out;
-
-  if (join_type != arrow::acero::JoinType::RIGHT_SEMI &&
-      join_type != arrow::acero::JoinType::RIGHT_ANTI) {
-    left_out = {{0}, {1}};
-  }
-  if (join_type != arrow::acero::JoinType::LEFT_SEMI &&
-      join_type != arrow::acero::JoinType::LEFT_ANTI) {
-    right_out = {{0}, {1}};
-  }
-
-  return HashJoinCase{
-      dop,
-      l_schema,
-      r_schema,
-      arrow::acero::HashJoinNodeOptions(join_type, {{0}}, {{1}}, std::move(left_out),
-                                        std::move(right_out)),
-      multiplicity_intra,
-      multiplicity_inter};
-}
-
-class TestHashJoinSerialBase : public testing::TestWithParam<HashJoinCase> {
+class TestHashJoinSerialBase : public testing::Test {
  protected:
+  HashJoinCase join_case_;
+
   void SetUp() override {
     query_ctx_ = std::make_unique<arrow::acero::QueryContext>(
         arrow::acero::QueryOptions{}, arrow::compute::ExecContext());
   }
 
-  void Init() {
-    const auto& join_case = GetParam();
+  void Init(HashJoinCase join_case) {
+    join_case_ = std::move(join_case);
 
-    EXPECT_TRUE(query_ctx_->Init(join_case.dop_, nullptr).ok());
+    EXPECT_TRUE(query_ctx_->Init(join_case_.dop_, nullptr).ok());
     EXPECT_TRUE(hash_join_
-                    .Init(query_ctx_.get(), join_case.dop_, join_case.options_,
-                          *join_case.left_schema_, *join_case.right_schema_)
+                    .Init(query_ctx_.get(), join_case_.dop_, join_case_.options_,
+                          *HashJoinCase::LeftSchema(), *HashJoinCase::RightSchema())
                     .ok());
   }
 
@@ -124,20 +184,18 @@ class TestHashJoinSerialBase : public testing::TestWithParam<HashJoinCase> {
   }
 
   void Build(const arrow::acero::BatchesWithSchema& build_batches) {
-    const auto& join_case = GetParam();
-
     auto build_pipe = hash_join_.BuildPipe();
     for (int i = 0; i < build_batches.batches.size(); ++i) {
       OperatorStatus status;
       EXPECT_TRUE(
-          build_pipe(i % join_case.dop_, std::move(build_batches.batches[i]), status)
+          build_pipe(i % join_case_.dop_, std::move(build_batches.batches[i]), status)
               .ok());
       EXPECT_TRUE(status.code == OperatorStatusCode::HAS_OUTPUT);
       EXPECT_FALSE(std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
     }
 
     auto build_drain = hash_join_.BuildDrain();
-    for (size_t thread_id = 0; thread_id < join_case.dop_; thread_id++) {
+    for (size_t thread_id = 0; thread_id < join_case_.dop_; thread_id++) {
       OperatorStatus status;
       EXPECT_TRUE(build_drain(thread_id, std::nullopt, status).ok());
       EXPECT_TRUE(status.code == OperatorStatusCode::FINISHED);
@@ -203,19 +261,17 @@ class TestHashJoinSerialBase : public testing::TestWithParam<HashJoinCase> {
   }
 };
 
-class TestHashJoinSerialBuildOnly : public TestHashJoinSerialBase {};
+class TestHashJoinSerialBuildOnly : public TestHashJoinSerialBase,
+                                    public testing::WithParamInterface<HashJoinCase> {
+ protected:
+  void Init() { TestHashJoinSerialBase::Init(GetParam()); }
+};
 
 TEST_P(TestHashJoinSerialBuildOnly, BuildOnly) {
-  const auto& join_case = GetParam();
-
   Init();
 
-  auto r_batches = GenerateBatchesFromString(
-      join_case.right_schema_,
-      {R"(["i", null], ["h", 0], ["g", 1])", R"(["f", 2], ["e", 2])",
-       R"(["d", 4], ["c", 3])", R"(["b", 5])", R"(["a", 3], [null, 7])"},
-      join_case.multiplicity_intra_, join_case.multiplicity_inter_);
-
+  auto r_batches = HashJoinCase::RightBatches(join_case_.multiplicity_intra_,
+                                              join_case_.multiplicity_inter_);
   Build(r_batches);
 }
 
@@ -230,48 +286,40 @@ const std::vector<HashJoinCase> build_cases = []() {
       for (auto num_rows : {1, (1 << 6) - 1, 1 << 6, (1 << 12) - 1, 1 << 12}) {
         for (auto intra : {1, (1 << 6) - 1, 1 << 6, (1 << 12) - 1, 1 << 12}) {
           auto inter = arrow::bit_util::CeilDiv(num_rows, intra);
-          std::cout << "[num_rows, intra, inter]: [" << num_rows << ", " << intra << ", "
-                    << inter << "]" << std::endl;
-          // for (auto inter : {1, (1 << 6) - 1, 1 << 6}) {
-          cases.push_back(MakeHashJoinCase(dop, join_type, intra, inter));
+          cases.emplace_back(dop, join_type, intra, inter);
         }
       }
     }
   }
   return cases;
 }();
-INSTANTIATE_TEST_SUITE_P(BuildOnly, TestHashJoinSerialBuildOnly,
-                         testing::ValuesIn(build_cases));
 
-class TestHashJoinSerialProbeOne : public TestHashJoinSerialBase {};
+INSTANTIATE_TEST_SUITE_P(BuildOnlyCases, TestHashJoinSerialBuildOnly,
+                         testing::ValuesIn(build_cases), HashJoinCaseName);
+
+class TestHashJoinSerialProbeOne : public TestHashJoinSerialBase,
+                                   public testing::WithParamInterface<HashJoinCase> {
+ protected:
+  void Init() { TestHashJoinSerialBase::Init(GetParam()); }
+};
 
 TEST_P(TestHashJoinSerialProbeOne, ProbeOne) {
-  const auto& join_case = GetParam();
-
   Init();
 
-  auto l_batches = GenerateBatchesFromString(
-      join_case.left_schema_,
-      {R"([null, "a"], [1, null], [12, "c"], [3, "d"], [14, "e"], [5, "f"], [16, "g"],
-      [7, "h"], [8, "i"], [9, null])"},
-      1, 1);
+  auto l_batches = HashJoinCase::LeftBatches(1, 1);
+  auto r_batches = HashJoinCase::RightBatches(join_case_.multiplicity_intra_,
+                                              join_case_.multiplicity_inter_);
 
-  auto r_batches = GenerateBatchesFromString(
-      join_case.right_schema_,
-      {R"(["i", null], ["h", 0], ["g", 1])", R"(["f", 2], ["e", 2])",
-       R"(["d", 4], ["c", 3])", R"(["b", 5])", R"(["a", 3], [null, 7])"},
-      join_case.multiplicity_intra_, join_case.multiplicity_inter_);
-
-  auto num_matches = 5 * join_case.multiplicity_intra_ * join_case.multiplicity_inter_;
+  auto num_matches = 5 * join_case_.multiplicity_intra_ * join_case_.multiplicity_inter_;
 
   auto exp_batches = GenerateBatchesFromString(
       OutputSchema(),
       {R"([1, null, "g", 1], [3, "d", "c", 3], [3, "d", "a", 3], [5, "f", "b", 5], [7, "h", null, 7])"},
-      join_case.multiplicity_intra_, join_case.multiplicity_inter_);
+      join_case_.multiplicity_intra_, join_case_.multiplicity_inter_);
 
   Build(r_batches);
 
-  for (size_t thread_id = 0; thread_id < GetParam().dop_; thread_id++) {
+  for (size_t thread_id = 0; thread_id < join_case_.dop_; thread_id++) {
     {
       auto status = Probe(thread_id, l_batches.batches[0]);
       EXPECT_TRUE(status.code == OperatorStatusCode::HAS_OUTPUT);
@@ -288,9 +336,11 @@ TEST_P(TestHashJoinSerialProbeOne, ProbeOne) {
     }
   }
 }
-INSTANTIATE_TEST_SUITE_P(
-    ProbeOneCases, TestHashJoinSerialProbeOne,
-    testing::Values(MakeHashJoinCase(4, arrow::acero::JoinType::INNER, 1, 1)));
+
+INSTANTIATE_TEST_SUITE_P(ProbeOneCases, TestHashJoinSerialProbeOne,
+                         testing::Values(HashJoinCase(4, arrow::acero::JoinType::INNER, 1,
+                                                      1)),
+                         HashJoinCaseName);
 
 // class TestTaskRunner {
 //   using Task = std::function<arrow::Status(size_t, int64_t)>;
@@ -298,7 +348,8 @@ INSTANTIATE_TEST_SUITE_P(
 
 //   TestTaskRunner(size_t num_threads)
 //       : scheduler(arrow::acero::TaskScheduler::Make()),
-//         thread_pool(*arrow::internal::ThreadPool::Make(num_threads)) {}
+//         thread_pool(*arrow::internal::ThreadPool::Make(num_threads))
+//         {}
 
 //   void RegisterEnd() { scheduler->RegisterEnd(); }
 
@@ -306,18 +357,22 @@ INSTANTIATE_TEST_SUITE_P(
 //     return scheduler->StartScheduling(
 //         thread_id(),
 //         [&](std::function<arrow::Status(size_t)> func) {
-//           return thread_pool->Spawn([&, func]() { ARROW_DCHECK_OK(func(thread_id()));
+//           return thread_pool->Spawn([&, func]() {
+//           ARROW_DCHECK_OK(func(thread_id()));
 //           });
 //         },
 //         dop, false);
 //   }
 
 //   int RegisterTaskGroup(Task task, TaskCont task_cont) {
-//     return scheduler->RegisterTaskGroup(std::move(task), std::move(task_cont));
+//     return scheduler->RegisterTaskGroup(std::move(task),
+//     std::move(task_cont));
 //   }
 
-//   arrow::Status StartTaskGroup(int task_group_id, int64_t num_tasks) {
-//     return scheduler->StartTaskGroup(thread_id(), task_group_id, num_tasks);
+//   arrow::Status StartTaskGroup(int task_group_id, int64_t
+//   num_tasks) {
+//     return scheduler->StartTaskGroup(thread_id(),
+//     task_group_id, num_tasks);
 //   }
 
 //   void WaitForIdle() { thread_pool->WaitForIdle(); }
