@@ -102,7 +102,7 @@ HashJoinCase MakeHashJoinCase(size_t dop, arrow::acero::JoinType join_type,
       multiplicity_inter};
 }
 
-class TestHashJoinSerial : public testing::TestWithParam<HashJoinCase> {
+class TestHashJoinSerialBase : public testing::TestWithParam<HashJoinCase> {
  protected:
   void SetUp() override {
     query_ctx_ = std::make_unique<arrow::acero::QueryContext>(
@@ -203,15 +203,17 @@ class TestHashJoinSerial : public testing::TestWithParam<HashJoinCase> {
   }
 };
 
-TEST_P(TestHashJoinSerial, BuildOnly) {
+class TestHashJoinSerialBuildOnly : public TestHashJoinSerialBase {};
+
+TEST_P(TestHashJoinSerialBuildOnly, BuildOnly) {
   const auto& join_case = GetParam();
 
   Init();
 
   auto r_batches = GenerateBatchesFromString(
       join_case.right_schema_,
-      {R"(["j", null], ["i", 0], ["h", 1])", R"(["g", 2], ["f", 3])",
-       R"(["e", 4], ["d", 2])", R"(["c", 5])", R"(["b", 3], ["a", 6])"},
+      {R"(["i", null], ["h", 0], ["g", 1])", R"(["f", 2], ["e", 2])",
+       R"(["d", 4], ["c", 3])", R"(["b", 5])", R"(["a", 3], [null, 7])"},
       join_case.multiplicity_intra_, join_case.multiplicity_inter_);
 
   Build(r_batches);
@@ -238,48 +240,57 @@ const std::vector<HashJoinCase> build_cases = []() {
   }
   return cases;
 }();
-INSTANTIATE_TEST_SUITE_P(BuildOnly, TestHashJoinSerial, testing::ValuesIn(build_cases));
+INSTANTIATE_TEST_SUITE_P(BuildOnly, TestHashJoinSerialBuildOnly,
+                         testing::ValuesIn(build_cases));
 
-// TEST_P(TestHashJoinSerial, ProbeOne) {
-//   const auto& join_case = GetParam();
+class TestHashJoinSerialProbeOne : public TestHashJoinSerialBase {};
 
-//   Init();
+TEST_P(TestHashJoinSerialProbeOne, ProbeOne) {
+  const auto& join_case = GetParam();
 
-//   auto l_batches = GenerateBatchesFromString(
-//       join_case.left_schema_,
-//       {R"([null, "a"], [1,"b"], [12,"c"], [3,"d"], [14,"e"], [5,"f"], [16,"g"],
-//       [7,"h"], [18,"i"], [9, ""]])"}, join_case.multiplicity_,
-//       join_case.multiplicity_method_);
+  Init();
 
-//   auto r_batches = GenerateBatchesFromString(
-//       join_case.right_schema_,
-//       {R"(["i", null], ["h", 0], ["g", 1])", R"(["f", 2], ["e", 2])",
-//        R"(["d", 4], ["c", 3])", R"(["b", 5])", R"(["a", 3], [null, 6])"},
-//       join_case.multiplicity_, join_case.multiplicity_method_);
+  auto l_batches = GenerateBatchesFromString(
+      join_case.left_schema_,
+      {R"([null, "a"], [1, null], [12, "c"], [3, "d"], [14, "e"], [5, "f"], [16, "g"],
+      [7, "h"], [8, "i"], [9, null])"},
+      1, 1);
 
-//   auto exp_batches = GenerateBatchesFromString(
-//       OutputSchema(), {R"([[0, "d", "f", 0], [1, "b", "b", 1]])"}, 1);
+  auto r_batches = GenerateBatchesFromString(
+      join_case.right_schema_,
+      {R"(["i", null], ["h", 0], ["g", 1])", R"(["f", 2], ["e", 2])",
+       R"(["d", 4], ["c", 3])", R"(["b", 5])", R"(["a", 3], [null, 7])"},
+      join_case.multiplicity_intra_, join_case.multiplicity_inter_);
 
-//   Build(r_batches);
+  auto num_matches = 5 * join_case.multiplicity_intra_ * join_case.multiplicity_inter_;
 
-//   for (size_t thread_id = 0; thread_id < GetParam().dop_; thread_id++) {
-//     {
-//       auto status = Probe(thread_id, l_batches.batches[0]);
-//       EXPECT_TRUE(status.code == OperatorStatusCode::HAS_OUTPUT);
-//       EXPECT_FALSE(std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
-//     }
+  auto exp_batches = GenerateBatchesFromString(
+      OutputSchema(),
+      {R"([1, null, "g", 1], [3, "d", "c", 3], [3, "d", "a", 3], [5, "f", "b", 5], [7, "h", null, 7])"},
+      join_case.multiplicity_intra_, join_case.multiplicity_inter_);
 
-//     {
-//       auto status = Drain(thread_id);
-//       EXPECT_TRUE(status.code == OperatorStatusCode::FINISHED);
-//       auto output = std::get<std::optional<arrow::ExecBatch>>(status.payload);
-//       EXPECT_TRUE(output.has_value());
-//       AssertBatchesEqual(
-//           arrow::acero::BatchesWithSchema{{output.value()}, OutputSchema()},
-//           exp_batches);
-//     }
-//   }
-// }
+  Build(r_batches);
+
+  for (size_t thread_id = 0; thread_id < GetParam().dop_; thread_id++) {
+    {
+      auto status = Probe(thread_id, l_batches.batches[0]);
+      EXPECT_TRUE(status.code == OperatorStatusCode::HAS_OUTPUT);
+      EXPECT_FALSE(std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
+    }
+
+    {
+      auto status = Drain(thread_id);
+      EXPECT_TRUE(status.code == OperatorStatusCode::FINISHED);
+      auto output = std::get<std::optional<arrow::ExecBatch>>(status.payload);
+      EXPECT_TRUE(output.has_value());
+      AssertBatchesEqual(
+          arrow::acero::BatchesWithSchema{{output.value()}, OutputSchema()}, exp_batches);
+    }
+  }
+}
+INSTANTIATE_TEST_SUITE_P(
+    ProbeOneCases, TestHashJoinSerialProbeOne,
+    testing::Values(MakeHashJoinCase(4, arrow::acero::JoinType::INNER, 1, 1)));
 
 // class TestTaskRunner {
 //   using Task = std::function<arrow::Status(size_t, int64_t)>;
