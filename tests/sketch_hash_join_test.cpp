@@ -11,7 +11,8 @@ using namespace arra;
 
 arrow::acero::BatchesWithSchema GenerateBatchesFromString(
     const std::shared_ptr<arrow::Schema>& schema,
-    const std::vector<std::string_view>& json_strings, int multiplicity = 1) {
+    const std::vector<std::string_view>& json_strings, int multiplicity_intra,
+    int multiplicity_inter) {
   arrow::acero::BatchesWithSchema out_batches{{}, schema};
 
   std::vector<arrow::TypeHolder> types;
@@ -20,11 +21,17 @@ arrow::acero::BatchesWithSchema GenerateBatchesFromString(
   }
 
   for (auto&& s : json_strings) {
-    out_batches.batches.push_back(arrow::acero::ExecBatchFromJSON(types, s));
+    std::stringstream ss;
+    ss << "[" << s;
+    for (int repeat = 1; repeat < multiplicity_intra; ++repeat) {
+      ss << ", " << s;
+    }
+    ss << "]";
+    out_batches.batches.push_back(arrow::acero::ExecBatchFromJSON(types, ss.str()));
   }
 
   size_t batch_count = out_batches.batches.size();
-  for (int repeat = 1; repeat < multiplicity; ++repeat) {
+  for (int repeat = 1; repeat < multiplicity_inter; ++repeat) {
     for (size_t i = 0; i < batch_count; ++i) {
       out_batches.batches.push_back(out_batches.batches[i]);
     }
@@ -63,11 +70,12 @@ struct HashJoinCase {
   size_t dop_;
   const std::shared_ptr<arrow::Schema> left_schema_, right_schema_;
   arrow::acero::HashJoinNodeOptions options_;
-  size_t multiplicity_;
+  size_t multiplicity_intra_;
+  size_t multiplicity_inter_;
 };
 
 HashJoinCase MakeHashJoinCase(size_t dop, arrow::acero::JoinType join_type,
-                              size_t multiplicity) {
+                              size_t multiplicity_intra, size_t multiplicity_inter) {
   auto l_schema = arrow::schema(
       {arrow::field("l_i32", arrow::int32()), arrow::field("l_str", arrow::utf8())});
   auto r_schema = arrow::schema(
@@ -85,10 +93,13 @@ HashJoinCase MakeHashJoinCase(size_t dop, arrow::acero::JoinType join_type,
   }
 
   return HashJoinCase{
-      dop, l_schema, r_schema,
+      dop,
+      l_schema,
+      r_schema,
       arrow::acero::HashJoinNodeOptions(join_type, {{0}}, {{1}}, std::move(left_out),
                                         std::move(right_out)),
-      multiplicity};
+      multiplicity_intra,
+      multiplicity_inter};
 }
 
 class TestHashJoinSerial : public testing::TestWithParam<HashJoinCase> {
@@ -100,6 +111,7 @@ class TestHashJoinSerial : public testing::TestWithParam<HashJoinCase> {
 
   void Init() {
     const auto& join_case = GetParam();
+
     EXPECT_TRUE(query_ctx_->Init(join_case.dop_, nullptr).ok());
     EXPECT_TRUE(hash_join_
                     .Init(query_ctx_.get(), join_case.dop_, join_case.options_,
@@ -107,24 +119,25 @@ class TestHashJoinSerial : public testing::TestWithParam<HashJoinCase> {
                     .ok());
   }
 
-  size_t Dop() const { return GetParam().dop_; }
-
   std::shared_ptr<arrow::Schema> OutputSchema() const {
     return hash_join_.OutputSchema();
   }
 
   void Build(const arrow::acero::BatchesWithSchema& build_batches) {
+    const auto& join_case = GetParam();
+
     auto build_pipe = hash_join_.BuildPipe();
     for (int i = 0; i < build_batches.batches.size(); ++i) {
       OperatorStatus status;
       EXPECT_TRUE(
-          build_pipe(i % Dop(), std::move(build_batches.batches[i]), status).ok());
+          build_pipe(i % join_case.dop_, std::move(build_batches.batches[i]), status)
+              .ok());
       EXPECT_TRUE(status.code == OperatorStatusCode::HAS_OUTPUT);
       EXPECT_FALSE(std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
     }
 
     auto build_drain = hash_join_.BuildDrain();
-    for (size_t thread_id = 0; thread_id < Dop(); thread_id++) {
+    for (size_t thread_id = 0; thread_id < join_case.dop_; thread_id++) {
       OperatorStatus status;
       EXPECT_TRUE(build_drain(thread_id, std::nullopt, status).ok());
       EXPECT_TRUE(status.code == OperatorStatusCode::FINISHED);
@@ -191,61 +204,65 @@ class TestHashJoinSerial : public testing::TestWithParam<HashJoinCase> {
 };
 
 TEST_P(TestHashJoinSerial, BuildOnly) {
+  const auto& join_case = GetParam();
+
   Init();
 
   auto r_batches = GenerateBatchesFromString(
-      GetParam().right_schema_,
-      {R"([["j", null], ["i", 0], ["h", 1]])", R"([["g", 2], ["f", 3]])",
-       R"([["e", 4], ["d", 2]])", R"([["c", 5]])", R"([["b", 3], ["a", 6]])"},
-      GetParam().multiplicity_);
+      join_case.right_schema_,
+      {R"(["j", null], ["i", 0], ["h", 1])", R"(["g", 2], ["f", 3])",
+       R"(["e", 4], ["d", 2])", R"(["c", 5])", R"(["b", 3], ["a", 6])"},
+      join_case.multiplicity_intra_, join_case.multiplicity_inter_);
 
   Build(r_batches);
 }
 
 const std::vector<HashJoinCase> build_cases = []() {
   std::vector<HashJoinCase> cases;
-  for (auto dop : {1, 4, 8, 16}) {
+  for (auto dop : {1, 8, 64}) {
     for (auto join_type :
          {arrow::acero::JoinType::INNER, arrow::acero::JoinType::LEFT_OUTER,
           arrow::acero::JoinType::RIGHT_OUTER, arrow::acero::JoinType::LEFT_SEMI,
           arrow::acero::JoinType::RIGHT_SEMI, arrow::acero::JoinType::LEFT_ANTI,
           arrow::acero::JoinType::RIGHT_ANTI, arrow::acero::JoinType::FULL_OUTER}) {
-      for (auto mul : {1, 128, 256, 512, 1024, 2048, 4096}) {
-        cases.push_back(MakeHashJoinCase(dop, join_type, mul));
+      for (auto num_rows : {1, (1 << 6) - 1, 1 << 6, (1 << 12) - 1, 1 << 12}) {
+        for (auto intra : {1, (1 << 6) - 1, 1 << 6, (1 << 12) - 1, 1 << 12}) {
+          auto inter = arrow::bit_util::CeilDiv(num_rows, intra);
+          std::cout << "[num_rows, intra, inter]: [" << num_rows << ", " << intra << ", "
+                    << inter << "]" << std::endl;
+          // for (auto inter : {1, (1 << 6) - 1, 1 << 6}) {
+          cases.push_back(MakeHashJoinCase(dop, join_type, intra, inter));
+        }
       }
     }
   }
   return cases;
 }();
-
 INSTANTIATE_TEST_SUITE_P(BuildOnly, TestHashJoinSerial, testing::ValuesIn(build_cases));
 
-// TEST_F(TestHashJoinSerial, Probe) {
-//   auto l_schema = arrow::schema(
-//       {arrow::field("l_i32", arrow::int32()), arrow::field("l_str", arrow::utf8())});
-//   auto r_schema = arrow::schema(
-//       {arrow::field("r_str", arrow::utf8()), arrow::field("r_i32", arrow::int32())});
+// TEST_P(TestHashJoinSerial, ProbeOne) {
+//   const auto& join_case = GetParam();
 
-//   arrow::acero::HashJoinNodeOptions options(arrow::acero::JoinType::LEFT_OUTER, {{0}},
-//                                             {{1}}, {{0}, {1}}, {{0}, {1}});
-
-//   size_t dop = 4;
-//   Init(dop, options, *l_schema, *r_schema);
+//   Init();
 
 //   auto l_batches = GenerateBatchesFromString(
-//       l_schema,
-//       {R"([[0,"d"], [1,"b"]])", R"([[2,"d"], [3,"a"], [4,"a"]])",
-//        R"([[5,"b"], [6,"c"], [7,"e"], [8,"e"]])"},
-//       1);
+//       join_case.left_schema_,
+//       {R"([null, "a"], [1,"b"], [12,"c"], [3,"d"], [14,"e"], [5,"f"], [16,"g"],
+//       [7,"h"], [18,"i"], [9, ""]])"}, join_case.multiplicity_,
+//       join_case.multiplicity_method_);
 
 //   auto r_batches = GenerateBatchesFromString(
-//       r_schema,
-//       {R"([["f", 0], ["b", 1], ["b", 2]])", R"([["c", 3], ["g", 4]])", R"([["e",
-//       5]])"}, 1);
+//       join_case.right_schema_,
+//       {R"(["i", null], ["h", 0], ["g", 1])", R"(["f", 2], ["e", 2])",
+//        R"(["d", 4], ["c", 3])", R"(["b", 5])", R"(["a", 3], [null, 6])"},
+//       join_case.multiplicity_, join_case.multiplicity_method_);
+
+//   auto exp_batches = GenerateBatchesFromString(
+//       OutputSchema(), {R"([[0, "d", "f", 0], [1, "b", "b", 1]])"}, 1);
 
 //   Build(r_batches);
 
-//   for (size_t thread_id = 0; thread_id < dop; thread_id++) {
+//   for (size_t thread_id = 0; thread_id < GetParam().dop_; thread_id++) {
 //     {
 //       auto status = Probe(thread_id, l_batches.batches[0]);
 //       EXPECT_TRUE(status.code == OperatorStatusCode::HAS_OUTPUT);
@@ -257,8 +274,6 @@ INSTANTIATE_TEST_SUITE_P(BuildOnly, TestHashJoinSerial, testing::ValuesIn(build_
 //       EXPECT_TRUE(status.code == OperatorStatusCode::FINISHED);
 //       auto output = std::get<std::optional<arrow::ExecBatch>>(status.payload);
 //       EXPECT_TRUE(output.has_value());
-//       auto exp_batches = GenerateBatchesFromString(
-//           OutputSchema(), {R"([[0, "d", "f", 0], [1, "b", "b", 1]])"}, 1);
 //       AssertBatchesEqual(
 //           arrow::acero::BatchesWithSchema{{output.value()}, OutputSchema()},
 //           exp_batches);
