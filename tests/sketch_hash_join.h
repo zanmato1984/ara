@@ -161,13 +161,6 @@ class ProbeProcessor {
     ExecBatch key_batch;
     int minibatch_start = 0;
 
-    TempVectorHolder<uint32_t> hashes_buf;
-    TempVectorHolder<uint8_t> match_bitvector_buf;
-    TempVectorHolder<uint32_t> key_ids_buf;
-    TempVectorHolder<uint16_t> materialize_batch_ids_buf;
-    TempVectorHolder<uint32_t> materialize_key_ids_buf;
-    TempVectorHolder<uint32_t> materialize_payload_ids_buf;
-
     JoinMatchIterator match_iterator;
   };
 
@@ -175,6 +168,24 @@ class ProbeProcessor {
     State state = State::CLEAN;
     std::optional<Input> input = std::nullopt;
     JoinResultMaterialize* materialize = nullptr;
+
+    std::vector<uint32_t> hashes_buf;
+    std::vector<uint8_t> match_bitvector_buf;
+    std::vector<uint32_t> key_ids_buf;
+    std::vector<uint16_t> materialize_batch_ids_buf;
+    std::vector<uint32_t> materialize_key_ids_buf;
+    std::vector<uint32_t> materialize_payload_ids_buf;
+
+    uint32_t* hashes_buf_data() { return hashes_buf.data(); }
+    uint8_t* match_bitvector_buf_data() { return match_bitvector_buf.data(); }
+    uint32_t* key_ids_buf_data() { return key_ids_buf.data(); }
+    uint16_t* materialize_batch_ids_buf_data() {
+      return materialize_batch_ids_buf.data();
+    }
+    uint32_t* materialize_key_ids_buf_data() { return materialize_key_ids_buf.data(); }
+    uint32_t* materialize_payload_ids_buf_data() {
+      return materialize_payload_ids_buf.data();
+    }
   };
   std::vector<ThreadLocalState> local_states_;
 

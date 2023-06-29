@@ -208,6 +208,13 @@ Status ProbeProcessor::Init(int64_t hardware_flags, MemoryPool* pool, int num_ke
   local_states_.resize(materialize.size());
   for (int i = 0; i < materialize.size(); i++) {
     local_states_[i].materialize = materialize[i];
+
+    local_states_[i].hashes_buf.resize(MiniBatch::kMiniBatchLength);
+    local_states_[i].match_bitvector_buf.resize(MiniBatch::kMiniBatchLength);
+    local_states_[i].key_ids_buf.resize(MiniBatch::kMiniBatchLength);
+    local_states_[i].materialize_batch_ids_buf.resize(MiniBatch::kMiniBatchLength);
+    local_states_[i].materialize_key_ids_buf.resize(MiniBatch::kMiniBatchLength);
+    local_states_[i].materialize_payload_ids_buf.resize(MiniBatch::kMiniBatchLength);
   }
 
   return Status::OK();
@@ -292,18 +299,8 @@ Status ProbeProcessor::Probe(ThreadId thread_id, std::optional<ExecBatch> input,
       ARROW_ASSIGN_OR_RAISE(batch, KeyPayloadFromInput(schema_, pool_, &input.value()));
 
       auto batch_length = input->length;
-      local_states_[thread_id].input =
-          Input{std::move(batch),
-                ExecBatch({}, batch_length),
-                0,
-                TempVectorHolder<uint32_t>(temp_stack, MiniBatch::kMiniBatchLength),
-                TempVectorHolder<uint8_t>(temp_stack, static_cast<uint32_t>(BytesForBits(
-                                                          MiniBatch::kMiniBatchLength))),
-                TempVectorHolder<uint32_t>(temp_stack, MiniBatch::kMiniBatchLength),
-                TempVectorHolder<uint16_t>(temp_stack, MiniBatch::kMiniBatchLength),
-                TempVectorHolder<uint32_t>(temp_stack, MiniBatch::kMiniBatchLength),
-                TempVectorHolder<uint32_t>(temp_stack, MiniBatch::kMiniBatchLength),
-                {}};
+      local_states_[thread_id].input.emplace(
+          Input{std::move(batch), ExecBatch({}, batch_length), 0, {}});
       local_states_[thread_id].input->key_batch.values.resize(num_key_columns_);
       for (int i = 0; i < num_key_columns_; ++i) {
         local_states_[thread_id].input->key_batch.values[i] =
@@ -373,30 +370,28 @@ Status ProbeProcessor::InnerOuter(ThreadId thread_id, TempVectorStack* temp_stac
           local_states_[thread_id].input->minibatch_start,
           local_states_[thread_id].input->minibatch_start + minibatch_size_next,
           temp_stack, temp_column_arrays);
-      hash_table_->keys()->Hash(&hash_table_input,
-                                local_states_[thread_id].input->hashes_buf.mutable_data(),
-                                hardware_flags_);
+      hash_table_->keys()->Hash(
+          &hash_table_input, local_states_[thread_id].hashes_buf_data(), hardware_flags_);
       hash_table_->keys()->MapReadOnly(
-          &hash_table_input, local_states_[thread_id].input->hashes_buf.mutable_data(),
-          local_states_[thread_id].input->match_bitvector_buf.mutable_data(),
-          local_states_[thread_id].input->key_ids_buf.mutable_data());
+          &hash_table_input, local_states_[thread_id].hashes_buf_data(),
+          local_states_[thread_id].match_bitvector_buf_data(),
+          local_states_[thread_id].key_ids_buf_data());
 
       // AND bit vector with null key filter for join
       bool ignored;
-      JoinNullFilter::Filter(
-          local_states_[thread_id].input->key_batch,
-          local_states_[thread_id].input->minibatch_start, minibatch_size_next, *cmp_,
-          &ignored,
-          /*and_with_input=*/true,
-          local_states_[thread_id].input->match_bitvector_buf.mutable_data());
+      JoinNullFilter::Filter(local_states_[thread_id].input->key_batch,
+                             local_states_[thread_id].input->minibatch_start,
+                             minibatch_size_next, *cmp_, &ignored,
+                             /*and_with_input=*/true,
+                             local_states_[thread_id].match_bitvector_buf_data());
 
       // We need to output matching pairs of rows from both sides of the join.
       // Since every hash table lookup for an input row might have multiple
       // matches we use a helper class that implements enumerating all of them.
       local_states_[thread_id].input->match_iterator.SetLookupResult(
           minibatch_size_next, local_states_[thread_id].input->minibatch_start,
-          local_states_[thread_id].input->match_bitvector_buf.mutable_data(),
-          local_states_[thread_id].input->key_ids_buf.mutable_data(), no_duplicate_keys,
+          local_states_[thread_id].match_bitvector_buf_data(),
+          local_states_[thread_id].key_ids_buf_data(), no_duplicate_keys,
           hash_table_->key_to_payload());
     }
 
@@ -405,19 +400,17 @@ Status ProbeProcessor::InnerOuter(ThreadId thread_id, TempVectorStack* temp_stac
       while (state_next != State::MATCH_HAS_MORE &&
              local_states_[thread_id].input->match_iterator.GetNextBatch(
                  MiniBatch::kMiniBatchLength, &num_matches_next,
-                 local_states_[thread_id].input->materialize_batch_ids_buf.mutable_data(),
-                 local_states_[thread_id].input->materialize_key_ids_buf.mutable_data(),
-                 local_states_[thread_id]
-                     .input->materialize_payload_ids_buf.mutable_data())) {
+                 local_states_[thread_id].materialize_batch_ids_buf_data(),
+                 local_states_[thread_id].materialize_key_ids_buf_data(),
+                 local_states_[thread_id].materialize_payload_ids_buf_data())) {
         const uint16_t* materialize_batch_ids =
-            local_states_[thread_id].input->materialize_batch_ids_buf.mutable_data();
+            local_states_[thread_id].materialize_batch_ids_buf_data();
         const uint32_t* materialize_key_ids =
-            local_states_[thread_id].input->materialize_key_ids_buf.mutable_data();
+            local_states_[thread_id].materialize_key_ids_buf_data();
         const uint32_t* materialize_payload_ids =
             no_duplicate_keys || no_payload_columns
-                ? local_states_[thread_id].input->materialize_key_ids_buf.mutable_data()
-                : local_states_[thread_id]
-                      .input->materialize_payload_ids_buf.mutable_data();
+                ? local_states_[thread_id].materialize_key_ids_buf_data()
+                : local_states_[thread_id].materialize_payload_ids_buf_data();
 
         // For right-outer, full-outer joins we need to update has-match flags
         // for the rows in hash table.
@@ -459,13 +452,12 @@ Status ProbeProcessor::InnerOuter(ThreadId thread_id, TempVectorStack* temp_stac
         int num_passing_ids = 0;
         bit_util::bits_to_indexes(
             /*bit_to_search=*/0, hardware_flags_, minibatch_size_next,
-            local_states_[thread_id].input->match_bitvector_buf.mutable_data(),
-            &num_passing_ids,
-            local_states_[thread_id].input->materialize_batch_ids_buf.mutable_data());
+            local_states_[thread_id].match_bitvector_buf_data(), &num_passing_ids,
+            local_states_[thread_id].materialize_batch_ids_buf_data());
 
         // Add base batch row index.
         for (int i = 0; i < num_passing_ids; ++i) {
-          local_states_[thread_id].input->materialize_batch_ids_buf.mutable_data()[i] +=
+          local_states_[thread_id].materialize_batch_ids_buf_data()[i] +=
               static_cast<uint16_t>(local_states_[thread_id].input->minibatch_start);
         }
 
@@ -484,8 +476,7 @@ Status ProbeProcessor::InnerOuter(ThreadId thread_id, TempVectorStack* temp_stac
           int ignored;
           ARRA_RETURN_NOT_OK(local_states_[thread_id].materialize->AppendProbeOnly(
               local_states_[thread_id].input->batch, num_passing_ids,
-              local_states_[thread_id].input->materialize_batch_ids_buf.mutable_data(),
-              &ignored));
+              local_states_[thread_id].materialize_batch_ids_buf_data(), &ignored));
         }
       }
 
@@ -516,36 +507,33 @@ Status ProbeProcessor::LeftSemiAnti(ThreadId thread_id, TempVectorStack* temp_st
           local_states_[thread_id].input->minibatch_start,
           local_states_[thread_id].input->minibatch_start + minibatch_size_next,
           temp_stack, temp_column_arrays);
-      hash_table_->keys()->Hash(&hash_table_input,
-                                local_states_[thread_id].input->hashes_buf.mutable_data(),
-                                hardware_flags_);
+      hash_table_->keys()->Hash(
+          &hash_table_input, local_states_[thread_id].hashes_buf_data(), hardware_flags_);
       hash_table_->keys()->MapReadOnly(
-          &hash_table_input, local_states_[thread_id].input->hashes_buf.mutable_data(),
-          local_states_[thread_id].input->match_bitvector_buf.mutable_data(),
-          local_states_[thread_id].input->key_ids_buf.mutable_data());
+          &hash_table_input, local_states_[thread_id].hashes_buf_data(),
+          local_states_[thread_id].match_bitvector_buf_data(),
+          local_states_[thread_id].key_ids_buf_data());
     }
 
     // AND bit vector with null key filter for join
     {
       bool ignored;
-      JoinNullFilter::Filter(
-          local_states_[thread_id].input->key_batch,
-          local_states_[thread_id].input->minibatch_start, minibatch_size_next, *cmp_,
-          &ignored,
-          /*and_with_input=*/true,
-          local_states_[thread_id].input->match_bitvector_buf.mutable_data());
+      JoinNullFilter::Filter(local_states_[thread_id].input->key_batch,
+                             local_states_[thread_id].input->minibatch_start,
+                             minibatch_size_next, *cmp_, &ignored,
+                             /*and_with_input=*/true,
+                             local_states_[thread_id].match_bitvector_buf_data());
     }
 
     int num_passing_ids = 0;
     bit_util::bits_to_indexes(
         (join_type_ == JoinType::LEFT_ANTI) ? 0 : 1, hardware_flags_, minibatch_size_next,
-        local_states_[thread_id].input->match_bitvector_buf.mutable_data(),
-        &num_passing_ids,
-        local_states_[thread_id].input->materialize_batch_ids_buf.mutable_data());
+        local_states_[thread_id].match_bitvector_buf_data(), &num_passing_ids,
+        local_states_[thread_id].materialize_batch_ids_buf_data());
 
     // Add base batch row index.
     for (int i = 0; i < num_passing_ids; ++i) {
-      local_states_[thread_id].input->materialize_batch_ids_buf.mutable_data()[i] +=
+      local_states_[thread_id].materialize_batch_ids_buf_data()[i] +=
           static_cast<uint16_t>(local_states_[thread_id].input->minibatch_start);
     }
 
@@ -564,8 +552,7 @@ Status ProbeProcessor::LeftSemiAnti(ThreadId thread_id, TempVectorStack* temp_st
       int ignored;
       ARRA_RETURN_NOT_OK(local_states_[thread_id].materialize->AppendProbeOnly(
           local_states_[thread_id].input->batch, num_passing_ids,
-          local_states_[thread_id].input->materialize_batch_ids_buf.mutable_data(),
-          &ignored));
+          local_states_[thread_id].materialize_batch_ids_buf_data(), &ignored));
     }
 
     local_states_[thread_id].input->minibatch_start += minibatch_size_next;
@@ -594,44 +581,39 @@ Status ProbeProcessor::RightSemiAnti(ThreadId thread_id, TempVectorStack* temp_s
           local_states_[thread_id].input->minibatch_start,
           local_states_[thread_id].input->minibatch_start + minibatch_size_next,
           temp_stack, temp_column_arrays);
-      hash_table_->keys()->Hash(&hash_table_input,
-                                local_states_[thread_id].input->hashes_buf.mutable_data(),
-                                hardware_flags_);
+      hash_table_->keys()->Hash(
+          &hash_table_input, local_states_[thread_id].hashes_buf_data(), hardware_flags_);
       hash_table_->keys()->MapReadOnly(
-          &hash_table_input, local_states_[thread_id].input->hashes_buf.mutable_data(),
-          local_states_[thread_id].input->match_bitvector_buf.mutable_data(),
-          local_states_[thread_id].input->key_ids_buf.mutable_data());
+          &hash_table_input, local_states_[thread_id].hashes_buf_data(),
+          local_states_[thread_id].match_bitvector_buf_data(),
+          local_states_[thread_id].key_ids_buf_data());
     }
 
     // AND bit vector with null key filter for join
     {
       bool ignored;
-      JoinNullFilter::Filter(
-          local_states_[thread_id].input->key_batch,
-          local_states_[thread_id].input->minibatch_start, minibatch_size_next, *cmp_,
-          &ignored,
-          /*and_with_input=*/true,
-          local_states_[thread_id].input->match_bitvector_buf.mutable_data());
+      JoinNullFilter::Filter(local_states_[thread_id].input->key_batch,
+                             local_states_[thread_id].input->minibatch_start,
+                             minibatch_size_next, *cmp_, &ignored,
+                             /*and_with_input=*/true,
+                             local_states_[thread_id].match_bitvector_buf_data());
     }
 
     int num_passing_ids = 0;
     bit_util::bits_to_indexes(
         (join_type_ == JoinType::LEFT_ANTI) ? 0 : 1, hardware_flags_, minibatch_size_next,
-        local_states_[thread_id].input->match_bitvector_buf.mutable_data(),
-        &num_passing_ids,
-        local_states_[thread_id].input->materialize_batch_ids_buf.mutable_data());
+        local_states_[thread_id].match_bitvector_buf_data(), &num_passing_ids,
+        local_states_[thread_id].materialize_batch_ids_buf_data());
 
     // For right-semi, right-anti joins: update has-match flags for the rows
     // in hash table.
     for (int i = 0; i < num_passing_ids; ++i) {
-      uint16_t id =
-          local_states_[thread_id].input->materialize_batch_ids_buf.mutable_data()[i];
-      local_states_[thread_id].input->key_ids_buf.mutable_data()[i] =
-          local_states_[thread_id].input->key_ids_buf.mutable_data()[id];
+      uint16_t id = local_states_[thread_id].materialize_batch_ids_buf_data()[i];
+      local_states_[thread_id].key_ids_buf_data()[i] =
+          local_states_[thread_id].key_ids_buf_data()[id];
     }
-    hash_table_->UpdateHasMatchForKeys(
-        thread_id, num_passing_ids,
-        local_states_[thread_id].input->key_ids_buf.mutable_data());
+    hash_table_->UpdateHasMatchForKeys(thread_id, num_passing_ids,
+                                       local_states_[thread_id].key_ids_buf_data());
 
     local_states_[thread_id].input->minibatch_start += minibatch_size_next;
   }

@@ -95,6 +95,7 @@
         "semaphore": "cpp",
         "strstream": "cpp",
         "__verbose_abort": "cpp",
-        "*.inc": "cpp"
+        "*.inc": "cpp",
+        "shared_mutex": "cpp"
     }
 }
