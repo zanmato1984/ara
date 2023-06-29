@@ -202,9 +202,23 @@ TEST_P(TestHashJoinSerial, BuildOnly) {
   Build(r_batches);
 }
 
-INSTANTIATE_TEST_SUITE_P(
-    BuildOnly, TestHashJoinSerial,
-    testing::Values(MakeHashJoinCase(4, arrow::acero::JoinType::INNER, 1)));
+const std::vector<HashJoinCase> build_cases = []() {
+  std::vector<HashJoinCase> cases;
+  for (auto dop : {1, 4, 8, 16}) {
+    for (auto join_type :
+         {arrow::acero::JoinType::INNER, arrow::acero::JoinType::LEFT_OUTER,
+          arrow::acero::JoinType::RIGHT_OUTER, arrow::acero::JoinType::LEFT_SEMI,
+          arrow::acero::JoinType::RIGHT_SEMI, arrow::acero::JoinType::LEFT_ANTI,
+          arrow::acero::JoinType::RIGHT_ANTI, arrow::acero::JoinType::FULL_OUTER}) {
+      for (auto mul : {1, 128, 256, 512, 1024, 2048, 4096}) {
+        cases.push_back(MakeHashJoinCase(dop, join_type, mul));
+      }
+    }
+  }
+  return cases;
+}();
+
+INSTANTIATE_TEST_SUITE_P(BuildOnly, TestHashJoinSerial, testing::ValuesIn(build_cases));
 
 // TEST_F(TestHashJoinSerial, Probe) {
 //   auto l_schema = arrow::schema(
