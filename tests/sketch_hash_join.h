@@ -261,7 +261,11 @@ class HashJoin {
   Status Init(QueryContext* ctx, size_t dop, const HashJoinNodeOptions& options,
               const Schema& left_schema, const Schema& right_schema);
 
+  std::shared_ptr<Schema> OutputSchema() const;
+
   PipelineTaskPipe BuildPipe();
+
+  PipelineTaskPipe BuildDrain();
 
   TaskGroups BuildBreak();
 
@@ -281,6 +285,7 @@ class HashJoin {
   std::vector<JoinKeyCmp> key_cmp_;
   HashJoinSchema schema_mgr_;
   const HashJoinProjectionMaps* schema_[2];
+  std::shared_ptr<Schema> output_schema_;
 
   struct ThreadLocalState {
     JoinResultMaterialize materialize;

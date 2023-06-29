@@ -769,6 +769,8 @@ Status HashJoin::Init(QueryContext* ctx, size_t dop, const HashJoinNodeOptions& 
   schema_[0] = &schema_mgr_.proj_maps[0];
   schema_[1] = &schema_mgr_.proj_maps[1];
 
+  output_schema_ = schema_mgr_.MakeOutputSchema("", "");
+
   // Initialize thread local states and associated probe processors.
   local_states_.resize(dop_);
   for (int i = 0; i < dop_; ++i) {
@@ -796,6 +798,8 @@ Status HashJoin::Init(QueryContext* ctx, size_t dop, const HashJoinNodeOptions& 
   return Status::OK();
 }
 
+std::shared_ptr<Schema> HashJoin::OutputSchema() const { return output_schema_; }
+
 PipelineTaskPipe HashJoin::BuildPipe() {
   return [&](ThreadId thread_id, std::optional<arrow::ExecBatch> input,
              OperatorStatus& status) {
@@ -805,6 +809,14 @@ PipelineTaskPipe HashJoin::BuildPipe() {
     }
     std::lock_guard<std::mutex> guard(build_side_mutex_);
     build_side_batches_.InsertBatch(std::move(input.value()));
+    return Status::OK();
+  };
+}
+
+PipelineTaskPipe HashJoin::BuildDrain() {
+  return [&](ThreadId thread_id, std::optional<arrow::ExecBatch> input,
+             OperatorStatus& status) {
+    status = OperatorStatus::Finished(std::nullopt);
     return Status::OK();
   };
 }
