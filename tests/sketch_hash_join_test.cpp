@@ -67,6 +67,13 @@ class TestHashJoinSerialFineGrained : public ::testing::Test {
     return status;
   }
 
+  OperatorStatus Drain() {
+    auto probe_drain = hash_join_.ProbeDrain();
+    OperatorStatus status;
+    EXPECT_TRUE(probe_drain(0, std::nullopt, status).ok());
+    return status;
+  }
+
  private:
   size_t dop_;
   std::unique_ptr<arrow::acero::QueryContext> query_ctx_;
@@ -152,9 +159,17 @@ TEST_F(TestHashJoinSerialFineGrained, ProbeOne) {
 
   Build(r_batches);
 
-  auto status = ProbeOne(std::move(l_batches.batches[0]));
-  EXPECT_TRUE(status.code == OperatorStatusCode::HAS_OUTPUT);
-  EXPECT_FALSE(std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
+  {
+    auto status = ProbeOne(std::move(l_batches.batches[0]));
+    EXPECT_TRUE(status.code == OperatorStatusCode::HAS_OUTPUT);
+    EXPECT_FALSE(std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
+  }
+
+  {
+    auto status = Drain();
+    EXPECT_TRUE(status.code == OperatorStatusCode::FINISHED);
+    EXPECT_TRUE(std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
+  }
 }
 
 // class TestTaskRunner {

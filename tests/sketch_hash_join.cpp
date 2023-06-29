@@ -261,7 +261,7 @@ Status ProbeProcessor::Probe(ThreadId thread_id, std::optional<ExecBatch> input,
 }
 
 Status ProbeProcessor::Drain(ThreadId thread_id, OperatorStatus& status) {
-  if (!NeedToScan(join_type_)) {
+  if (NeedToScan(join_type_)) {
     // No need to drain now, scan will output the remaining rows in materialize.
     status = OperatorStatus::Finished(std::nullopt);
     return Status::OK();
