@@ -67,6 +67,8 @@ void AssertBatchesEqual(const arrow::acero::BatchesWithSchema& out,
   ASSERT_OK_AND_ASSIGN(auto out_table_sorted,
                        arrow::compute::Take(out_table, out_table_sort_ids));
 
+  // std::cout << "Exp: " << exp_table_sorted.table()->ToString() << std::endl;
+  // std::cout << "Act: " << out_table_sorted.table()->ToString() << std::endl;
   AssertTablesEqual(*exp_table_sorted.table(), *out_table_sorted.table(),
                     /*same_chunk_layout=*/false, /*flatten=*/true);
 }
@@ -128,7 +130,7 @@ struct HashJoinConstants {
     constexpr size_t left_base = 10, right_base = 10, inner_base = 5, left_outer_base = 5,
                      right_outer_base = 5;
     std::string inner_seed =
-        R"([0, "b", "h", 0], [2, "d", "f", 2], [2, "d", "e", 2], [4, null, "b", 4], [4, "f", "b", 4])";
+        R"([0, "b", "h", 0], [2, "d", "f", 2], [2, "d", "e", 2], [4, null, null, 4], [4, "f", null, 4])";
     std::string left_outer_seed =
         R"([null, "a", null, null], [1111, "c", null, null], [3333, "e", null, null], [5555, "g", null, null], [6666, "h", null, null], [7, "i", null, null])";
     std::string right_outer_seed =
