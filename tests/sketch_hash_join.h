@@ -74,6 +74,7 @@ using PipelineTaskPipe = std::function<arrow::Status(
 constexpr size_t kMaxRowsPerBatch = 4096;
 
 namespace detail {
+
 using namespace arrow;
 using namespace arrow::acero;
 using namespace arrow::acero::util;

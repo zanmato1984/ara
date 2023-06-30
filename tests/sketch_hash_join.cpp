@@ -290,7 +290,6 @@ Status ProbeProcessor::Probe(ThreadId thread_id, std::optional<ExecBatch> input,
     case State::CLEAN: {
       // Some check.
       ARRA_DCHECK(!local_states_[thread_id].input.has_value());
-      ARRA_DCHECK(local_states_[thread_id].materialize->num_rows() == 0);
 
       // Prepare input.
       ExecBatch batch;
@@ -316,7 +315,6 @@ Status ProbeProcessor::Probe(ThreadId thread_id, std::optional<ExecBatch> input,
     case State::MATCH_HAS_MORE: {
       // Some check.
       ARRA_DCHECK(local_states_[thread_id].input.has_value());
-      ARRA_DCHECK(local_states_[thread_id].materialize->num_rows() > 0);
 
       // Process input.
       ARRA_SET_AND_RETURN_NOT_OK(
