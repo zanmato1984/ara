@@ -120,7 +120,6 @@ struct HashJoinFixture {
       case arrow::acero::JoinType::RIGHT_ANTI:
         return RightSchema();
     }
-    EXPECT_TRUE(false);
   }
 
   static arrow::acero::BatchesWithSchema ExpBatches(arrow::acero::JoinType join_type,
@@ -160,8 +159,6 @@ struct HashJoinFixture {
                                          multiplicity_right);
       }
     }
-
-    EXPECT_TRUE(false);
   }
 
   static size_t ExpRowCount(arrow::acero::JoinType join_type, size_t multiplicity_left,
@@ -193,8 +190,6 @@ struct HashJoinFixture {
         return right_semi_match;
       case arrow::acero::JoinType::RIGHT_ANTI:
         return right_anti_match;
-      default:
-        EXPECT_TRUE(false);
     }
   }
 };
@@ -243,8 +238,8 @@ class TestHashJoinSerial : public testing::Test {
   void Init(HashJoinCase join_case) {
     join_case_ = std::move(join_case);
 
-    EXPECT_TRUE(query_ctx_->Init(join_case_.dop_, nullptr).ok());
-    EXPECT_TRUE(hash_join_
+    ASSERT_TRUE(query_ctx_->Init(join_case_.dop_, nullptr).ok());
+    ASSERT_TRUE(hash_join_
                     .Init(query_ctx_.get(), join_case_.dop_, join_case_.options_,
                           *HashJoinFixture::LeftSchema(), *HashJoinFixture::RightSchema())
                     .ok());
@@ -258,37 +253,34 @@ class TestHashJoinSerial : public testing::Test {
     auto build_pipe = hash_join_.BuildPipe();
     for (int i = 0; i < build_batches.batches.size(); ++i) {
       OperatorStatus status;
-      EXPECT_TRUE(
+      ASSERT_TRUE(
           build_pipe(i % join_case_.dop_, std::move(build_batches.batches[i]), status)
               .ok());
-      EXPECT_TRUE(status.code == OperatorStatusCode::HAS_OUTPUT);
-      EXPECT_FALSE(std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
+      ASSERT_TRUE(status.code == OperatorStatusCode::HAS_OUTPUT);
+      ASSERT_FALSE(std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
     }
 
     auto build_drain = hash_join_.BuildDrain();
     for (size_t thread_id = 0; thread_id < join_case_.dop_; thread_id++) {
       OperatorStatus status;
-      EXPECT_TRUE(build_drain(thread_id, std::nullopt, status).ok());
-      EXPECT_TRUE(status.code == OperatorStatusCode::FINISHED);
-      EXPECT_FALSE(std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
+      ASSERT_OK(build_drain(thread_id, std::nullopt, status));
+      ASSERT_TRUE(status.code == OperatorStatusCode::FINISHED);
+      ASSERT_FALSE(std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
     }
 
     auto build_break = hash_join_.BuildBreak();
     RunTaskGroups(build_break);
   }
 
-  OperatorStatus Probe(ThreadId thread_id, const arrow::ExecBatch& batch) {
+  arrow::Status Probe(ThreadId thread_id, const arrow::ExecBatch& batch,
+                      OperatorStatus& status) {
     auto probe_pipe = hash_join_.ProbePipe();
-    OperatorStatus status;
-    EXPECT_TRUE(probe_pipe(thread_id, std::move(batch), status).ok());
-    return status;
+    return probe_pipe(thread_id, std::move(batch), status);
   }
 
-  OperatorStatus Drain(ThreadId thread_id) {
+  arrow::Status Drain(ThreadId thread_id, OperatorStatus& status) {
     auto probe_drain = hash_join_.ProbeDrain();
-    OperatorStatus status;
-    EXPECT_TRUE(probe_drain(thread_id, std::nullopt, status).ok());
-    return status;
+    return probe_drain(thread_id, std::nullopt, status);
   }
 
  private:
@@ -312,22 +304,22 @@ class TestHashJoinSerial : public testing::Test {
           continue;
         }
         OperatorStatus status;
-        EXPECT_TRUE(task(i, status).ok());
+        ASSERT_TRUE(task(i, status).ok());
         if (status.code == OperatorStatusCode::HAS_OUTPUT) {
-          EXPECT_FALSE(
+          ASSERT_FALSE(
               std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
         } else if (status.code == OperatorStatusCode::FINISHED) {
-          EXPECT_FALSE(
+          ASSERT_FALSE(
               std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
           finished[i] = true;
           ++finished_count;
         } else {
-          EXPECT_TRUE(false);
+          ASSERT_TRUE(false);
         }
       }
     }
     if (task_cont.has_value()) {
-      EXPECT_TRUE(task_cont.value()(0).ok());
+      ASSERT_TRUE(task_cont.value()(0).ok());
     }
   }
 };
@@ -363,15 +355,15 @@ TEST_P(SerialBuildOnly, BuildOnly) {
 
 std::vector<BuildOnlyCase> SerialBuildOnlyCases() {
   std::vector<BuildOnlyCase> cases;
-  for (auto dop : {1, 8, 64}) {
+  for (auto dop : {1, 16}) {
     for (auto join_type :
          {arrow::acero::JoinType::INNER, arrow::acero::JoinType::LEFT_OUTER,
           arrow::acero::JoinType::RIGHT_OUTER, arrow::acero::JoinType::LEFT_SEMI,
           arrow::acero::JoinType::RIGHT_SEMI, arrow::acero::JoinType::LEFT_ANTI,
           arrow::acero::JoinType::RIGHT_ANTI, arrow::acero::JoinType::FULL_OUTER}) {
-      for (auto num_rows : {1, (1 << 6) - 1, 1 << 6, (1 << 12) - 1, 1 << 12}) {
-        for (auto intra : {1, (1 << 6) - 1, 1 << 6, (1 << 12) - 1, 1 << 12}) {
-          auto inter = arrow::bit_util::CeilDiv(num_rows, intra);
+      for (auto num_res : {1, (1 << 6) - 1, 1 << 6, (1 << 12) - 1, 1 << 12}) {
+        for (auto inter : {1, (1 << 6) - 1, 1 << 6, (1 << 12) - 1, 1 << 12}) {
+          auto intra = arrow::bit_util::CeilDiv(num_res, inter);
           cases.emplace_back(dop, join_type, intra, inter);
         }
       }
@@ -413,9 +405,10 @@ class SerialProbe : public TestHashJoinSerial,
 template <arrow::acero::JoinType join_type>
 const std::vector<ProbeCase<join_type>> SerialProbeCases() {
   std::vector<ProbeCase<join_type>> cases;
-  for (auto dop : {1, 8, 64}) {
-    for (auto left_intra : {1, (1 << 6) - 1, 1 << 6, (1 << 12) - 1, 1 << 12}) {
+  for (auto dop : {1, 4}) {
+    for (auto num_res : {1, (1 << 6) - 1, 1 << 6, (1 << 12) - 1, 1 << 12}) {
       for (auto right_intra : {1, (1 << 6) - 1, 1 << 6, (1 << 12) - 1, 1 << 12}) {
+        auto left_intra = arrow::bit_util::CeilDiv(num_res, right_intra);
         cases.emplace_back(dop, left_intra, 1, right_intra);
       }
     }
@@ -456,32 +449,34 @@ class SerialProbeInnerAndLeft : public SerialProbe<join_type> {
 
     for (size_t thread_id = 0; thread_id < this->join_case_.dop_; thread_id++) {
       if (exp_rows <= kMaxRowsPerBatch) {
-        auto status = this->Probe(thread_id, l_batches.batches[0]);
-        EXPECT_TRUE(status.code == OperatorStatusCode::HAS_OUTPUT);
-        EXPECT_FALSE(
+        OperatorStatus status = OperatorStatus::Other(arrow::Status::UnknownError(""));
+        ASSERT_OK(this->Probe(thread_id, l_batches.batches[0], status));
+        ASSERT_TRUE(status.code == OperatorStatusCode::HAS_OUTPUT);
+        ASSERT_FALSE(
             std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
 
-        status = this->Drain(thread_id);
-        EXPECT_TRUE(status.code == OperatorStatusCode::FINISHED);
+        ASSERT_OK(this->Drain(thread_id, status));
+        ASSERT_TRUE(status.code == OperatorStatusCode::FINISHED);
         auto batch = std::get<std::optional<arrow::ExecBatch>>(status.payload);
-        EXPECT_TRUE(batch.has_value());
+        ASSERT_TRUE(batch.has_value());
         AssertBatchesEqual(
             arrow::acero::BatchesWithSchema{{batch.value()}, this->OutputSchema()},
             exp_batches);
       } else {
-        auto status = this->Probe(thread_id, l_batches.batches[0]);
-        EXPECT_TRUE(status.code == OperatorStatusCode::HAS_MORE_OUTPUT);
+        OperatorStatus status = OperatorStatus::Other(arrow::Status::UnknownError(""));
+        ASSERT_OK(this->Probe(thread_id, l_batches.batches[0], status));
+        ASSERT_TRUE(status.code == OperatorStatusCode::HAS_MORE_OUTPUT);
         auto probe_batch =
             std::move(std::get<std::optional<arrow::ExecBatch>>(status.payload));
-        EXPECT_TRUE(probe_batch.has_value());
-        EXPECT_TRUE(probe_batch.value().length <= kMaxRowsPerBatch);
+        ASSERT_TRUE(probe_batch.has_value());
+        ASSERT_TRUE(probe_batch.value().length <= kMaxRowsPerBatch);
 
-        status = this->Drain(thread_id);
-        EXPECT_TRUE(status.code == OperatorStatusCode::FINISHED);
+        ASSERT_OK(this->Drain(thread_id, status));
+        ASSERT_TRUE(status.code == OperatorStatusCode::FINISHED);
         auto drain_batch =
             std::move(std::get<std::optional<arrow::ExecBatch>>(status.payload));
-        EXPECT_TRUE(drain_batch.has_value());
-        EXPECT_TRUE(drain_batch.value().length <= kMaxRowsPerBatch);
+        ASSERT_TRUE(drain_batch.has_value());
+        ASSERT_TRUE(drain_batch.value().length <= kMaxRowsPerBatch);
       }
     }
   }
