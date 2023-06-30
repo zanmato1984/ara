@@ -407,13 +407,8 @@ template <arrow::acero::JoinType join_type>
 class SerialProbe : public TestHashJoinSerial,
                     public testing::WithParamInterface<ProbeCase<join_type>> {
  protected:
-  void Init() {
-    TestHashJoinSerial::Init(
-        testing::WithParamInterface<ProbeCase<join_type>>::GetParam());
-  }
+  void Init() { TestHashJoinSerial::Init(this->GetParam()); }
 };
-
-using SerialProbeInner = SerialProbe<arrow::acero::JoinType::INNER>;
 
 template <arrow::acero::JoinType join_type>
 const std::vector<ProbeCase<join_type>> SerialProbeCases() {
@@ -428,58 +423,97 @@ const std::vector<ProbeCase<join_type>> SerialProbeCases() {
   return cases;
 }
 
-TEST_P(SerialProbeInner, ProbeOne) {
-  Init();
+template <arrow::acero::JoinType join_type>
+class SerialProbeInnerAndLeft : public SerialProbe<join_type> {
+ public:
+  static const arrow::acero::JoinType JoinType = join_type;
 
-  auto l_batches = HashJoinFixture::LeftBatches(join_case_.left_multiplicity_intra_,
-                                                join_case_.left_multiplicity_inter_);
-  auto r_batches = HashJoinFixture::RightBatches(join_case_.right_multiplicity_intra_,
-                                                 join_case_.right_multiplicity_inter_);
+ protected:
+  void ProbeOne() {
+    this->Init();
 
-  auto exp_rows = HashJoinFixture::ExpRowCount(
-      join_case_.options_.join_type,
-      join_case_.left_multiplicity_intra_ * join_case_.left_multiplicity_inter_,
-      join_case_.right_multiplicity_intra_ * join_case_.right_multiplicity_inter_);
-  auto exp_batches = HashJoinFixture::ExpBatches(
-      join_case_.options_.join_type,
-      join_case_.left_multiplicity_intra_ * join_case_.left_multiplicity_inter_,
-      join_case_.right_multiplicity_intra_ * join_case_.right_multiplicity_inter_);
+    auto l_batches =
+        HashJoinFixture::LeftBatches(this->join_case_.left_multiplicity_intra_,
+                                     this->join_case_.left_multiplicity_inter_);
+    auto r_batches =
+        HashJoinFixture::RightBatches(this->join_case_.right_multiplicity_intra_,
+                                      this->join_case_.right_multiplicity_inter_);
 
-  Build(r_batches);
+    auto exp_rows =
+        HashJoinFixture::ExpRowCount(this->join_case_.options_.join_type,
+                                     this->join_case_.left_multiplicity_intra_ *
+                                         this->join_case_.left_multiplicity_inter_,
+                                     this->join_case_.right_multiplicity_intra_ *
+                                         this->join_case_.right_multiplicity_inter_);
+    auto exp_batches =
+        HashJoinFixture::ExpBatches(this->join_case_.options_.join_type,
+                                    this->join_case_.left_multiplicity_intra_ *
+                                        this->join_case_.left_multiplicity_inter_,
+                                    this->join_case_.right_multiplicity_intra_ *
+                                        this->join_case_.right_multiplicity_inter_);
 
-  for (size_t thread_id = 0; thread_id < join_case_.dop_; thread_id++) {
-    if (exp_rows <= kMaxRowsPerBatch) {
-      auto status = Probe(thread_id, l_batches.batches[0]);
-      EXPECT_TRUE(status.code == OperatorStatusCode::HAS_OUTPUT);
-      EXPECT_FALSE(std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
+    this->Build(r_batches);
 
-      status = Drain(thread_id);
-      EXPECT_TRUE(status.code == OperatorStatusCode::FINISHED);
-      auto batch = std::get<std::optional<arrow::ExecBatch>>(status.payload);
-      EXPECT_TRUE(batch.has_value());
-      AssertBatchesEqual(arrow::acero::BatchesWithSchema{{batch.value()}, OutputSchema()},
-                         exp_batches);
-    } else {
-      auto status = Probe(thread_id, l_batches.batches[0]);
-      EXPECT_TRUE(status.code == OperatorStatusCode::HAS_MORE_OUTPUT);
-      auto probe_batch =
-          std::move(std::get<std::optional<arrow::ExecBatch>>(status.payload));
-      EXPECT_TRUE(probe_batch.has_value());
-      EXPECT_TRUE(probe_batch.value().length == kMaxRowsPerBatch);
+    for (size_t thread_id = 0; thread_id < this->join_case_.dop_; thread_id++) {
+      if (exp_rows <= kMaxRowsPerBatch) {
+        auto status = this->Probe(thread_id, l_batches.batches[0]);
+        EXPECT_TRUE(status.code == OperatorStatusCode::HAS_OUTPUT);
+        EXPECT_FALSE(
+            std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
 
-      status = Drain(thread_id);
-      EXPECT_TRUE(status.code == OperatorStatusCode::FINISHED);
-      auto drain_batch =
-          std::move(std::get<std::optional<arrow::ExecBatch>>(status.payload));
-      EXPECT_TRUE(drain_batch.has_value());
-      EXPECT_TRUE(drain_batch.value().length <= kMaxRowsPerBatch);
+        status = this->Drain(thread_id);
+        EXPECT_TRUE(status.code == OperatorStatusCode::FINISHED);
+        auto batch = std::get<std::optional<arrow::ExecBatch>>(status.payload);
+        EXPECT_TRUE(batch.has_value());
+        AssertBatchesEqual(
+            arrow::acero::BatchesWithSchema{{batch.value()}, this->OutputSchema()},
+            exp_batches);
+      } else {
+        auto status = this->Probe(thread_id, l_batches.batches[0]);
+        EXPECT_TRUE(status.code == OperatorStatusCode::HAS_MORE_OUTPUT);
+        auto probe_batch =
+            std::move(std::get<std::optional<arrow::ExecBatch>>(status.payload));
+        EXPECT_TRUE(probe_batch.has_value());
+        EXPECT_TRUE(probe_batch.value().length <= kMaxRowsPerBatch);
+
+        status = this->Drain(thread_id);
+        EXPECT_TRUE(status.code == OperatorStatusCode::FINISHED);
+        auto drain_batch =
+            std::move(std::get<std::optional<arrow::ExecBatch>>(status.payload));
+        EXPECT_TRUE(drain_batch.has_value());
+        EXPECT_TRUE(drain_batch.value().length <= kMaxRowsPerBatch);
+      }
     }
   }
-}
+};
 
+using SerialProbeInner = SerialProbeInnerAndLeft<arrow::acero::JoinType::INNER>;
+using SerialProbeLeftOuter = SerialProbeInnerAndLeft<arrow::acero::JoinType::LEFT_OUTER>;
+using SerialProbeLeftSemi = SerialProbeInnerAndLeft<arrow::acero::JoinType::LEFT_SEMI>;
+using SerialProbeLeftAnti = SerialProbeInnerAndLeft<arrow::acero::JoinType::LEFT_ANTI>;
+
+TEST_P(SerialProbeInner, ProbeOne) { ProbeOne(); }
 INSTANTIATE_TEST_SUITE_P(
     SerialProbeInnerCases, SerialProbeInner,
-    ::testing::ValuesIn(SerialProbeCases<arrow::acero::JoinType::INNER>()),
+    ::testing::ValuesIn(SerialProbeCases<SerialProbeInner::JoinType>()),
+    [](const auto& param_info) { return param_info.param.Name(param_info.index); });
+
+TEST_P(SerialProbeLeftOuter, ProbeOne) { ProbeOne(); }
+INSTANTIATE_TEST_SUITE_P(
+    SerialProbeLeftOuterCases, SerialProbeLeftOuter,
+    ::testing::ValuesIn(SerialProbeCases<SerialProbeLeftOuter::JoinType>()),
+    [](const auto& param_info) { return param_info.param.Name(param_info.index); });
+
+TEST_P(SerialProbeLeftSemi, ProbeOne) { ProbeOne(); }
+INSTANTIATE_TEST_SUITE_P(
+    SerialProbeLeftSemiCases, SerialProbeLeftSemi,
+    ::testing::ValuesIn(SerialProbeCases<SerialProbeLeftSemi::JoinType>()),
+    [](const auto& param_info) { return param_info.param.Name(param_info.index); });
+
+TEST_P(SerialProbeLeftAnti, ProbeOne) { ProbeOne(); }
+INSTANTIATE_TEST_SUITE_P(
+    SerialProbeLeftAntiCases, SerialProbeLeftAnti,
+    ::testing::ValuesIn(SerialProbeCases<SerialProbeLeftAnti::JoinType>()),
     [](const auto& param_info) { return param_info.param.Name(param_info.index); });
 
 // class TestTaskRunner {
