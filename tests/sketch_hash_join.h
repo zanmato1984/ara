@@ -18,7 +18,7 @@
 #define ARRA_DCHECK ARROW_DCHECK
 #define ARRA_DCHECK_OK ARROW_DCHECK_OK
 
-namespace arra {
+namespace arra::sketch {
 
 enum class OperatorStatusCode : char {
   HAS_OUTPUT = 0,
@@ -70,6 +70,8 @@ using TaskGroups = std::vector<TaskGroup>;
 using PipelineTaskSource = std::function<arrow::Status(ThreadId, OperatorStatus&)>;
 using PipelineTaskPipe = std::function<arrow::Status(
     ThreadId, std::optional<arrow::ExecBatch>, OperatorStatus&)>;
+
+constexpr size_t kMaxRowsPerBatch = 4096;
 
 namespace detail {
 using namespace arrow;
@@ -310,4 +312,4 @@ class HashJoin {
 
 using HashJoin = detail::HashJoin;
 
-}  // namespace arra
+}  // namespace arra::sketch

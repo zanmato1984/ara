@@ -2,9 +2,7 @@
 
 #include "sketch_hash_join.h"
 
-namespace arra::detail {
-
-static constexpr size_t kMaxRowsPerBatch = 4096;
+namespace arra::sketch::detail {
 
 Status ValidateHashJoinNodeOptions(const HashJoinNodeOptions& join_options) {
   if (join_options.key_cmp.empty() || join_options.left_keys.empty() ||
@@ -893,4 +891,4 @@ std::pair<TaskGroups, PipelineTaskSource> HashJoinScanSource::ScanSourceFrontend
   return {std::move(start_scan_task_groups), std::move(scan_source)};
 }
 
-}  // namespace arra::detail
+}  // namespace arra::sketch::detail

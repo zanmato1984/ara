@@ -7,7 +7,7 @@
 #include "arrow/acero/test_util_internal.h"
 #include "sketch_hash_join.h"
 
-using namespace arra;
+using namespace arra::sketch;
 
 void AppendBatchesFromString(arrow::acero::BatchesWithSchema& out_batches,
                              const std::vector<std::string_view>& json_strings,
@@ -73,7 +73,7 @@ void AssertBatchesEqual(const arrow::acero::BatchesWithSchema& out,
                     /*same_chunk_layout=*/false, /*flatten=*/true);
 }
 
-struct HashJoinConstants {
+struct HashJoinFixture {
   static std::shared_ptr<arrow::Schema> LeftSchema() {
     static auto left_schema = arrow::schema(
         {arrow::field("l_i32", arrow::int32()), arrow::field("l_str", arrow::utf8())});
@@ -127,8 +127,6 @@ struct HashJoinConstants {
                                                     size_t multiplicity_left,
                                                     size_t multiplicity_right) {
     auto exp_schema = ExpSchema(join_type);
-    constexpr size_t left_base = 10, right_base = 10, inner_base = 5, left_outer_base = 5,
-                     right_outer_base = 5;
     std::string inner_seed =
         R"([0, "b", "h", 0], [2, "d", "f", 2], [2, "d", "e", 2], [4, null, null, 4], [4, "f", null, 4])";
     std::string left_outer_seed =
@@ -204,11 +202,14 @@ struct HashJoinConstants {
 struct HashJoinCase {
   HashJoinCase() = default;
 
-  HashJoinCase(size_t dop, arrow::acero::JoinType join_type, size_t multiplicity_intra,
-               size_t multiplicity_inter)
+  HashJoinCase(size_t dop, arrow::acero::JoinType join_type,
+               size_t left_multiplicity_intra, size_t left_multiplicity_inter,
+               size_t right_multiplicity_intra, size_t right_multiplicity_inter)
       : dop_(dop),
-        multiplicity_intra_(multiplicity_intra),
-        multiplicity_inter_(multiplicity_inter) {
+        left_multiplicity_intra_(left_multiplicity_intra),
+        left_multiplicity_inter_(left_multiplicity_inter),
+        right_multiplicity_intra_(right_multiplicity_intra),
+        right_multiplicity_inter_(right_multiplicity_inter) {
     std::vector<arrow::FieldRef> left_out, right_out;
 
     if (join_type != arrow::acero::JoinType::RIGHT_SEMI &&
@@ -226,22 +227,11 @@ struct HashJoinCase {
 
   size_t dop_;
   arrow::acero::HashJoinNodeOptions options_;
-  size_t multiplicity_intra_;
-  size_t multiplicity_inter_;
-
-  std::vector<std::string> left_batches_seed_, right_batches_seed_;
+  size_t left_multiplicity_intra_, left_multiplicity_inter_, right_multiplicity_intra_,
+      right_multiplicity_inter_;
 };
 
-auto HashJoinCaseName = [](const testing::TestParamInfo<HashJoinCase>& param_info) {
-  const HashJoinCase& join_case = param_info.param;
-  std::stringstream ss;
-  ss << param_info.index << "_" << join_case.dop_ << "_"
-     << arrow::acero::ToString(join_case.options_.join_type) << "_"
-     << join_case.multiplicity_intra_ << "_" << join_case.multiplicity_inter_;
-  return ss.str();
-};
-
-class TestHashJoinSerialBase : public testing::Test {
+class TestHashJoinSerial : public testing::Test {
  protected:
   HashJoinCase join_case_;
 
@@ -256,8 +246,7 @@ class TestHashJoinSerialBase : public testing::Test {
     EXPECT_TRUE(query_ctx_->Init(join_case_.dop_, nullptr).ok());
     EXPECT_TRUE(hash_join_
                     .Init(query_ctx_.get(), join_case_.dop_, join_case_.options_,
-                          *HashJoinConstants::LeftSchema(),
-                          *HashJoinConstants::RightSchema())
+                          *HashJoinFixture::LeftSchema(), *HashJoinFixture::RightSchema())
                     .ok());
   }
 
@@ -343,22 +332,37 @@ class TestHashJoinSerialBase : public testing::Test {
   }
 };
 
-class TestHashJoinSerialBuildOnly : public TestHashJoinSerialBase,
-                                    public testing::WithParamInterface<HashJoinCase> {
- protected:
-  void Init() { TestHashJoinSerialBase::Init(GetParam()); }
+struct BuildOnlyCase : public HashJoinCase {
+  BuildOnlyCase() = default;
+
+  BuildOnlyCase(size_t dop, arrow::acero::JoinType join_type, size_t multiplicity_intra,
+                size_t multiplicity_inter)
+      : HashJoinCase(dop, join_type, 0, 0, multiplicity_intra, multiplicity_inter) {}
+
+  std::string Name(size_t index) const {
+    std::stringstream ss;
+    ss << index << "_" << dop_ << "_" << arrow::acero::ToString(options_.join_type) << "_"
+       << right_multiplicity_intra_ << "_" << right_multiplicity_inter_;
+    return ss.str();
+  }
 };
 
-TEST_P(TestHashJoinSerialBuildOnly, BuildOnly) {
+class SerialBuildOnly : public TestHashJoinSerial,
+                        public testing::WithParamInterface<BuildOnlyCase> {
+ protected:
+  void Init() { TestHashJoinSerial::Init(GetParam()); }
+};
+
+TEST_P(SerialBuildOnly, BuildOnly) {
   Init();
 
-  auto r_batches = HashJoinConstants::RightBatches(join_case_.multiplicity_intra_,
-                                                   join_case_.multiplicity_inter_);
+  auto r_batches = HashJoinFixture::RightBatches(join_case_.right_multiplicity_intra_,
+                                                 join_case_.right_multiplicity_inter_);
   Build(r_batches);
 }
 
-const std::vector<HashJoinCase> build_cases = []() {
-  std::vector<HashJoinCase> cases;
+std::vector<BuildOnlyCase> SerialBuildOnlyCases() {
+  std::vector<BuildOnlyCase> cases;
   for (auto dop : {1, 8, 64}) {
     for (auto join_type :
          {arrow::acero::JoinType::INNER, arrow::acero::JoinType::LEFT_OUTER,
@@ -374,54 +378,109 @@ const std::vector<HashJoinCase> build_cases = []() {
     }
   }
   return cases;
-}();
+}
 
-INSTANTIATE_TEST_SUITE_P(BuildOnlyCases, TestHashJoinSerialBuildOnly,
-                         testing::ValuesIn(build_cases), HashJoinCaseName);
+INSTANTIATE_TEST_SUITE_P(SerialBuildOnlyCases, SerialBuildOnly,
+                         testing::ValuesIn(SerialBuildOnlyCases()),
+                         [](const auto& param_info) {
+                           return param_info.param.Name(param_info.index);
+                         });
 
-class TestHashJoinSerialProbeOne : public TestHashJoinSerialBase,
-                                   public testing::WithParamInterface<HashJoinCase> {
- protected:
-  void Init() { TestHashJoinSerialBase::Init(GetParam()); }
+template <arrow::acero::JoinType join_type>
+struct ProbeCase : public HashJoinCase {
+  ProbeCase() = default;
+
+  ProbeCase(size_t dop, size_t left_multiplicity_intra, size_t left_multiplicity_inter,
+            size_t right_multiplicity)
+      : HashJoinCase(dop, join_type, left_multiplicity_intra, left_multiplicity_inter, 1,
+                     right_multiplicity) {}
+
+  std::string Name(size_t index) const {
+    std::stringstream ss;
+    ss << index << "_" << dop_ << "_" << left_multiplicity_intra_ << "_"
+       << left_multiplicity_inter_ << "_" << right_multiplicity_inter_;
+    return ss.str();
+  }
 };
 
-TEST_P(TestHashJoinSerialProbeOne, ProbeOne) {
+template <arrow::acero::JoinType join_type>
+class SerialProbe : public TestHashJoinSerial,
+                    public testing::WithParamInterface<ProbeCase<join_type>> {
+ protected:
+  void Init() {
+    TestHashJoinSerial::Init(
+        testing::WithParamInterface<ProbeCase<join_type>>::GetParam());
+  }
+};
+
+using SerialProbeInner = SerialProbe<arrow::acero::JoinType::INNER>;
+
+template <arrow::acero::JoinType join_type>
+const std::vector<ProbeCase<join_type>> SerialProbeCases() {
+  std::vector<ProbeCase<join_type>> cases;
+  for (auto dop : {1, 8, 64}) {
+    for (auto left_intra : {1, (1 << 6) - 1, 1 << 6, (1 << 12) - 1, 1 << 12}) {
+      for (auto right_intra : {1, (1 << 6) - 1, 1 << 6, (1 << 12) - 1, 1 << 12}) {
+        cases.emplace_back(dop, left_intra, 1, right_intra);
+      }
+    }
+  }
+  return cases;
+}
+
+TEST_P(SerialProbeInner, ProbeOne) {
   Init();
 
-  auto l_batches = HashJoinConstants::LeftBatches(1, 1);
-  auto r_batches = HashJoinConstants::RightBatches(join_case_.multiplicity_intra_,
-                                                   join_case_.multiplicity_inter_);
+  auto l_batches = HashJoinFixture::LeftBatches(join_case_.left_multiplicity_intra_,
+                                                join_case_.left_multiplicity_inter_);
+  auto r_batches = HashJoinFixture::RightBatches(join_case_.right_multiplicity_intra_,
+                                                 join_case_.right_multiplicity_inter_);
 
-  auto num_matches = 5 * join_case_.multiplicity_intra_ * join_case_.multiplicity_inter_;
-
-  auto exp_batches = HashJoinConstants::ExpBatches(
-      join_case_.options_.join_type, 1,
-      join_case_.multiplicity_intra_ * join_case_.multiplicity_inter_);
+  auto exp_rows = HashJoinFixture::ExpRowCount(
+      join_case_.options_.join_type,
+      join_case_.left_multiplicity_intra_ * join_case_.left_multiplicity_inter_,
+      join_case_.right_multiplicity_intra_ * join_case_.right_multiplicity_inter_);
+  auto exp_batches = HashJoinFixture::ExpBatches(
+      join_case_.options_.join_type,
+      join_case_.left_multiplicity_intra_ * join_case_.left_multiplicity_inter_,
+      join_case_.right_multiplicity_intra_ * join_case_.right_multiplicity_inter_);
 
   Build(r_batches);
 
   for (size_t thread_id = 0; thread_id < join_case_.dop_; thread_id++) {
-    {
+    if (exp_rows <= kMaxRowsPerBatch) {
       auto status = Probe(thread_id, l_batches.batches[0]);
       EXPECT_TRUE(status.code == OperatorStatusCode::HAS_OUTPUT);
       EXPECT_FALSE(std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
-    }
 
-    {
-      auto status = Drain(thread_id);
+      status = Drain(thread_id);
       EXPECT_TRUE(status.code == OperatorStatusCode::FINISHED);
-      auto output = std::get<std::optional<arrow::ExecBatch>>(status.payload);
-      EXPECT_TRUE(output.has_value());
-      AssertBatchesEqual(
-          arrow::acero::BatchesWithSchema{{output.value()}, OutputSchema()}, exp_batches);
+      auto batch = std::get<std::optional<arrow::ExecBatch>>(status.payload);
+      EXPECT_TRUE(batch.has_value());
+      AssertBatchesEqual(arrow::acero::BatchesWithSchema{{batch.value()}, OutputSchema()},
+                         exp_batches);
+    } else {
+      auto status = Probe(thread_id, l_batches.batches[0]);
+      EXPECT_TRUE(status.code == OperatorStatusCode::HAS_MORE_OUTPUT);
+      auto probe_batch =
+          std::move(std::get<std::optional<arrow::ExecBatch>>(status.payload));
+      EXPECT_TRUE(probe_batch.has_value());
+      EXPECT_TRUE(probe_batch.value().length == kMaxRowsPerBatch);
+
+      status = Drain(thread_id);
+      EXPECT_TRUE(status.code == OperatorStatusCode::FINISHED);
+      auto drain_batch =
+          std::move(std::get<std::optional<arrow::ExecBatch>>(status.payload));
+      EXPECT_TRUE(drain_batch.has_value());
+      EXPECT_TRUE(drain_batch.value().length <= kMaxRowsPerBatch);
     }
   }
 }
 
-INSTANTIATE_TEST_SUITE_P(ProbeOneCases, TestHashJoinSerialProbeOne,
-                         testing::Values(HashJoinCase(4, arrow::acero::JoinType::INNER, 1,
-                                                      1)),
-                         HashJoinCaseName);
+INSTANTIATE_TEST_SUITE_P(
+    SerialProbeInnerCases, SerialProbeInner,
+    ::testing::ValuesIn(SerialProbeCases<arrow::acero::JoinType::INNER>()),
+    [](const auto& param_info) { return param_info.param.Name(param_info.index); });
 
 // class TestTaskRunner {
 //   using Task = std::function<arrow::Status(size_t, int64_t)>;
