@@ -6,7 +6,7 @@
             "request": "launch",
             "program": "${workspaceFolder}/out/build/dev-debug/gtests/sketch_hash_join_test",
             "args": [
-                "--gtest_filter=TestHashJoinSerialFineGrained.ProbeOne"
+                "--gtest_filter=ProbeOneCases.*"
             ],
             "stopAtEntry": false,
             "cwd": "${fileDirname}",

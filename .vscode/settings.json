@@ -96,6 +96,7 @@
         "strstream": "cpp",
         "__verbose_abort": "cpp",
         "*.inc": "cpp",
-        "shared_mutex": "cpp"
+        "shared_mutex": "cpp",
+        "*.tcc": "cpp"
     }
 }

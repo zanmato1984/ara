@@ -17,6 +17,7 @@ void AppendBatchesFromString(arrow::acero::BatchesWithSchema& out_batches,
     types.emplace_back(field->type());
   }
 
+  size_t new_start = out_batches.batches.size();
   for (auto&& s : json_strings) {
     std::stringstream ss;
     ss << "[" << s;
@@ -27,9 +28,9 @@ void AppendBatchesFromString(arrow::acero::BatchesWithSchema& out_batches,
     out_batches.batches.push_back(arrow::acero::ExecBatchFromJSON(types, ss.str()));
   }
 
-  size_t batch_count = out_batches.batches.size();
+  size_t new_batch_count = out_batches.batches.size();
   for (int repeat = 1; repeat < multiplicity_inter; ++repeat) {
-    for (size_t i = 0; i < batch_count; ++i) {
+    for (size_t i = new_start; i < new_batch_count; ++i) {
       out_batches.batches.push_back(out_batches.batches[i]);
     }
   }
@@ -149,11 +150,31 @@ struct HashJoinFixture {
         AppendBatchesFromString(batches, {left_outer_seed}, 1, multiplicity_left);
         return batches;
       }
-      case arrow::acero::JoinType::RIGHT_OUTER:
-      case arrow::acero::JoinType::FULL_OUTER:
-      case arrow::acero::JoinType::LEFT_SEMI:
-      case arrow::acero::JoinType::LEFT_ANTI:
-      case arrow::acero::JoinType::RIGHT_SEMI:
+      case arrow::acero::JoinType::RIGHT_OUTER: {
+        auto batches = GenerateBatchesFromString(exp_schema, {inner_seed}, 1,
+                                                 multiplicity_left * multiplicity_right);
+        AppendBatchesFromString(batches, {right_outer_seed}, 1, multiplicity_right);
+        return batches;
+      }
+      case arrow::acero::JoinType::FULL_OUTER: {
+        auto batches = GenerateBatchesFromString(exp_schema, {inner_seed}, 1,
+                                                 multiplicity_left * multiplicity_right);
+        AppendBatchesFromString(batches, {left_outer_seed}, 1, multiplicity_left);
+        AppendBatchesFromString(batches, {right_outer_seed}, 1, multiplicity_right);
+        return batches;
+      }
+      case arrow::acero::JoinType::LEFT_SEMI: {
+        return GenerateBatchesFromString(exp_schema, {left_semi_seed}, 1,
+                                         multiplicity_left);
+      }
+      case arrow::acero::JoinType::LEFT_ANTI: {
+        return GenerateBatchesFromString(exp_schema, {left_anti_seed}, 1,
+                                         multiplicity_left);
+      }
+      case arrow::acero::JoinType::RIGHT_SEMI: {
+        return GenerateBatchesFromString(exp_schema, {right_semi_seed}, 1,
+                                         multiplicity_right);
+      }
       case arrow::acero::JoinType::RIGHT_ANTI: {
         return GenerateBatchesFromString(exp_schema, {right_anti_seed}, 1,
                                          multiplicity_right);
