@@ -9,14 +9,11 @@
 
 using namespace arra;
 
-arrow::acero::BatchesWithSchema GenerateBatchesFromString(
-    const std::shared_ptr<arrow::Schema>& schema,
-    const std::vector<std::string_view>& json_strings, int multiplicity_intra,
-    int multiplicity_inter) {
-  arrow::acero::BatchesWithSchema out_batches{{}, schema};
-
+void AppendBatchesFromString(arrow::acero::BatchesWithSchema& out_batches,
+                             const std::vector<std::string_view>& json_strings,
+                             int multiplicity_intra, int multiplicity_inter) {
   std::vector<arrow::TypeHolder> types;
-  for (auto&& field : schema->fields()) {
+  for (auto&& field : out_batches.schema->fields()) {
     types.emplace_back(field->type());
   }
 
@@ -36,7 +33,15 @@ arrow::acero::BatchesWithSchema GenerateBatchesFromString(
       out_batches.batches.push_back(out_batches.batches[i]);
     }
   }
+}
 
+arrow::acero::BatchesWithSchema GenerateBatchesFromString(
+    const std::shared_ptr<arrow::Schema>& schema,
+    const std::vector<std::string_view>& json_strings, int multiplicity_intra,
+    int multiplicity_inter) {
+  arrow::acero::BatchesWithSchema out_batches{{}, schema};
+  AppendBatchesFromString(out_batches, json_strings, multiplicity_intra,
+                          multiplicity_inter);
   return out_batches;
 }
 
@@ -66,6 +71,134 @@ void AssertBatchesEqual(const arrow::acero::BatchesWithSchema& out,
                     /*same_chunk_layout=*/false, /*flatten=*/true);
 }
 
+struct HashJoinConstants {
+  static std::shared_ptr<arrow::Schema> LeftSchema() {
+    static auto left_schema = arrow::schema(
+        {arrow::field("l_i32", arrow::int32()), arrow::field("l_str", arrow::utf8())});
+    return left_schema;
+  }
+
+  static std::shared_ptr<arrow::Schema> RightSchema() {
+    static auto right_schema = arrow::schema(
+        {arrow::field("r_str", arrow::utf8()), arrow::field("r_i32", arrow::int32())});
+    return right_schema;
+  }
+
+  static arrow::acero::BatchesWithSchema LeftBatches(size_t multiplicity_intra,
+                                                     size_t multiplicity_inter) {
+    return GenerateBatchesFromString(
+        LeftSchema(),
+        {R"([null, "a"], [0, "b"], [1111, "c"], [2, "d"], [3333, "e"], [4, null], [4, "f"], [5555, "g"], [6666, "h"], [7, "i"])"},
+        multiplicity_intra, multiplicity_inter);
+  }
+
+  static arrow::acero::BatchesWithSchema RightBatches(size_t multiplicity_intra,
+                                                      size_t multiplicity_inter) {
+    return GenerateBatchesFromString(
+        RightSchema(),
+        {R"(["i", null], ["h", 0], ["g", 1])", R"(["f", 2])", R"(["e", 2], ["d", 3])",
+         R"(["c", 3])", R"([null, 4], ["b", 5], ["a", 6])"},
+        multiplicity_intra, multiplicity_inter);
+  }
+
+  static std::shared_ptr<arrow::Schema> ExpSchema(arrow::acero::JoinType join_type) {
+    switch (join_type) {
+      case arrow::acero::JoinType::INNER:
+      case arrow::acero::JoinType::LEFT_OUTER:
+      case arrow::acero::JoinType::RIGHT_OUTER:
+      case arrow::acero::JoinType::FULL_OUTER:
+        return arrow::schema({arrow::field("l_i32", arrow::int32()),
+                              arrow::field("l_str", arrow::utf8()),
+                              arrow::field("r_str", arrow::utf8()),
+                              arrow::field("r_i32", arrow::int32())});
+      case arrow::acero::JoinType::LEFT_SEMI:
+      case arrow::acero::JoinType::LEFT_ANTI:
+        return LeftSchema();
+      case arrow::acero::JoinType::RIGHT_SEMI:
+      case arrow::acero::JoinType::RIGHT_ANTI:
+        return RightSchema();
+    }
+    EXPECT_TRUE(false);
+  }
+
+  static arrow::acero::BatchesWithSchema ExpBatches(arrow::acero::JoinType join_type,
+                                                    size_t multiplicity_left,
+                                                    size_t multiplicity_right) {
+    auto exp_schema = ExpSchema(join_type);
+    constexpr size_t left_base = 10, right_base = 10, inner_base = 5, left_outer_base = 5,
+                     right_outer_base = 5;
+    std::string inner_seed =
+        R"([0, "b", "h", 0], [2, "d", "f", 2], [2, "d", "e", 2], [4, null, "b", 4], [4, "f", "b", 4])";
+    std::string left_outer_seed =
+        R"([null, "a", null, null], [1111, "c", null, null], [3333, "e", null, null], [5555, "g", null, null], [6666, "h", null, null], [7, "i", null, null])";
+    std::string right_outer_seed =
+        R"([null, null, "i", null], [null, null, "g", 1], [null, null, "d", 3], [null, null, "c", 3], [null, null, "b", 5], [null, null, "a", 6])";
+    std::string left_semi_seed = R"([0, "b"], [2, "d"], [4, null], [4, "f"])";
+    std::string left_anti_seed =
+        R"([null, "a"], [1111, "c"], [3333, "e"], [5555, "g"], [6666, "h"], [7, "i"])";
+    std::string right_semi_seed = R"(["h", 0], ["f", 2], ["e", 2], [null, 4])";
+    std::string right_anti_seed =
+        R"(["i", null], ["g", 1], ["d", 3], ["c", 3], ["b", 5], ["a", 6])";
+    switch (join_type) {
+      case arrow::acero::JoinType::INNER: {
+        return GenerateBatchesFromString(exp_schema, {inner_seed}, 1,
+                                         multiplicity_left * multiplicity_right);
+      }
+      case arrow::acero::JoinType::LEFT_OUTER: {
+        auto batches = GenerateBatchesFromString(exp_schema, {inner_seed}, 1,
+                                                 multiplicity_left * multiplicity_right);
+        AppendBatchesFromString(batches, {left_outer_seed}, 1, multiplicity_left);
+        return batches;
+      }
+      case arrow::acero::JoinType::RIGHT_OUTER:
+      case arrow::acero::JoinType::FULL_OUTER:
+      case arrow::acero::JoinType::LEFT_SEMI:
+      case arrow::acero::JoinType::LEFT_ANTI:
+      case arrow::acero::JoinType::RIGHT_SEMI:
+      case arrow::acero::JoinType::RIGHT_ANTI: {
+        return GenerateBatchesFromString(exp_schema, {right_anti_seed}, 1,
+                                         multiplicity_right);
+      }
+    }
+
+    EXPECT_TRUE(false);
+  }
+
+  static size_t ExpRowCount(arrow::acero::JoinType join_type, size_t multiplicity_left,
+                            size_t multiplicity_right) {
+    constexpr size_t left_seed = 10, right_seed = 10, inner_seed = 5, left_outer_seed = 6,
+                     right_outer_seed = 6, left_semi_seed = 4, left_anti_seed = 6,
+                     right_semi_seed = 4, right_anti_seed = 6;
+    size_t inner_match = inner_seed * multiplicity_left * multiplicity_right;
+    size_t left_outer_match = left_outer_seed * multiplicity_left;
+    size_t right_outer_match = right_outer_seed * multiplicity_right;
+    size_t left_semi_match = left_semi_seed * multiplicity_left;
+    size_t left_anti_match = left_anti_seed * multiplicity_left;
+    size_t right_semi_match = right_semi_seed * multiplicity_right;
+    size_t right_anti_match = right_anti_seed * multiplicity_right;
+    switch (join_type) {
+      case arrow::acero::JoinType::INNER:
+        return inner_match;
+      case arrow::acero::JoinType::LEFT_OUTER:
+        return inner_match + left_outer_match;
+      case arrow::acero::JoinType::RIGHT_OUTER:
+        return inner_match + right_outer_match;
+      case arrow::acero::JoinType::FULL_OUTER:
+        return inner_match + left_outer_match + right_outer_match;
+      case arrow::acero::JoinType::LEFT_SEMI:
+        return left_semi_match;
+      case arrow::acero::JoinType::LEFT_ANTI:
+        return left_anti_match;
+      case arrow::acero::JoinType::RIGHT_SEMI:
+        return right_semi_match;
+      case arrow::acero::JoinType::RIGHT_ANTI:
+        return right_anti_match;
+      default:
+        EXPECT_TRUE(false);
+    }
+  }
+};
+
 struct HashJoinCase {
   HashJoinCase() = default;
 
@@ -87,60 +220,6 @@ struct HashJoinCase {
 
     options_ = arrow::acero::HashJoinNodeOptions(
         join_type, {{0}}, {{1}}, std::move(left_out), std::move(right_out));
-  }
-
-  static std::shared_ptr<arrow::Schema> LeftSchema() {
-    static auto left_schema = arrow::schema(
-        {arrow::field("l_i32", arrow::int32()), arrow::field("l_str", arrow::utf8())});
-    return left_schema;
-  }
-
-  static std::shared_ptr<arrow::Schema> RightSchema() {
-    static auto right_schema = arrow::schema(
-        {arrow::field("r_str", arrow::utf8()), arrow::field("r_i32", arrow::int32())});
-    return right_schema;
-  }
-
-  static arrow::acero::BatchesWithSchema LeftBatches(size_t multiplicity_intra,
-                                                     size_t multiplicity_inter) {
-    return GenerateBatchesFromString(
-        LeftSchema(),
-        {R"([null, "a"], [0, "b"], [1111, "c"], [2, "d"], [3333, "e"], [4, null], [5555, "f"], [6, "g"], [7, "h"], [8, "i"])"},
-        multiplicity_intra, multiplicity_inter);
-  }
-
-  static arrow::acero::BatchesWithSchema RightBatches(size_t multiplicity_intra,
-                                                      size_t multiplicity_inter) {
-    return GenerateBatchesFromString(
-        RightSchema(),
-        {R"(["i", null], ["h", 0], ["g", 1])", R"(["f", 2])", R"(["e", 2], ["d", 3])",
-         R"(["c", 3])", R"(["b", 4], ["a", 5], [null, 6])"},
-        multiplicity_intra, multiplicity_inter);
-  }
-
-  static size_t ResultRowCount(arrow::acero::JoinType join_type, size_t multiplicity_left,
-                               size_t multiplicity_right) {
-    constexpr size_t inner_match = 5;
-    switch (join_type) {
-      case arrow::acero::JoinType::INNER:
-        return inner_match * multiplicity_left * multiplicity_right;
-      case arrow::acero::JoinType::LEFT_OUTER:
-        return 9 * multiplicity_left * multiplicity_right;
-      case arrow::acero::JoinType::RIGHT_OUTER:
-        return 9 * multiplicity_left * multiplicity_right;
-      case arrow::acero::JoinType::FULL_OUTER:
-        return 9 * multiplicity_left * multiplicity_right;
-      case arrow::acero::JoinType::LEFT_SEMI:
-        return 9 * multiplicity_left * multiplicity_right;
-      case arrow::acero::JoinType::LEFT_ANTI:
-        return 9 * multiplicity_left * multiplicity_right;
-      case arrow::acero::JoinType::RIGHT_SEMI:
-        return 9 * multiplicity_left * multiplicity_right;
-      case arrow::acero::JoinType::RIGHT_ANTI:
-        return 9 * multiplicity_left * multiplicity_right;
-      default:
-        EXPECT_TRUE(false);
-    }
   }
 
   size_t dop_;
@@ -175,7 +254,8 @@ class TestHashJoinSerialBase : public testing::Test {
     EXPECT_TRUE(query_ctx_->Init(join_case_.dop_, nullptr).ok());
     EXPECT_TRUE(hash_join_
                     .Init(query_ctx_.get(), join_case_.dop_, join_case_.options_,
-                          *HashJoinCase::LeftSchema(), *HashJoinCase::RightSchema())
+                          *HashJoinConstants::LeftSchema(),
+                          *HashJoinConstants::RightSchema())
                     .ok());
   }
 
@@ -270,8 +350,8 @@ class TestHashJoinSerialBuildOnly : public TestHashJoinSerialBase,
 TEST_P(TestHashJoinSerialBuildOnly, BuildOnly) {
   Init();
 
-  auto r_batches = HashJoinCase::RightBatches(join_case_.multiplicity_intra_,
-                                              join_case_.multiplicity_inter_);
+  auto r_batches = HashJoinConstants::RightBatches(join_case_.multiplicity_intra_,
+                                                   join_case_.multiplicity_inter_);
   Build(r_batches);
 }
 
@@ -306,16 +386,15 @@ class TestHashJoinSerialProbeOne : public TestHashJoinSerialBase,
 TEST_P(TestHashJoinSerialProbeOne, ProbeOne) {
   Init();
 
-  auto l_batches = HashJoinCase::LeftBatches(1, 1);
-  auto r_batches = HashJoinCase::RightBatches(join_case_.multiplicity_intra_,
-                                              join_case_.multiplicity_inter_);
+  auto l_batches = HashJoinConstants::LeftBatches(1, 1);
+  auto r_batches = HashJoinConstants::RightBatches(join_case_.multiplicity_intra_,
+                                                   join_case_.multiplicity_inter_);
 
   auto num_matches = 5 * join_case_.multiplicity_intra_ * join_case_.multiplicity_inter_;
 
-  auto exp_batches = GenerateBatchesFromString(
-      OutputSchema(),
-      {R"([1, null, "g", 1], [3, "d", "c", 3], [3, "d", "a", 3], [5, "f", "b", 5], [7, "h", null, 7])"},
-      join_case_.multiplicity_intra_, join_case_.multiplicity_inter_);
+  auto exp_batches = HashJoinConstants::ExpBatches(
+      join_case_.options_.join_type, 1,
+      join_case_.multiplicity_intra_ * join_case_.multiplicity_inter_);
 
   Build(r_batches);
 
