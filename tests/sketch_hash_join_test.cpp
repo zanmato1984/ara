@@ -123,6 +123,38 @@ struct HashJoinFixture {
     }
   }
 
+  static size_t ExpRowCount(arrow::acero::JoinType join_type, size_t multiplicity_left,
+                            size_t multiplicity_right) {
+    constexpr size_t left_seed = 10, right_seed = 10, inner_seed = 5, left_outer_seed = 6,
+                     right_outer_seed = 6, left_semi_seed = 4, left_anti_seed = 6,
+                     right_semi_seed = 4, right_anti_seed = 6;
+    size_t inner_match = inner_seed * multiplicity_left * multiplicity_right;
+    size_t left_outer_match = left_outer_seed * multiplicity_left;
+    size_t right_outer_match = right_outer_seed * multiplicity_right;
+    size_t left_semi_match = left_semi_seed * multiplicity_left;
+    size_t left_anti_match = left_anti_seed * multiplicity_left;
+    size_t right_semi_match = right_semi_seed * multiplicity_right;
+    size_t right_anti_match = right_anti_seed * multiplicity_right;
+    switch (join_type) {
+      case arrow::acero::JoinType::INNER:
+        return inner_match;
+      case arrow::acero::JoinType::LEFT_OUTER:
+        return inner_match + left_outer_match;
+      case arrow::acero::JoinType::RIGHT_OUTER:
+        return inner_match + right_outer_match;
+      case arrow::acero::JoinType::FULL_OUTER:
+        return inner_match + left_outer_match + right_outer_match;
+      case arrow::acero::JoinType::LEFT_SEMI:
+        return left_semi_match;
+      case arrow::acero::JoinType::LEFT_ANTI:
+        return left_anti_match;
+      case arrow::acero::JoinType::RIGHT_SEMI:
+        return right_semi_match;
+      case arrow::acero::JoinType::RIGHT_ANTI:
+        return right_anti_match;
+    }
+  }
+
   static arrow::acero::BatchesWithSchema ExpBatches(arrow::acero::JoinType join_type,
                                                     size_t multiplicity_left,
                                                     size_t multiplicity_right) {
@@ -179,38 +211,6 @@ struct HashJoinFixture {
         return GenerateBatchesFromString(exp_schema, {right_anti_seed}, 1,
                                          multiplicity_right);
       }
-    }
-  }
-
-  static size_t ExpRowCount(arrow::acero::JoinType join_type, size_t multiplicity_left,
-                            size_t multiplicity_right) {
-    constexpr size_t left_seed = 10, right_seed = 10, inner_seed = 5, left_outer_seed = 6,
-                     right_outer_seed = 6, left_semi_seed = 4, left_anti_seed = 6,
-                     right_semi_seed = 4, right_anti_seed = 6;
-    size_t inner_match = inner_seed * multiplicity_left * multiplicity_right;
-    size_t left_outer_match = left_outer_seed * multiplicity_left;
-    size_t right_outer_match = right_outer_seed * multiplicity_right;
-    size_t left_semi_match = left_semi_seed * multiplicity_left;
-    size_t left_anti_match = left_anti_seed * multiplicity_left;
-    size_t right_semi_match = right_semi_seed * multiplicity_right;
-    size_t right_anti_match = right_anti_seed * multiplicity_right;
-    switch (join_type) {
-      case arrow::acero::JoinType::INNER:
-        return inner_match;
-      case arrow::acero::JoinType::LEFT_OUTER:
-        return inner_match + left_outer_match;
-      case arrow::acero::JoinType::RIGHT_OUTER:
-        return inner_match + right_outer_match;
-      case arrow::acero::JoinType::FULL_OUTER:
-        return inner_match + left_outer_match + right_outer_match;
-      case arrow::acero::JoinType::LEFT_SEMI:
-        return left_semi_match;
-      case arrow::acero::JoinType::LEFT_ANTI:
-        return left_anti_match;
-      case arrow::acero::JoinType::RIGHT_SEMI:
-        return right_semi_match;
-      case arrow::acero::JoinType::RIGHT_ANTI:
-        return right_anti_match;
     }
   }
 };
@@ -277,7 +277,7 @@ class TestHashJoinSerial : public testing::Test {
       ASSERT_TRUE(
           build_pipe(i % join_case_.dop_, std::move(build_batches.batches[i]), status)
               .ok());
-      ASSERT_TRUE(status.code == OperatorStatusCode::HAS_OUTPUT);
+      ASSERT_EQ(status.code, OperatorStatusCode::HAS_OUTPUT);
       ASSERT_FALSE(std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
     }
 
@@ -285,7 +285,7 @@ class TestHashJoinSerial : public testing::Test {
     for (size_t thread_id = 0; thread_id < join_case_.dop_; thread_id++) {
       OperatorStatus status;
       ASSERT_OK(build_drain(thread_id, std::nullopt, status));
-      ASSERT_TRUE(status.code == OperatorStatusCode::FINISHED);
+      ASSERT_EQ(status.code, OperatorStatusCode::FINISHED);
       ASSERT_FALSE(std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
     }
 
@@ -427,7 +427,8 @@ template <arrow::acero::JoinType join_type>
 const std::vector<ProbeCase<join_type>> SerialProbeCases() {
   std::vector<ProbeCase<join_type>> cases;
   for (auto dop : {1, 4}) {
-    for (auto num_res : {31, 32, 127, 128, 511, 512, 2047, 2048, 8191, 8192}) {
+    for (auto num_res : {63, 64, 127, 128, 255, 256, 511, 512, 1023, 1024, 2047, 2048,
+                         4095, 4096, 8191, 8192}) {
       for (auto right_intra : {1, 2, 511, 512, 2047, 2048}) {
         auto left_intra = arrow::bit_util::CeilDiv(num_res, right_intra);
         cases.emplace_back(dop, left_intra, 1, right_intra);
@@ -472,54 +473,54 @@ class SerialProbeInnerAndLeft : public SerialProbe<join_type> {
       OperatorStatus status = OperatorStatus::Other(arrow::Status::UnknownError(""));
       if (exp_rows <= kMaxRowsPerBatch) {
         ASSERT_OK(this->Probe(thread_id, l_batches.batches[0], status));
-        ASSERT_TRUE(status.code == OperatorStatusCode::HAS_OUTPUT);
+        ASSERT_EQ(status.code, OperatorStatusCode::HAS_OUTPUT);
         ASSERT_FALSE(
             std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
 
         ASSERT_OK(this->Drain(thread_id, status));
-        ASSERT_TRUE(status.code == OperatorStatusCode::FINISHED);
+        ASSERT_EQ(status.code, OperatorStatusCode::FINISHED);
         auto drain_batch = std::get<std::optional<arrow::ExecBatch>>(status.payload);
         ASSERT_TRUE(drain_batch.has_value());
+        ASSERT_EQ(drain_batch.value().length, exp_rows);
         AssertBatchesEqual(
             arrow::acero::BatchesWithSchema{{drain_batch.value()}, this->OutputSchema()},
             exp_batches);
       } else if (exp_rows <= 2 * kMaxRowsPerBatch) {
         ASSERT_OK(this->Probe(thread_id, l_batches.batches[0], status));
-        ASSERT_TRUE(status.code == OperatorStatusCode::HAS_MORE_OUTPUT);
+        ASSERT_EQ(status.code, OperatorStatusCode::HAS_MORE_OUTPUT);
         auto probe_batch_first =
             std::get<std::optional<arrow::ExecBatch>>(status.payload);
         ASSERT_TRUE(probe_batch_first.has_value());
+        ASSERT_EQ(probe_batch_first.value().length, kMaxRowsPerBatch);
 
         ASSERT_OK(this->Probe(thread_id, std::nullopt, status));
-        ASSERT_TRUE(status.code == OperatorStatusCode::HAS_OUTPUT);
+        ASSERT_EQ(status.code, OperatorStatusCode::HAS_OUTPUT);
         auto probe_batch_second =
             std::get<std::optional<arrow::ExecBatch>>(status.payload);
         ASSERT_FALSE(probe_batch_second.has_value());
 
         ASSERT_OK(this->Drain(thread_id, status));
-        ASSERT_TRUE(status.code == OperatorStatusCode::FINISHED);
+        ASSERT_EQ(status.code, OperatorStatusCode::FINISHED);
         auto drain_batch = std::get<std::optional<arrow::ExecBatch>>(status.payload);
         ASSERT_TRUE(drain_batch.has_value());
+        ASSERT_EQ(drain_batch.value().length, exp_rows - kMaxRowsPerBatch);
         AssertBatchesEqual(
             arrow::acero::BatchesWithSchema{
                 {probe_batch_first.value(), drain_batch.value()}, this->OutputSchema()},
             exp_batches);
       } else {
         ASSERT_OK(this->Probe(thread_id, l_batches.batches[0], status));
-        ASSERT_TRUE(status.code == OperatorStatusCode::HAS_MORE_OUTPUT);
+        ASSERT_EQ(status.code, OperatorStatusCode::HAS_MORE_OUTPUT);
         auto probe_batch =
             std::move(std::get<std::optional<arrow::ExecBatch>>(status.payload));
         ASSERT_TRUE(probe_batch.has_value());
+        ASSERT_EQ(probe_batch.value().length, kMaxRowsPerBatch);
 
         ASSERT_OK(this->Drain(thread_id, status));
-        ASSERT_TRUE(status.code == OperatorStatusCode::FINISHED);
+        ASSERT_EQ(status.code, OperatorStatusCode::FINISHED);
         auto drain_batch = std::get<std::optional<arrow::ExecBatch>>(status.payload);
         ASSERT_TRUE(drain_batch.has_value());
-
-        ASSERT_TRUE(probe_batch.value().length > 0);
-        ASSERT_TRUE(probe_batch.value().length <= kMaxRowsPerBatch);
-        ASSERT_TRUE(drain_batch.value().length > 0);
-        ASSERT_TRUE(drain_batch.value().length <= kMaxRowsPerBatch);
+        ASSERT_LE(drain_batch.value().length, kMaxRowsPerBatch);
       }
     }
   }
@@ -554,38 +555,41 @@ class SerialProbeInnerAndLeft : public SerialProbe<join_type> {
 
       if (exp_rows_single <= kMaxRowsPerBatch) {
         ASSERT_OK(this->Probe(thread_id, l_batches.batches[0], status));
-        ASSERT_TRUE(status.code == OperatorStatusCode::HAS_OUTPUT);
+        ASSERT_EQ(status.code, OperatorStatusCode::HAS_OUTPUT);
         ASSERT_FALSE(
             std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
 
-        if (2 * exp_rows_single <= kMaxRowsPerBatch) {
+        if (exp_rows_single * 2 <= kMaxRowsPerBatch) {
           ASSERT_OK(this->Probe(thread_id, l_batches.batches[0], status));
-          ASSERT_TRUE(status.code == OperatorStatusCode::HAS_OUTPUT);
+          ASSERT_EQ(status.code, OperatorStatusCode::HAS_OUTPUT);
           ASSERT_FALSE(
               std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
 
           ASSERT_OK(this->Drain(thread_id, status));
-          ASSERT_TRUE(status.code == OperatorStatusCode::FINISHED);
+          ASSERT_EQ(status.code, OperatorStatusCode::FINISHED);
           auto drain_batch = std::get<std::optional<arrow::ExecBatch>>(status.payload);
           ASSERT_TRUE(drain_batch.has_value());
+          ASSERT_EQ(drain_batch.value().length, exp_rows_single * 2);
           AssertBatchesEqual(arrow::acero::BatchesWithSchema{{drain_batch.value()},
                                                              this->OutputSchema()},
                              exp_batches_double);
         } else {
           ASSERT_OK(this->Probe(thread_id, l_batches.batches[0], status));
-          ASSERT_TRUE(status.code == OperatorStatusCode::HAS_MORE_OUTPUT);
+          ASSERT_EQ(status.code, OperatorStatusCode::HAS_MORE_OUTPUT);
           auto probe_batch = std::get<std::optional<arrow::ExecBatch>>(status.payload);
           ASSERT_TRUE(probe_batch.has_value());
+          ASSERT_EQ(probe_batch.value().length, kMaxRowsPerBatch);
 
           ASSERT_OK(this->Probe(thread_id, std::nullopt, status));
-          ASSERT_TRUE(status.code == OperatorStatusCode::HAS_OUTPUT);
+          ASSERT_EQ(status.code, OperatorStatusCode::HAS_OUTPUT);
           ASSERT_FALSE(
               std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
 
           ASSERT_OK(this->Drain(thread_id, status));
-          ASSERT_TRUE(status.code == OperatorStatusCode::FINISHED);
+          ASSERT_EQ(status.code, OperatorStatusCode::FINISHED);
           auto drain_batch = std::get<std::optional<arrow::ExecBatch>>(status.payload);
           ASSERT_TRUE(drain_batch.has_value());
+          ASSERT_EQ(drain_batch.value().length, kMaxRowsPerBatch);
           AssertBatchesEqual(
               arrow::acero::BatchesWithSchema{{probe_batch.value(), drain_batch.value()},
                                               this->OutputSchema()},
@@ -593,55 +597,91 @@ class SerialProbeInnerAndLeft : public SerialProbe<join_type> {
         }
       } else {
         ASSERT_OK(this->Probe(thread_id, l_batches.batches[0], status));
-        ASSERT_TRUE(status.code == OperatorStatusCode::HAS_MORE_OUTPUT);
+        ASSERT_EQ(status.code, OperatorStatusCode::HAS_MORE_OUTPUT);
         auto probe_batch_first =
             std::get<std::optional<arrow::ExecBatch>>(status.payload);
         ASSERT_TRUE(probe_batch_first.has_value());
+        ASSERT_EQ(probe_batch_first.value().length, kMaxRowsPerBatch);
 
-        if (exp_rows_single <= 2 * kMaxRowsPerBatch) {
+        if (exp_rows_single <= kMaxRowsPerBatch + kMaxRowsPerBatch / 2) {
           ASSERT_OK(this->Probe(thread_id, std::nullopt, status));
-          ASSERT_TRUE(status.code == OperatorStatusCode::HAS_OUTPUT);
+          ASSERT_EQ(status.code, OperatorStatusCode::HAS_OUTPUT);
           ASSERT_FALSE(
               std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
 
           ASSERT_OK(this->Probe(thread_id, l_batches.batches[0], status));
-          ASSERT_TRUE(status.code == OperatorStatusCode::HAS_MORE_OUTPUT);
+          ASSERT_EQ(status.code, OperatorStatusCode::HAS_MORE_OUTPUT);
           auto probe_batch_second =
               std::get<std::optional<arrow::ExecBatch>>(status.payload);
           ASSERT_TRUE(probe_batch_second.has_value());
+          ASSERT_EQ(probe_batch_second.value().length, kMaxRowsPerBatch);
 
           ASSERT_OK(this->Probe(thread_id, std::nullopt, status));
-          ASSERT_TRUE(status.code == OperatorStatusCode::HAS_OUTPUT);
+          ASSERT_EQ(status.code, OperatorStatusCode::HAS_OUTPUT);
           ASSERT_FALSE(
               std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
 
           ASSERT_OK(this->Drain(thread_id, status));
-          ASSERT_TRUE(status.code == OperatorStatusCode::FINISHED);
+          ASSERT_EQ(status.code, OperatorStatusCode::FINISHED);
           auto drain_batch = std::get<std::optional<arrow::ExecBatch>>(status.payload);
           ASSERT_TRUE(drain_batch.has_value());
+          ASSERT_EQ(drain_batch.value().length,
+                    exp_rows_single * 2 - kMaxRowsPerBatch * 2);
           AssertBatchesEqual(arrow::acero::BatchesWithSchema{{probe_batch_first.value(),
                                                               probe_batch_second.value(),
                                                               drain_batch.value()},
                                                              this->OutputSchema()},
                              exp_batches_double);
+        } else if (exp_rows_single <= kMaxRowsPerBatch * 2) {
+          ASSERT_OK(this->Probe(thread_id, std::nullopt, status));
+          ASSERT_EQ(status.code, OperatorStatusCode::HAS_OUTPUT);
+          ASSERT_FALSE(
+              std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
+
+          ASSERT_OK(this->Probe(thread_id, l_batches.batches[0], status));
+          ASSERT_EQ(status.code, OperatorStatusCode::HAS_MORE_OUTPUT);
+          auto probe_batch_second =
+              std::get<std::optional<arrow::ExecBatch>>(status.payload);
+          ASSERT_TRUE(probe_batch_first.has_value());
+          ASSERT_EQ(probe_batch_first.value().length, kMaxRowsPerBatch);
+
+          ASSERT_OK(this->Probe(thread_id, std::nullopt, status));
+          ASSERT_EQ(status.code, OperatorStatusCode::HAS_MORE_OUTPUT);
+          auto probe_batch_third =
+              std::get<std::optional<arrow::ExecBatch>>(status.payload);
+          ASSERT_TRUE(probe_batch_third.has_value());
+          ASSERT_EQ(probe_batch_third.value().length, kMaxRowsPerBatch);
+
+          ASSERT_OK(this->Probe(thread_id, std::nullopt, status));
+          ASSERT_EQ(status.code, OperatorStatusCode::HAS_OUTPUT);
+          ASSERT_FALSE(
+              std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
+
+          ASSERT_OK(this->Drain(thread_id, status));
+          ASSERT_EQ(status.code, OperatorStatusCode::FINISHED);
+          auto drain_batch = std::get<std::optional<arrow::ExecBatch>>(status.payload);
+          ASSERT_TRUE(drain_batch.has_value());
+          ASSERT_EQ(drain_batch.value().length,
+                    exp_rows_single * 2 - kMaxRowsPerBatch * 3);
+          AssertBatchesEqual(
+              arrow::acero::BatchesWithSchema{
+                  {probe_batch_first.value(), probe_batch_second.value(),
+                   probe_batch_third.value(), drain_batch.value()},
+                  this->OutputSchema()},
+              exp_batches_double);
         } else {
           ASSERT_OK(this->Probe(thread_id, std::nullopt, status));
-          ASSERT_TRUE(status.code == OperatorStatusCode::HAS_MORE_OUTPUT);
+          ASSERT_EQ(status.code, OperatorStatusCode::HAS_MORE_OUTPUT);
           auto probe_batch_second =
               std::get<std::optional<arrow::ExecBatch>>(status.payload);
           ASSERT_TRUE(probe_batch_second.has_value());
+          ASSERT_EQ(probe_batch_second.value().length, kMaxRowsPerBatch);
 
           ASSERT_OK(this->Drain(thread_id, status));
-          ASSERT_TRUE(status.code == OperatorStatusCode::FINISHED);
+          ASSERT_EQ(status.code, OperatorStatusCode::FINISHED);
           auto drain_batch = std::get<std::optional<arrow::ExecBatch>>(status.payload);
           ASSERT_TRUE(drain_batch.has_value());
-
-          ASSERT_TRUE(probe_batch_first.value().length > 0);
-          ASSERT_TRUE(probe_batch_second.value().length > 0);
-          ASSERT_TRUE(drain_batch.value().length > 0);
-          ASSERT_TRUE(probe_batch_first.value().length <= kMaxRowsPerBatch);
-          ASSERT_TRUE(probe_batch_second.value().length <= kMaxRowsPerBatch);
-          ASSERT_TRUE(drain_batch.value().length <= kMaxRowsPerBatch);
+          ASSERT_LE(drain_batch.value().length, kMaxRowsPerBatch);
         }
       }
     }
@@ -654,28 +694,28 @@ using SerialProbeLeftSemi = SerialProbeInnerAndLeft<arrow::acero::JoinType::LEFT
 using SerialProbeLeftAnti = SerialProbeInnerAndLeft<arrow::acero::JoinType::LEFT_ANTI>;
 
 TEST_P(SerialProbeInner, ProbeOne) { ProbeOne(); }
-// TEST_P(SerialProbeInner, ProbeTwo) { ProbeTwo(); }
+TEST_P(SerialProbeInner, ProbeTwo) { ProbeTwo(); }
 INSTANTIATE_TEST_SUITE_P(
     SerialProbeInnerCases, SerialProbeInner,
     ::testing::ValuesIn(SerialProbeCases<SerialProbeInner::JoinType>()),
     [](const auto& param_info) { return param_info.param.Name(param_info.index); });
 
 TEST_P(SerialProbeLeftOuter, ProbeOne) { ProbeOne(); }
-// TEST_P(SerialProbeLeftOuter, ProbeTwo) { ProbeTwo(); }
+TEST_P(SerialProbeLeftOuter, ProbeTwo) { ProbeTwo(); }
 INSTANTIATE_TEST_SUITE_P(
     SerialProbeLeftOuterCases, SerialProbeLeftOuter,
     ::testing::ValuesIn(SerialProbeCases<SerialProbeLeftOuter::JoinType>()),
     [](const auto& param_info) { return param_info.param.Name(param_info.index); });
 
 TEST_P(SerialProbeLeftSemi, ProbeOne) { ProbeOne(); }
-// TEST_P(SerialProbeLeftSemi, ProbeTwo) { ProbeTwo(); }
+TEST_P(SerialProbeLeftSemi, ProbeTwo) { ProbeTwo(); }
 INSTANTIATE_TEST_SUITE_P(
     SerialProbeLeftSemiCases, SerialProbeLeftSemi,
     ::testing::ValuesIn(SerialProbeCases<SerialProbeLeftSemi::JoinType>()),
     [](const auto& param_info) { return param_info.param.Name(param_info.index); });
 
 TEST_P(SerialProbeLeftAnti, ProbeOne) { ProbeOne(); }
-// TEST_P(SerialProbeLeftAnti, ProbeTwo) { ProbeTwo(); }
+TEST_P(SerialProbeLeftAnti, ProbeTwo) { ProbeTwo(); }
 INSTANTIATE_TEST_SUITE_P(
     SerialProbeLeftAntiCases, SerialProbeLeftAnti,
     ::testing::ValuesIn(SerialProbeCases<SerialProbeLeftAnti::JoinType>()),
