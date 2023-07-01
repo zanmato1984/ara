@@ -349,6 +349,7 @@ Status ProbeProcessor::InnerOuter(ThreadId thread_id, TempVectorStack* temp_stac
                                   std::optional<ExecBatch>& output, State& state_next) {
   int num_rows = static_cast<int>(local_states_[thread_id].input->batch.length);
   state_next = State::CLEAN;
+  bool match_has_more_last = local_states_[thread_id].state == State::MATCH_HAS_MORE;
 
   // Break into minibatches
   for (; local_states_[thread_id].input->minibatch_start < num_rows &&
@@ -359,7 +360,7 @@ Status ProbeProcessor::InnerOuter(ThreadId thread_id, TempVectorStack* temp_stac
     bool no_duplicate_keys = (hash_table_->key_to_payload() == nullptr);
     bool no_payload_columns = (hash_table_->payloads() == nullptr);
 
-    if (local_states_[thread_id].state != State::MATCH_HAS_MORE) {
+    if (!match_has_more_last) {
       // Calculate hash and matches for this minibatch.
       SwissTableWithKeys::Input hash_table_input(
           &local_states_[thread_id].input->key_batch,
@@ -474,6 +475,7 @@ Status ProbeProcessor::InnerOuter(ThreadId thread_id, TempVectorStack* temp_stac
         }
       }
 
+      match_has_more_last = false;
       local_states_[thread_id].input->minibatch_start += minibatch_size_next;
     }
   }
