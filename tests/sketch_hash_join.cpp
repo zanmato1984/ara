@@ -391,50 +391,48 @@ Status ProbeProcessor::InnerOuter(ThreadId thread_id, TempVectorStack* temp_stac
           hash_table_->key_to_payload());
     }
 
-    if (local_states_[thread_id].state != State::MINIBATCH_HAS_MORE) {
-      int num_matches_next;
-      while (state_next != State::MATCH_HAS_MORE &&
-             local_states_[thread_id].input->match_iterator.GetNextBatch(
-                 MiniBatch::kMiniBatchLength, &num_matches_next,
-                 local_states_[thread_id].materialize_batch_ids_buf_data(),
-                 local_states_[thread_id].materialize_key_ids_buf_data(),
-                 local_states_[thread_id].materialize_payload_ids_buf_data())) {
-        const uint16_t* materialize_batch_ids =
-            local_states_[thread_id].materialize_batch_ids_buf_data();
-        const uint32_t* materialize_key_ids =
-            local_states_[thread_id].materialize_key_ids_buf_data();
-        const uint32_t* materialize_payload_ids =
-            no_duplicate_keys || no_payload_columns
-                ? local_states_[thread_id].materialize_key_ids_buf_data()
-                : local_states_[thread_id].materialize_payload_ids_buf_data();
+    int num_matches_next;
+    while (state_next != State::MATCH_HAS_MORE &&
+           local_states_[thread_id].input->match_iterator.GetNextBatch(
+               MiniBatch::kMiniBatchLength, &num_matches_next,
+               local_states_[thread_id].materialize_batch_ids_buf_data(),
+               local_states_[thread_id].materialize_key_ids_buf_data(),
+               local_states_[thread_id].materialize_payload_ids_buf_data())) {
+      const uint16_t* materialize_batch_ids =
+          local_states_[thread_id].materialize_batch_ids_buf_data();
+      const uint32_t* materialize_key_ids =
+          local_states_[thread_id].materialize_key_ids_buf_data();
+      const uint32_t* materialize_payload_ids =
+          no_duplicate_keys || no_payload_columns
+              ? local_states_[thread_id].materialize_key_ids_buf_data()
+              : local_states_[thread_id].materialize_payload_ids_buf_data();
 
-        // For right-outer, full-outer joins we need to update has-match flags
-        // for the rows in hash table.
-        if (join_type_ == JoinType::RIGHT_OUTER || join_type_ == JoinType::FULL_OUTER) {
-          hash_table_->UpdateHasMatchForKeys(thread_id, num_matches_next,
-                                             materialize_key_ids);
-        }
+      // For right-outer, full-outer joins we need to update has-match flags
+      // for the rows in hash table.
+      if (join_type_ == JoinType::RIGHT_OUTER || join_type_ == JoinType::FULL_OUTER) {
+        hash_table_->UpdateHasMatchForKeys(thread_id, num_matches_next,
+                                           materialize_key_ids);
+      }
 
-        // If we are to exceed the maximum number of rows per batch, output.
-        if (local_states_[thread_id].materialize->num_rows() + num_matches_next >
-            kMaxRowsPerBatch) {
-          ARRA_RETURN_NOT_OK(
-              local_states_[thread_id].materialize->Flush([&](ExecBatch batch) {
-                output.emplace(std::move(batch));
-                return Status::OK();
-              }));
-          state_next = State::MATCH_HAS_MORE;
-        }
+      // If we are to exceed the maximum number of rows per batch, output.
+      if (local_states_[thread_id].materialize->num_rows() + num_matches_next >
+          kMaxRowsPerBatch) {
+        ARRA_RETURN_NOT_OK(
+            local_states_[thread_id].materialize->Flush([&](ExecBatch batch) {
+              output.emplace(std::move(batch));
+              return Status::OK();
+            }));
+        state_next = State::MATCH_HAS_MORE;
+      }
 
-        // Call materialize for resulting id tuples pointing to matching pairs
-        // of rows.
-        if (num_matches_next > 0) {
-          int ignored;
-          ARRA_RETURN_NOT_OK(local_states_[thread_id].materialize->Append(
-              local_states_[thread_id].input->batch, num_matches_next,
-              materialize_batch_ids, materialize_key_ids, materialize_payload_ids,
-              &ignored));
-        }
+      // Call materialize for resulting id tuples pointing to matching pairs
+      // of rows.
+      if (num_matches_next > 0) {
+        int ignored;
+        ARRA_RETURN_NOT_OK(local_states_[thread_id].materialize->Append(
+            local_states_[thread_id].input->batch, num_matches_next,
+            materialize_batch_ids, materialize_key_ids, materialize_payload_ids,
+            &ignored));
       }
     }
 
