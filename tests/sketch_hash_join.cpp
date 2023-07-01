@@ -415,9 +415,18 @@ Status ProbeProcessor::InnerOuter(ThreadId thread_id, TempVectorStack* temp_stac
                                            materialize_key_ids);
       }
 
+      size_t rows_appended = 0;
+
       // If we are to exceed the maximum number of rows per batch, output.
       if (local_states_[thread_id].materialize->num_rows() + num_matches_next >
           kMaxRowsPerBatch) {
+        rows_appended =
+            kMaxRowsPerBatch - local_states_[thread_id].materialize->num_rows();
+        num_matches_next -= rows_appended;
+        int ignored;
+        ARRA_RETURN_NOT_OK(local_states_[thread_id].materialize->Append(
+            local_states_[thread_id].input->batch, rows_appended, materialize_batch_ids,
+            materialize_key_ids, materialize_payload_ids, &ignored));
         ARRA_RETURN_NOT_OK(
             local_states_[thread_id].materialize->Flush([&](ExecBatch batch) {
               output.emplace(std::move(batch));
@@ -432,8 +441,8 @@ Status ProbeProcessor::InnerOuter(ThreadId thread_id, TempVectorStack* temp_stac
         int ignored;
         ARRA_RETURN_NOT_OK(local_states_[thread_id].materialize->Append(
             local_states_[thread_id].input->batch, num_matches_next,
-            materialize_batch_ids, materialize_key_ids, materialize_payload_ids,
-            &ignored));
+            materialize_batch_ids + rows_appended, materialize_key_ids + rows_appended,
+            materialize_payload_ids + rows_appended, &ignored));
       }
     }
 
@@ -456,9 +465,18 @@ Status ProbeProcessor::InnerOuter(ThreadId thread_id, TempVectorStack* temp_stac
               static_cast<uint16_t>(local_states_[thread_id].input->minibatch_start);
         }
 
+        size_t rows_appended = 0;
+
         // If we are to exceed the maximum number of rows per batch, output.
         if (local_states_[thread_id].materialize->num_rows() + num_passing_ids >
             kMaxRowsPerBatch) {
+          rows_appended =
+              kMaxRowsPerBatch - local_states_[thread_id].materialize->num_rows();
+          num_passing_ids -= rows_appended;
+          int ignored;
+          ARRA_RETURN_NOT_OK(local_states_[thread_id].materialize->AppendProbeOnly(
+              local_states_[thread_id].input->batch, rows_appended,
+              local_states_[thread_id].materialize_batch_ids_buf_data(), &ignored));
           ARRA_RETURN_NOT_OK(
               local_states_[thread_id].materialize->Flush([&](ExecBatch batch) {
                 output.emplace(std::move(batch));
@@ -471,7 +489,8 @@ Status ProbeProcessor::InnerOuter(ThreadId thread_id, TempVectorStack* temp_stac
           int ignored;
           ARRA_RETURN_NOT_OK(local_states_[thread_id].materialize->AppendProbeOnly(
               local_states_[thread_id].input->batch, num_passing_ids,
-              local_states_[thread_id].materialize_batch_ids_buf_data(), &ignored));
+              local_states_[thread_id].materialize_batch_ids_buf_data() + rows_appended,
+              &ignored));
         }
       }
 
@@ -533,9 +552,17 @@ Status ProbeProcessor::LeftSemiAnti(ThreadId thread_id, TempVectorStack* temp_st
           static_cast<uint16_t>(local_states_[thread_id].input->minibatch_start);
     }
 
+    size_t rows_appended = 0;
+
     // If we are to exceed the maximum number of rows per batch, output.
     if (local_states_[thread_id].materialize->num_rows() + num_passing_ids >
         kMaxRowsPerBatch) {
+      rows_appended = kMaxRowsPerBatch - local_states_[thread_id].materialize->num_rows();
+      num_passing_ids -= rows_appended;
+      int ignored;
+      ARRA_RETURN_NOT_OK(local_states_[thread_id].materialize->AppendProbeOnly(
+          local_states_[thread_id].input->batch, rows_appended,
+          local_states_[thread_id].materialize_batch_ids_buf_data(), &ignored));
       ARRA_RETURN_NOT_OK(
           local_states_[thread_id].materialize->Flush([&](ExecBatch batch) {
             output.emplace(std::move(batch));
@@ -548,7 +575,8 @@ Status ProbeProcessor::LeftSemiAnti(ThreadId thread_id, TempVectorStack* temp_st
       int ignored;
       ARRA_RETURN_NOT_OK(local_states_[thread_id].materialize->AppendProbeOnly(
           local_states_[thread_id].input->batch, num_passing_ids,
-          local_states_[thread_id].materialize_batch_ids_buf_data(), &ignored));
+          local_states_[thread_id].materialize_batch_ids_buf_data() + rows_appended,
+          &ignored));
     }
 
     local_states_[thread_id].input->minibatch_start += minibatch_size_next;
