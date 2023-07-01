@@ -589,7 +589,7 @@ class SerialProbeInnerAndLeft : public SerialProbe<join_type> {
           ASSERT_EQ(status.code, OperatorStatusCode::FINISHED);
           auto drain_batch = std::get<std::optional<arrow::ExecBatch>>(status.payload);
           ASSERT_TRUE(drain_batch.has_value());
-          ASSERT_EQ(drain_batch.value().length, kMaxRowsPerBatch);
+          ASSERT_EQ(drain_batch.value().length, exp_rows_single * 2 - kMaxRowsPerBatch);
           AssertBatchesEqual(
               arrow::acero::BatchesWithSchema{{probe_batch.value(), drain_batch.value()},
                                               this->OutputSchema()},
