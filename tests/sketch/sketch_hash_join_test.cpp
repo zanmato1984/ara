@@ -393,11 +393,11 @@ std::vector<BuildOnlyCase> SerialBuildOnlyCases() {
   return cases;
 }
 
-// INSTANTIATE_TEST_SUITE_P(SerialBuildOnlyCases, SerialBuildOnly,
-//                          testing::ValuesIn(SerialBuildOnlyCases()),
-//                          [](const auto& param_info) {
-//                            return param_info.param.Name(param_info.index);
-//                          });
+INSTANTIATE_TEST_SUITE_P(SerialBuildOnlyCases, SerialBuildOnly,
+                         testing::ValuesIn(SerialBuildOnlyCases()),
+                         [](const auto& param_info) {
+                           return param_info.param.Name(param_info.index);
+                         });
 
 template <arrow::acero::JoinType join_type>
 struct ProbeCase : public HashJoinCase {
