@@ -649,6 +649,7 @@ Status ScanProcessor::Init(JoinType join_type, SwissTableForJoin* hash_table,
                            const std::vector<JoinResultMaterialize*>& materialize) {
   dop_ = materialize.size();
   join_type_ = join_type;
+  hash_table_ = hash_table;
 
   local_states_.resize(materialize.size());
   for (int i = 0; i < materialize.size(); i++) {
@@ -698,6 +699,7 @@ Status ScanProcessor::Scan(ThreadId thread_id, TempVectorStack* temp_stack,
   auto key_ids_buf = TempVectorHolder<uint32_t>(temp_stack, MiniBatch::kMiniBatchLength);
   auto selection_buf =
       TempVectorHolder<uint16_t>(temp_stack, MiniBatch::kMiniBatchLength);
+  bool has_output = false;
   for (int64_t mini_batch_start = start_row; mini_batch_start < end_row;) {
     // Compute the size of the next mini-batch
     //
@@ -734,7 +736,6 @@ Status ScanProcessor::Scan(ThreadId thread_id, TempVectorStack* temp_stack,
     size_t rows_appended = 0;
 
     // If we are to exceed the maximum number of rows per batch, output.
-    bool has_output = false;
     if (local_states_[thread_id].materialize->num_rows() + num_output_rows >
         kMaxRowsPerBatch) {
       rows_appended = kMaxRowsPerBatch - local_states_[thread_id].materialize->num_rows();
@@ -770,10 +771,11 @@ Status ScanProcessor::Scan(ThreadId thread_id, TempVectorStack* temp_stack,
 
     mini_batch_start += mini_batch_size_next;
     local_states_[thread_id].current_start_ += mini_batch_size_next;
+  }
 
-    if (has_output) {
-      break;
-    }
+  if (!has_output) {
+    // I know, this is weird.
+    status = OperatorStatus::HasOutput(std::nullopt);
   }
 
   return Status::OK();
@@ -825,12 +827,6 @@ Status HashJoin::Init(QueryContext* ctx, size_t dop, const HashJoinNodeOptions& 
   ARRA_RETURN_NOT_OK(probe_processor_.Init(
       hardware_flags_, pool_, schema_[0]->num_cols(HashJoinProjection::KEY), schema_[0],
       join_type_, &key_cmp_, &hash_table_, materialize));
-  ARRA_RETURN_NOT_OK(scan_processor_.Init(join_type_, &hash_table_, materialize));
-
-  if (NeedToScan(join_type_)) {
-    scan_source_.emplace();
-    ARRA_RETURN_NOT_OK(scan_source_->Init(ctx_, &scan_processor_));
-  }
 
   return Status::OK();
 }
@@ -905,26 +901,41 @@ PipelineTaskPipe HashJoin::ProbeDrain() {
       };
 }
 
-std::optional<HashJoinScanSource> HashJoin::ScanSource() { return scan_source_; }
+std::optional<HashJoinScanSource> HashJoin::ScanSource() {
+  if (!NeedToScan(join_type_)) {
+    return std::nullopt;
+  }
+  std::optional<HashJoinScanSource> scan_source;
+  scan_source.emplace();
+  std::vector<JoinResultMaterialize*> materialize;
+  materialize.resize(dop_);
+  for (int i = 0; i < dop_; ++i) {
+    materialize[i] = &local_states_[i].materialize;
+  }
+  ARRA_DCHECK_OK(scan_source->Init(ctx_, join_type_, &hash_table_, materialize));
+  return scan_source;
+}
 
-Status HashJoinScanSource::Init(QueryContext* ctx, ScanProcessor* scan_processor) {
+Status HashJoinScanSource::Init(QueryContext* ctx, JoinType join_type,
+                                SwissTableForJoin* hash_table,
+                                const std::vector<JoinResultMaterialize*>& materializ) {
   ctx_ = ctx;
-  scan_processor_ = scan_processor;
 
-  return Status::OK();
+  return scan_processor_.Init(join_type, hash_table, materializ);
 }
 
 TaskGroups HashJoinScanSource::ScanSourceBackend() { return {}; }
 
 std::pair<TaskGroups, PipelineTaskSource> HashJoinScanSource::ScanSourceFrontend() {
-  auto start_scan_task = [&](TaskId, OperatorStatus&) {
-    return scan_processor_->StartScan();
+  auto start_scan_task = [&](TaskId, OperatorStatus& status) {
+    status = OperatorStatus::Finished(std::nullopt);
+    return scan_processor_.StartScan();
   };
   TaskGroups start_scan_task_groups{{std::move(start_scan_task), 1, std::nullopt}};
 
   auto scan_source = [&](ThreadId thread_id, OperatorStatus& status) {
     ARROW_ASSIGN_OR_RAISE(TempVectorStack * temp_stack, ctx_->GetTempStack(thread_id));
-    return scan_processor_->Scan(thread_id, temp_stack, status);
+    return scan_processor_.Scan(thread_id, temp_stack, status);
   };
 
   return {std::move(start_scan_task_groups), std::move(scan_source)};

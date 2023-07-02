@@ -232,13 +232,8 @@ class ScanProcessor {
 
   SwissTableForJoin* hash_table_;
 
-  std::vector<JoinResultMaterialize*> materialize_;
-
  private:
-  enum class State { CLEAN, HAS_MORE };
-
   struct ThreadLocalState {
-    State state = State::CLEAN;
     int current_start_ = 0;
     JoinResultMaterialize* materialize = nullptr;
   };
@@ -247,7 +242,8 @@ class ScanProcessor {
 
 class HashJoinScanSource {
  public:
-  Status Init(QueryContext* ctx, ScanProcessor* scan_processor);
+  Status Init(QueryContext* ctx, JoinType join_type, SwissTableForJoin* hash_table,
+              const std::vector<JoinResultMaterialize*>& materializ);
 
   TaskGroups ScanSourceBackend();
 
@@ -256,7 +252,7 @@ class HashJoinScanSource {
  private:
   QueryContext* ctx_;
 
-  ScanProcessor* scan_processor_;
+  ScanProcessor scan_processor_;
 };
 
 class HashJoin {
@@ -305,12 +301,11 @@ class HashJoin {
   SwissTableForJoinBuild hash_table_build_;
   std::mutex build_side_mutex_;
   AccumulationQueue build_side_batches_;
-
-  std::optional<HashJoinScanSource> scan_source_;
 };
 
 }  // namespace detail
 
+using HashJoinScanSource = detail::HashJoinScanSource;
 using HashJoin = detail::HashJoin;
 
 }  // namespace arra::sketch
