@@ -439,7 +439,7 @@ const std::vector<ProbeCase<join_type>> SerialProbeCases() {
 }
 
 template <arrow::acero::JoinType join_type>
-class SerialProbeInnerAndLeft : public SerialProbe<join_type> {
+class SerialFineProbeInnerLeft : public SerialProbe<join_type> {
  public:
   static const arrow::acero::JoinType JoinType = join_type;
 
@@ -688,37 +688,40 @@ class SerialProbeInnerAndLeft : public SerialProbe<join_type> {
   }
 };
 
-using SerialProbeInner = SerialProbeInnerAndLeft<arrow::acero::JoinType::INNER>;
-using SerialProbeLeftOuter = SerialProbeInnerAndLeft<arrow::acero::JoinType::LEFT_OUTER>;
-using SerialProbeLeftSemi = SerialProbeInnerAndLeft<arrow::acero::JoinType::LEFT_SEMI>;
-using SerialProbeLeftAnti = SerialProbeInnerAndLeft<arrow::acero::JoinType::LEFT_ANTI>;
+using SerialFineProbeInner = SerialFineProbeInnerLeft<arrow::acero::JoinType::INNER>;
+using SerialFineProbeLeftOuter =
+    SerialFineProbeInnerLeft<arrow::acero::JoinType::LEFT_OUTER>;
+using SerialFineProbeLeftSemi =
+    SerialFineProbeInnerLeft<arrow::acero::JoinType::LEFT_SEMI>;
+using SerialFineProbeLeftAnti =
+    SerialFineProbeInnerLeft<arrow::acero::JoinType::LEFT_ANTI>;
 
-TEST_P(SerialProbeInner, ProbeOne) { ProbeOne(); }
-TEST_P(SerialProbeInner, ProbeTwo) { ProbeTwo(); }
+TEST_P(SerialFineProbeInner, ProbeOne) { ProbeOne(); }
+TEST_P(SerialFineProbeInner, ProbeTwo) { ProbeTwo(); }
 INSTANTIATE_TEST_SUITE_P(
-    SerialProbeInnerCases, SerialProbeInner,
-    ::testing::ValuesIn(SerialProbeCases<SerialProbeInner::JoinType>()),
+    SerialFineProbeInnerCases, SerialFineProbeInner,
+    ::testing::ValuesIn(SerialProbeCases<SerialFineProbeInner::JoinType>()),
     [](const auto& param_info) { return param_info.param.Name(param_info.index); });
 
-TEST_P(SerialProbeLeftOuter, ProbeOne) { ProbeOne(); }
-TEST_P(SerialProbeLeftOuter, ProbeTwo) { ProbeTwo(); }
+TEST_P(SerialFineProbeLeftOuter, ProbeOne) { ProbeOne(); }
+TEST_P(SerialFineProbeLeftOuter, ProbeTwo) { ProbeTwo(); }
 INSTANTIATE_TEST_SUITE_P(
-    SerialProbeLeftOuterCases, SerialProbeLeftOuter,
-    ::testing::ValuesIn(SerialProbeCases<SerialProbeLeftOuter::JoinType>()),
+    SerialFineProbeLeftOuterCases, SerialFineProbeLeftOuter,
+    ::testing::ValuesIn(SerialProbeCases<SerialFineProbeLeftOuter::JoinType>()),
     [](const auto& param_info) { return param_info.param.Name(param_info.index); });
 
-TEST_P(SerialProbeLeftSemi, ProbeOne) { ProbeOne(); }
-TEST_P(SerialProbeLeftSemi, ProbeTwo) { ProbeTwo(); }
+TEST_P(SerialFineProbeLeftSemi, ProbeOne) { ProbeOne(); }
+TEST_P(SerialFineProbeLeftSemi, ProbeTwo) { ProbeTwo(); }
 INSTANTIATE_TEST_SUITE_P(
-    SerialProbeLeftSemiCases, SerialProbeLeftSemi,
-    ::testing::ValuesIn(SerialProbeCases<SerialProbeLeftSemi::JoinType>()),
+    SerialFineProbeLeftSemiCases, SerialFineProbeLeftSemi,
+    ::testing::ValuesIn(SerialProbeCases<SerialFineProbeLeftSemi::JoinType>()),
     [](const auto& param_info) { return param_info.param.Name(param_info.index); });
 
-TEST_P(SerialProbeLeftAnti, ProbeOne) { ProbeOne(); }
-TEST_P(SerialProbeLeftAnti, ProbeTwo) { ProbeTwo(); }
+TEST_P(SerialFineProbeLeftAnti, ProbeOne) { ProbeOne(); }
+TEST_P(SerialFineProbeLeftAnti, ProbeTwo) { ProbeTwo(); }
 INSTANTIATE_TEST_SUITE_P(
-    SerialProbeLeftAntiCases, SerialProbeLeftAnti,
-    ::testing::ValuesIn(SerialProbeCases<SerialProbeLeftAnti::JoinType>()),
+    SerialFineProbeLeftAntiCases, SerialFineProbeLeftAnti,
+    ::testing::ValuesIn(SerialProbeCases<SerialFineProbeLeftAnti::JoinType>()),
     [](const auto& param_info) { return param_info.param.Name(param_info.index); });
 
 // class TestTaskRunner {
