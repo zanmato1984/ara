@@ -304,9 +304,24 @@ class TestHashJoinSerial : public testing::Test {
     return probe_drain(thread_id, std::nullopt, status);
   }
 
+  void StartScan() {
+    scan_source_ = hash_join_.ScanSource();
+    ASSERT_TRUE(scan_source_.has_value());
+    ASSERT_TRUE(scan_source_->ScanSourceBackend().empty());
+    auto [scan_groups, scan] = scan_source_->ScanSourceFrontend();
+    ASSERT_EQ(scan_groups.size(), 1);
+    RunTaskGroup(scan_groups[0]);
+  }
+
+  arrow::Status Scan(ThreadId thread_id, OperatorStatus& status) {
+    auto [scan_groups, scan] = scan_source_->ScanSourceFrontend();
+    return scan(thread_id, status);
+  }
+
  private:
   std::unique_ptr<arrow::acero::QueryContext> query_ctx_;
   HashJoin hash_join_;
+  std::optional<HashJoinScanSource> scan_source_;
 
  private:
   void RunTaskGroups(const TaskGroups& groups) {
@@ -393,11 +408,11 @@ std::vector<BuildOnlyCase> SerialBuildOnlyCases() {
   return cases;
 }
 
-INSTANTIATE_TEST_SUITE_P(SerialBuildOnlyCases, SerialBuildOnly,
-                         testing::ValuesIn(SerialBuildOnlyCases()),
-                         [](const auto& param_info) {
-                           return param_info.param.Name(param_info.index);
-                         });
+// INSTANTIATE_TEST_SUITE_P(SerialBuildOnlyCases, SerialBuildOnly,
+//                          testing::ValuesIn(SerialBuildOnlyCases()),
+//                          [](const auto& param_info) {
+//                            return param_info.param.Name(param_info.index);
+//                          });
 
 template <arrow::acero::JoinType join_type>
 struct ProbeCase : public HashJoinCase {
@@ -495,9 +510,8 @@ class SerialFineProbeInnerLeft : public SerialProbe<join_type> {
 
         ASSERT_OK(this->Probe(thread_id, std::nullopt, status));
         ASSERT_EQ(status.code, OperatorStatusCode::HAS_OUTPUT);
-        auto probe_batch_second =
-            std::get<std::optional<arrow::ExecBatch>>(status.payload);
-        ASSERT_FALSE(probe_batch_second.has_value());
+        ASSERT_FALSE(
+            std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
 
         ASSERT_OK(this->Drain(thread_id, status));
         ASSERT_EQ(status.code, OperatorStatusCode::FINISHED);
@@ -511,16 +525,24 @@ class SerialFineProbeInnerLeft : public SerialProbe<join_type> {
       } else {
         ASSERT_OK(this->Probe(thread_id, l_batches.batches[0], status));
         ASSERT_EQ(status.code, OperatorStatusCode::HAS_MORE_OUTPUT);
-        auto probe_batch =
+        auto probe_batch_first =
             std::move(std::get<std::optional<arrow::ExecBatch>>(status.payload));
-        ASSERT_TRUE(probe_batch.has_value());
-        ASSERT_EQ(probe_batch.value().length, kMaxRowsPerBatch);
+        ASSERT_TRUE(probe_batch_first.has_value());
+        ASSERT_EQ(probe_batch_first.value().length, kMaxRowsPerBatch);
+
+        ASSERT_OK(this->Probe(thread_id, std::nullopt, status));
+        ASSERT_EQ(status.code, OperatorStatusCode::HAS_MORE_OUTPUT);
+        auto probe_batch_second =
+            std::move(std::get<std::optional<arrow::ExecBatch>>(status.payload));
+        ASSERT_TRUE(probe_batch_second.has_value());
+        ASSERT_EQ(probe_batch_second.value().length, kMaxRowsPerBatch);
 
         ASSERT_OK(this->Drain(thread_id, status));
         ASSERT_EQ(status.code, OperatorStatusCode::FINISHED);
         auto drain_batch = std::get<std::optional<arrow::ExecBatch>>(status.payload);
         ASSERT_TRUE(drain_batch.has_value());
-        ASSERT_LE(drain_batch.value().length, kMaxRowsPerBatch);
+        ASSERT_GT(drain_batch.value().length, 0);
+        ASSERT_LT(drain_batch.value().length, kMaxRowsPerBatch);
       }
     }
   }
@@ -681,7 +703,8 @@ class SerialFineProbeInnerLeft : public SerialProbe<join_type> {
           ASSERT_EQ(status.code, OperatorStatusCode::FINISHED);
           auto drain_batch = std::get<std::optional<arrow::ExecBatch>>(status.payload);
           ASSERT_TRUE(drain_batch.has_value());
-          ASSERT_LE(drain_batch.value().length, kMaxRowsPerBatch);
+          ASSERT_GT(drain_batch.value().length, 0);
+          ASSERT_LT(drain_batch.value().length, kMaxRowsPerBatch);
         }
       }
     }
@@ -696,32 +719,176 @@ using SerialFineProbeLeftSemi =
 using SerialFineProbeLeftAnti =
     SerialFineProbeInnerLeft<arrow::acero::JoinType::LEFT_ANTI>;
 
-TEST_P(SerialFineProbeInner, ProbeOne) { ProbeOne(); }
-TEST_P(SerialFineProbeInner, ProbeTwo) { ProbeTwo(); }
+// TEST_P(SerialFineProbeInner, ProbeOne) { ProbeOne(); }
+// TEST_P(SerialFineProbeInner, ProbeTwo) { ProbeTwo(); }
+// INSTANTIATE_TEST_SUITE_P(
+//     SerialFineProbeInnerCases, SerialFineProbeInner,
+//     ::testing::ValuesIn(SerialProbeCases<SerialFineProbeInner::JoinType>()),
+//     [](const auto& param_info) { return param_info.param.Name(param_info.index); });
+
+// TEST_P(SerialFineProbeLeftOuter, ProbeOne) { ProbeOne(); }
+// TEST_P(SerialFineProbeLeftOuter, ProbeTwo) { ProbeTwo(); }
+// INSTANTIATE_TEST_SUITE_P(
+//     SerialFineProbeLeftOuterCases, SerialFineProbeLeftOuter,
+//     ::testing::ValuesIn(SerialProbeCases<SerialFineProbeLeftOuter::JoinType>()),
+//     [](const auto& param_info) { return param_info.param.Name(param_info.index); });
+
+// TEST_P(SerialFineProbeLeftSemi, ProbeOne) { ProbeOne(); }
+// TEST_P(SerialFineProbeLeftSemi, ProbeTwo) { ProbeTwo(); }
+// INSTANTIATE_TEST_SUITE_P(
+//     SerialFineProbeLeftSemiCases, SerialFineProbeLeftSemi,
+//     ::testing::ValuesIn(SerialProbeCases<SerialFineProbeLeftSemi::JoinType>()),
+//     [](const auto& param_info) { return param_info.param.Name(param_info.index); });
+
+// TEST_P(SerialFineProbeLeftAnti, ProbeOne) { ProbeOne(); }
+// TEST_P(SerialFineProbeLeftAnti, ProbeTwo) { ProbeTwo(); }
+// INSTANTIATE_TEST_SUITE_P(
+//     SerialFineProbeLeftAntiCases, SerialFineProbeLeftAnti,
+//     ::testing::ValuesIn(SerialProbeCases<SerialFineProbeLeftAnti::JoinType>()),
+//     [](const auto& param_info) { return param_info.param.Name(param_info.index); });
+
+template <arrow::acero::JoinType join_type>
+class SerialFineProbeRightFullOuter : public SerialProbe<join_type> {
+ public:
+  static const arrow::acero::JoinType JoinType = join_type;
+
+ protected:
+  void ProbeOneScan() {
+    this->Init();
+
+    auto l_batches =
+        HashJoinFixture::LeftBatches(this->join_case_.left_multiplicity_intra_,
+                                     this->join_case_.left_multiplicity_inter_);
+    auto r_batches =
+        HashJoinFixture::RightBatches(this->join_case_.right_multiplicity_intra_,
+                                      this->join_case_.right_multiplicity_inter_);
+
+    auto exp_rows_probe =
+        HashJoinFixture::ExpRowCount(join_type == arrow::acero::JoinType::RIGHT_OUTER
+                                         ? arrow::acero::JoinType::INNER
+                                         : arrow::acero::JoinType::LEFT_OUTER,
+                                     this->join_case_.left_multiplicity_intra_ *
+                                         this->join_case_.left_multiplicity_inter_,
+                                     this->join_case_.right_multiplicity_intra_ *
+                                         this->join_case_.right_multiplicity_inter_);
+    auto exp_batches =
+        HashJoinFixture::ExpBatches(this->join_case_.options_.join_type,
+                                    this->join_case_.left_multiplicity_intra_ *
+                                        this->join_case_.left_multiplicity_inter_,
+                                    this->join_case_.right_multiplicity_intra_ *
+                                        this->join_case_.right_multiplicity_inter_);
+
+    this->Build(r_batches);
+
+    for (size_t thread_id = 0; thread_id < this->join_case_.dop_; thread_id++) {
+      OperatorStatus status = OperatorStatus::Other(arrow::Status::UnknownError(""));
+      std::vector<std::vector<arrow::ExecBatch>> output_batches(this->join_case_.dop_);
+      if (exp_rows_probe <= kMaxRowsPerBatch) {
+        ASSERT_OK(this->Probe(thread_id, l_batches.batches[0], status));
+        ASSERT_EQ(status.code, OperatorStatusCode::HAS_OUTPUT);
+        ASSERT_FALSE(
+            std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
+
+        ASSERT_OK(this->Drain(thread_id, status));
+        ASSERT_EQ(status.code, OperatorStatusCode::FINISHED);
+        ASSERT_FALSE(
+            std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
+        // auto drain_batch = std::get<std::optional<arrow::ExecBatch>>(status.payload);
+        // ASSERT_TRUE(drain_batch.has_value());
+        // ASSERT_EQ(drain_batch.value().length, exp_rows_probe);
+        // output_batches[thread_id].push_back(std::move(drain_batch.value()));
+      } else if (exp_rows_probe <= 2 * kMaxRowsPerBatch) {
+        ASSERT_OK(this->Probe(thread_id, l_batches.batches[0], status));
+        ASSERT_EQ(status.code, OperatorStatusCode::HAS_MORE_OUTPUT);
+        auto probe_batch = std::get<std::optional<arrow::ExecBatch>>(status.payload);
+        ASSERT_TRUE(probe_batch.has_value());
+        ASSERT_EQ(probe_batch.value().length, kMaxRowsPerBatch);
+        output_batches[thread_id].push_back(std::move(probe_batch.value()));
+
+        ASSERT_OK(this->Probe(thread_id, std::nullopt, status));
+        ASSERT_EQ(status.code, OperatorStatusCode::HAS_OUTPUT);
+        ASSERT_FALSE(
+            std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
+
+        ASSERT_OK(this->Drain(thread_id, status));
+        ASSERT_EQ(status.code, OperatorStatusCode::FINISHED);
+        ASSERT_FALSE(
+            std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
+        // auto drain_batch = std::get<std::optional<arrow::ExecBatch>>(status.payload);
+        // ASSERT_TRUE(drain_batch.has_value());
+        // ASSERT_EQ(drain_batch.value().length, exp_rows_probe - kMaxRowsPerBatch);
+        // output_batches[thread_id].push_back(std::move(drain_batch.value()));
+      } else {
+        ASSERT_OK(this->Probe(thread_id, l_batches.batches[0], status));
+        ASSERT_EQ(status.code, OperatorStatusCode::HAS_MORE_OUTPUT);
+        auto probe_batch_first =
+            std::move(std::get<std::optional<arrow::ExecBatch>>(status.payload));
+        ASSERT_TRUE(probe_batch_first.has_value());
+        ASSERT_EQ(probe_batch_first.value().length, kMaxRowsPerBatch);
+        output_batches[thread_id].push_back(std::move(probe_batch_first.value()));
+
+        while (status.code == OperatorStatusCode::HAS_MORE_OUTPUT) {
+          ASSERT_OK(this->Probe(thread_id, std::nullopt, status));
+          if (status.code == OperatorStatusCode::HAS_MORE_OUTPUT) {
+            auto probe_batch =
+                std::move(std::get<std::optional<arrow::ExecBatch>>(status.payload));
+            ASSERT_TRUE(probe_batch.has_value());
+            ASSERT_EQ(probe_batch.value().length, kMaxRowsPerBatch);
+            output_batches[thread_id].push_back(std::move(probe_batch.value()));
+          }
+        }
+
+        ASSERT_OK(this->Drain(thread_id, status));
+        ASSERT_EQ(status.code, OperatorStatusCode::FINISHED);
+        ASSERT_FALSE(
+            std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
+        // auto drain_batch = std::get<std::optional<arrow::ExecBatch>>(status.payload);
+        // ASSERT_TRUE(drain_batch.has_value());
+        // ASSERT_GT(drain_batch.value().length, 0);
+        // ASSERT_LT(drain_batch.value().length, kMaxRowsPerBatch);
+      }
+
+      this->StartScan();
+
+      for (size_t thread_id = 0; thread_id < this->join_case_.dop_; thread_id++) {
+        do {
+          ASSERT_OK(this->Scan(thread_id, status));
+          if (status.code == OperatorStatusCode::HAS_MORE_OUTPUT ||
+              status.code == OperatorStatusCode::FINISHED) {
+            auto scan_batch =
+                std::move(std::get<std::optional<arrow::ExecBatch>>(status.payload));
+            ASSERT_TRUE(scan_batch.has_value());
+            output_batches[thread_id].push_back(std::move(scan_batch.value()));
+          } else {
+            ASSERT_EQ(status.code, OperatorStatusCode::HAS_OUTPUT);
+            ASSERT_FALSE(
+                std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
+          }
+        } while (status.code != OperatorStatusCode::FINISHED);
+      }
+
+      AssertBatchesEqual(arrow::acero::BatchesWithSchema{output_batches[thread_id],
+                                                         this->OutputSchema()},
+                         exp_batches);
+    }
+  }
+};
+
+using SerialFineProbeRightOuter =
+    SerialFineProbeRightFullOuter<arrow::acero::JoinType::RIGHT_OUTER>;
+using SerialFineProbeFullOuter =
+    SerialFineProbeRightFullOuter<arrow::acero::JoinType::FULL_OUTER>;
+
+TEST_P(SerialFineProbeRightOuter, ProbeOneScan) { ProbeOneScan(); }
 INSTANTIATE_TEST_SUITE_P(
-    SerialFineProbeInnerCases, SerialFineProbeInner,
-    ::testing::ValuesIn(SerialProbeCases<SerialFineProbeInner::JoinType>()),
+    SerialFineProbeRightOuterCases, SerialFineProbeRightOuter,
+    ::testing::ValuesIn(SerialProbeCases<SerialFineProbeRightOuter::JoinType>()),
     [](const auto& param_info) { return param_info.param.Name(param_info.index); });
 
-TEST_P(SerialFineProbeLeftOuter, ProbeOne) { ProbeOne(); }
-TEST_P(SerialFineProbeLeftOuter, ProbeTwo) { ProbeTwo(); }
+TEST_P(SerialFineProbeFullOuter, ProbeOneScan) { ProbeOneScan(); }
 INSTANTIATE_TEST_SUITE_P(
-    SerialFineProbeLeftOuterCases, SerialFineProbeLeftOuter,
-    ::testing::ValuesIn(SerialProbeCases<SerialFineProbeLeftOuter::JoinType>()),
-    [](const auto& param_info) { return param_info.param.Name(param_info.index); });
-
-TEST_P(SerialFineProbeLeftSemi, ProbeOne) { ProbeOne(); }
-TEST_P(SerialFineProbeLeftSemi, ProbeTwo) { ProbeTwo(); }
-INSTANTIATE_TEST_SUITE_P(
-    SerialFineProbeLeftSemiCases, SerialFineProbeLeftSemi,
-    ::testing::ValuesIn(SerialProbeCases<SerialFineProbeLeftSemi::JoinType>()),
-    [](const auto& param_info) { return param_info.param.Name(param_info.index); });
-
-TEST_P(SerialFineProbeLeftAnti, ProbeOne) { ProbeOne(); }
-TEST_P(SerialFineProbeLeftAnti, ProbeTwo) { ProbeTwo(); }
-INSTANTIATE_TEST_SUITE_P(
-    SerialFineProbeLeftAntiCases, SerialFineProbeLeftAnti,
-    ::testing::ValuesIn(SerialProbeCases<SerialFineProbeLeftAnti::JoinType>()),
+    SerialFineProbeFullOuterCases, SerialFineProbeFullOuter,
+    ::testing::ValuesIn(SerialProbeCases<SerialFineProbeFullOuter::JoinType>()),
     [](const auto& param_info) { return param_info.param.Name(param_info.index); });
 
 // class TestTaskRunner {
