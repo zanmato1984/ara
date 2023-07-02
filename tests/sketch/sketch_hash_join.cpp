@@ -731,9 +731,20 @@ Status ScanProcessor::Scan(ThreadId thread_id, TempVectorStack* temp_stack,
       }
     }
 
+    size_t rows_appended = 0;
+
+    // If we are to exceed the maximum number of rows per batch, output.
     bool has_output = false;
     if (local_states_[thread_id].materialize->num_rows() + num_output_rows >
         kMaxRowsPerBatch) {
+      rows_appended = kMaxRowsPerBatch - local_states_[thread_id].materialize->num_rows();
+      num_output_rows -= rows_appended;
+      int ignored;
+      ARRA_SET_AND_RETURN_NOT_OK(local_states_[thread_id].materialize->AppendBuildOnly(
+                                     rows_appended, key_ids_buf.mutable_data(),
+                                     payload_ids_buf.mutable_data(), &ignored),
+                                 { status = OperatorStatus::Other(__s); });
+
       std::optional<ExecBatch> output;
       ARRA_SET_AND_RETURN_NOT_OK(
           local_states_[thread_id].materialize->Flush([&](ExecBatch batch) {
@@ -750,9 +761,11 @@ Status ScanProcessor::Scan(ThreadId thread_id, TempVectorStack* temp_stack,
       // values according to the generated list of ids.
       //
       int ignored;
-      Status status = local_states_[thread_id].materialize->AppendBuildOnly(
-          num_output_rows, key_ids_buf.mutable_data(), payload_ids_buf.mutable_data(),
-          &ignored);
+      ARRA_SET_AND_RETURN_NOT_OK(
+          local_states_[thread_id].materialize->AppendBuildOnly(
+              num_output_rows, key_ids_buf.mutable_data() + rows_appended,
+              key_ids_buf.mutable_data() + rows_appended, &ignored),
+          { status = OperatorStatus::Other(__s); });
     }
 
     mini_batch_start += mini_batch_size_next;
