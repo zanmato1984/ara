@@ -793,10 +793,6 @@ class SerialFineProbeRightFullOuter : public SerialProbe<join_type> {
         ASSERT_EQ(status.code, OperatorStatusCode::FINISHED);
         ASSERT_FALSE(
             std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
-        // auto drain_batch = std::get<std::optional<arrow::ExecBatch>>(status.payload);
-        // ASSERT_TRUE(drain_batch.has_value());
-        // ASSERT_EQ(drain_batch.value().length, exp_rows_probe);
-        // output_batches.push_back(std::move(drain_batch.value()));
       } else if (exp_rows_probe <= 2 * kMaxRowsPerBatch) {
         ASSERT_OK(this->Probe(thread_id, l_batches.batches[0], status));
         ASSERT_EQ(status.code, OperatorStatusCode::HAS_MORE_OUTPUT);
@@ -814,10 +810,6 @@ class SerialFineProbeRightFullOuter : public SerialProbe<join_type> {
         ASSERT_EQ(status.code, OperatorStatusCode::FINISHED);
         ASSERT_FALSE(
             std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
-        // auto drain_batch = std::get<std::optional<arrow::ExecBatch>>(status.payload);
-        // ASSERT_TRUE(drain_batch.has_value());
-        // ASSERT_EQ(drain_batch.value().length, exp_rows_probe - kMaxRowsPerBatch);
-        // output_batches.push_back(std::move(drain_batch.value()));
       } else {
         ASSERT_OK(this->Probe(thread_id, l_batches.batches[0], status));
         ASSERT_EQ(status.code, OperatorStatusCode::HAS_MORE_OUTPUT);
@@ -842,10 +834,6 @@ class SerialFineProbeRightFullOuter : public SerialProbe<join_type> {
         ASSERT_EQ(status.code, OperatorStatusCode::FINISHED);
         ASSERT_FALSE(
             std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
-        // auto drain_batch = std::get<std::optional<arrow::ExecBatch>>(status.payload);
-        // ASSERT_TRUE(drain_batch.has_value());
-        // ASSERT_GT(drain_batch.value().length, 0);
-        // ASSERT_LT(drain_batch.value().length, kMaxRowsPerBatch);
       }
 
       this->StartScan();

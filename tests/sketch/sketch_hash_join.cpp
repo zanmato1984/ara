@@ -447,6 +447,8 @@ Status ProbeProcessor::InnerOuter(ThreadId thread_id, TempVectorStack* temp_stac
     }
 
     if (state_next != State::MATCH_HAS_MORE) {
+      match_has_more_last = false;
+
       // For left-outer and full-outer joins output non-matches.
       //
       // Call materialize. Nulls will be output in all columns that come from
@@ -494,8 +496,9 @@ Status ProbeProcessor::InnerOuter(ThreadId thread_id, TempVectorStack* temp_stac
         }
       }
 
-      match_has_more_last = false;
-      local_states_[thread_id].input->minibatch_start += minibatch_size_next;
+      if (state_next != State::MINIBATCH_HAS_MORE) {
+        local_states_[thread_id].input->minibatch_start += minibatch_size_next;
+      }
     }
   }
 
@@ -700,7 +703,7 @@ Status ScanProcessor::Scan(ThreadId thread_id, TempVectorStack* temp_stack,
   auto selection_buf =
       TempVectorHolder<uint16_t>(temp_stack, MiniBatch::kMiniBatchLength);
   bool has_output = false;
-  for (int64_t mini_batch_start = start_row; mini_batch_start < end_row;) {
+  for (int64_t mini_batch_start = start_row; mini_batch_start < end_row && !has_output;) {
     // Compute the size of the next mini-batch
     //
     int64_t mini_batch_size_next =

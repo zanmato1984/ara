@@ -295,7 +295,6 @@ class HashJoin {
 
   BuildProcessor build_processor_;
   ProbeProcessor probe_processor_;
-  ScanProcessor scan_processor_;
 
   SwissTableForJoin hash_table_;
   SwissTableForJoinBuild hash_table_build_;
