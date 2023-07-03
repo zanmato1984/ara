@@ -70,8 +70,6 @@ void AssertBatchesEqual(const arrow::acero::BatchesWithSchema& out,
   ASSERT_OK_AND_ASSIGN(auto out_table_sorted,
                        arrow::compute::Take(out_table, out_table_sort_ids));
 
-  // std::cout << "Exp: " << exp_table_sorted.table()->ToString() << std::endl;
-  // std::cout << "Act: " << out_table_sorted.table()->ToString() << std::endl;
   AssertTablesEqual(*exp_table_sorted.table(), *out_table_sorted.table(),
                     /*same_chunk_layout=*/false, /*flatten=*/true);
 }
@@ -883,22 +881,106 @@ class SerialFineProbeRightFullOuter : public SerialProbe<join_type> {
   }
 };
 
+// TEST_P(SerialFineProbeRightOuter, ProbeOneScan) { ProbeOneScan(); }
+// INSTANTIATE_TEST_SUITE_P(
+//     SerialFineProbeRightOuterCases, SerialFineProbeRightOuter,
+//     ::testing::ValuesIn(SerialProbeCases<SerialFineProbeRightOuter::JoinType>()),
+//     [](const auto& param_info) { return param_info.param.Name(param_info.index); });
+
+// TEST_P(SerialFineProbeFullOuter, ProbeOneScan) { ProbeOneScan(); }
+// INSTANTIATE_TEST_SUITE_P(
+//     SerialFineProbeFullOuterCases, SerialFineProbeFullOuter,
+//     ::testing::ValuesIn(SerialProbeCases<SerialFineProbeFullOuter::JoinType>()),
+//     [](const auto& param_info) { return param_info.param.Name(param_info.index); });
+
 using SerialFineProbeRightOuter =
     SerialFineProbeRightFullOuter<arrow::acero::JoinType::RIGHT_OUTER>;
 using SerialFineProbeFullOuter =
     SerialFineProbeRightFullOuter<arrow::acero::JoinType::FULL_OUTER>;
 
-TEST_P(SerialFineProbeRightOuter, ProbeOneScan) { ProbeOneScan(); }
-INSTANTIATE_TEST_SUITE_P(
-    SerialFineProbeRightOuterCases, SerialFineProbeRightOuter,
-    ::testing::ValuesIn(SerialProbeCases<SerialFineProbeRightOuter::JoinType>()),
-    [](const auto& param_info) { return param_info.param.Name(param_info.index); });
+template <arrow::acero::JoinType join_type>
+class SerialFineProbeRightSemiAnti : public SerialProbe<join_type> {
+ public:
+  static const arrow::acero::JoinType JoinType = join_type;
 
-TEST_P(SerialFineProbeFullOuter, ProbeOneScan) { ProbeOneScan(); }
-INSTANTIATE_TEST_SUITE_P(
-    SerialFineProbeFullOuterCases, SerialFineProbeFullOuter,
-    ::testing::ValuesIn(SerialProbeCases<SerialFineProbeFullOuter::JoinType>()),
-    [](const auto& param_info) { return param_info.param.Name(param_info.index); });
+ protected:
+  void ProbeOneScan() {
+    this->Init();
+
+    auto l_batches =
+        HashJoinFixture::LeftBatches(this->join_case_.left_multiplicity_intra_,
+                                     this->join_case_.left_multiplicity_inter_);
+    auto r_batches =
+        HashJoinFixture::RightBatches(this->join_case_.right_multiplicity_intra_,
+                                      this->join_case_.right_multiplicity_inter_);
+    auto exp_batches =
+        HashJoinFixture::ExpBatches(this->join_case_.options_.join_type,
+                                    this->join_case_.left_multiplicity_intra_ *
+                                        this->join_case_.left_multiplicity_inter_,
+                                    this->join_case_.right_multiplicity_intra_ *
+                                        this->join_case_.right_multiplicity_inter_);
+
+    this->Build(r_batches);
+
+    for (size_t thread_id = 0; thread_id < this->join_case_.dop_; thread_id++) {
+      OperatorStatus status = OperatorStatus::Other(arrow::Status::UnknownError(""));
+
+      ASSERT_OK(this->Probe(thread_id, l_batches.batches[0], status));
+      ASSERT_EQ(status.code, OperatorStatusCode::HAS_OUTPUT);
+      ASSERT_FALSE(std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
+
+      ASSERT_OK(this->Drain(thread_id, status));
+      ASSERT_EQ(status.code, OperatorStatusCode::FINISHED);
+      ASSERT_FALSE(std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
+
+      this->StartScan();
+
+      std::vector<arrow::ExecBatch> output_batches;
+      for (size_t thread_id = 0; thread_id < this->join_case_.dop_; thread_id++) {
+        do {
+          ASSERT_OK(this->Scan(thread_id, status));
+          if (status.code == OperatorStatusCode::HAS_MORE_OUTPUT) {
+            auto scan_batch =
+                std::move(std::get<std::optional<arrow::ExecBatch>>(status.payload));
+            ASSERT_TRUE(scan_batch.has_value());
+            output_batches.push_back(std::move(scan_batch.value()));
+          } else if (status.code == OperatorStatusCode::FINISHED) {
+            auto scan_batch =
+                std::move(std::get<std::optional<arrow::ExecBatch>>(status.payload));
+            if (scan_batch.has_value()) {
+              output_batches.push_back(std::move(scan_batch.value()));
+            }
+          } else {
+            ASSERT_EQ(status.code, OperatorStatusCode::HAS_OUTPUT);
+            ASSERT_FALSE(
+                std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
+          }
+        } while (status.code != OperatorStatusCode::FINISHED);
+      }
+
+      AssertBatchesEqual(
+          arrow::acero::BatchesWithSchema{output_batches, this->OutputSchema()},
+          exp_batches);
+    }
+  }
+};
+
+using SerialFineProbeRightSemi =
+    SerialFineProbeRightSemiAnti<arrow::acero::JoinType::RIGHT_SEMI>;
+using SerialFineProbeRightAnti =
+    SerialFineProbeRightSemiAnti<arrow::acero::JoinType::RIGHT_ANTI>;
+
+// TEST_P(SerialFineProbeRightSemi, ProbeOneScan) { ProbeOneScan(); }
+// INSTANTIATE_TEST_SUITE_P(
+//     SerialFineProbeRightSemiCases, SerialFineProbeRightSemi,
+//     ::testing::ValuesIn(SerialProbeCases<SerialFineProbeRightSemi::JoinType>()),
+//     [](const auto& param_info) { return param_info.param.Name(param_info.index); });
+
+// TEST_P(SerialFineProbeRightAnti, ProbeOneScan) { ProbeOneScan(); }
+// INSTANTIATE_TEST_SUITE_P(
+//     SerialFineProbeRightAntiCases, SerialFineProbeRightAnti,
+//     ::testing::ValuesIn(SerialProbeCases<SerialFineProbeRightAnti::JoinType>()),
+//     [](const auto& param_info) { return param_info.param.Name(param_info.index); });
 
 // class TestTaskRunner {
 //   using Task = std::function<arrow::Status(size_t, int64_t)>;
