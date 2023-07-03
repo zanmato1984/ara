@@ -496,9 +496,7 @@ Status ProbeProcessor::InnerOuter(ThreadId thread_id, TempVectorStack* temp_stac
         }
       }
 
-      if (state_next != State::MINIBATCH_HAS_MORE) {
-        local_states_[thread_id].input->minibatch_start += minibatch_size_next;
-      }
+      local_states_[thread_id].input->minibatch_start += minibatch_size_next;
     }
   }
 

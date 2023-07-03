@@ -9,6 +9,8 @@
 
 using namespace arra::sketch;
 
+constexpr size_t kMaxBatchSize = 1 << 15;
+
 void AppendBatchesFromString(arrow::acero::BatchesWithSchema& out_batches,
                              const std::vector<std::string_view>& json_strings,
                              int multiplicity_intra, int multiplicity_inter) {
@@ -125,9 +127,9 @@ struct HashJoinFixture {
 
   static size_t ExpRowCount(arrow::acero::JoinType join_type, size_t multiplicity_left,
                             size_t multiplicity_right) {
-    constexpr size_t left_seed = 10, right_seed = 10, inner_seed = 5, left_outer_seed = 6,
-                     right_outer_seed = 6, left_semi_seed = 4, left_anti_seed = 6,
-                     right_semi_seed = 4, right_anti_seed = 6;
+    constexpr size_t inner_seed = 5, left_outer_seed = 6, right_outer_seed = 6,
+                     left_semi_seed = 4, left_anti_seed = 6, right_semi_seed = 4,
+                     right_anti_seed = 6;
     size_t inner_match = inner_seed * multiplicity_left * multiplicity_right;
     size_t left_outer_match = left_outer_seed * multiplicity_left;
     size_t right_outer_match = right_outer_seed * multiplicity_right;
@@ -811,24 +813,38 @@ class SerialFineProbeRightFullOuter : public SerialProbe<join_type> {
         ASSERT_FALSE(
             std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
       } else {
-        ASSERT_OK(this->Probe(thread_id, l_batches.batches[0], status));
-        ASSERT_EQ(status.code, OperatorStatusCode::HAS_MORE_OUTPUT);
-        auto probe_batch_first =
-            std::move(std::get<std::optional<arrow::ExecBatch>>(status.payload));
-        ASSERT_TRUE(probe_batch_first.has_value());
-        ASSERT_EQ(probe_batch_first.value().length, kMaxRowsPerBatch);
-        output_batches.push_back(std::move(probe_batch_first.value()));
+        size_t offset = 0, total_length = l_batches.batches[0].length;
+        do {
+          size_t slice_length = std::min(total_length - offset, kMaxBatchSize);
+          arrow::ExecBatch batch = l_batches.batches[0].Slice(offset, slice_length);
 
-        while (status.code == OperatorStatusCode::HAS_MORE_OUTPUT) {
-          ASSERT_OK(this->Probe(thread_id, std::nullopt, status));
-          if (status.code == OperatorStatusCode::HAS_MORE_OUTPUT) {
-            auto probe_batch =
+          ASSERT_OK(this->Probe(thread_id, batch, status));
+
+          if (status.code == OperatorStatusCode::HAS_OUTPUT) {
+            ASSERT_FALSE(
+                std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
+          } else {
+            ASSERT_EQ(status.code, OperatorStatusCode::HAS_MORE_OUTPUT);
+            auto probe_batch_first =
                 std::move(std::get<std::optional<arrow::ExecBatch>>(status.payload));
-            ASSERT_TRUE(probe_batch.has_value());
-            ASSERT_EQ(probe_batch.value().length, kMaxRowsPerBatch);
-            output_batches.push_back(std::move(probe_batch.value()));
+            ASSERT_TRUE(probe_batch_first.has_value());
+            ASSERT_EQ(probe_batch_first.value().length, kMaxRowsPerBatch);
+            output_batches.push_back(std::move(probe_batch_first.value()));
           }
-        }
+
+          while (status.code == OperatorStatusCode::HAS_MORE_OUTPUT) {
+            ASSERT_OK(this->Probe(thread_id, std::nullopt, status));
+            if (status.code == OperatorStatusCode::HAS_MORE_OUTPUT) {
+              auto probe_batch =
+                  std::move(std::get<std::optional<arrow::ExecBatch>>(status.payload));
+              ASSERT_TRUE(probe_batch.has_value());
+              ASSERT_EQ(probe_batch.value().length, kMaxRowsPerBatch);
+              output_batches.push_back(std::move(probe_batch.value()));
+            }
+          }
+
+          offset += slice_length;
+        } while (offset < total_length);
 
         ASSERT_OK(this->Drain(thread_id, status));
         ASSERT_EQ(status.code, OperatorStatusCode::FINISHED);
@@ -841,12 +857,17 @@ class SerialFineProbeRightFullOuter : public SerialProbe<join_type> {
       for (size_t thread_id = 0; thread_id < this->join_case_.dop_; thread_id++) {
         do {
           ASSERT_OK(this->Scan(thread_id, status));
-          if (status.code == OperatorStatusCode::HAS_MORE_OUTPUT ||
-              status.code == OperatorStatusCode::FINISHED) {
+          if (status.code == OperatorStatusCode::HAS_MORE_OUTPUT) {
             auto scan_batch =
                 std::move(std::get<std::optional<arrow::ExecBatch>>(status.payload));
             ASSERT_TRUE(scan_batch.has_value());
             output_batches.push_back(std::move(scan_batch.value()));
+          } else if (status.code == OperatorStatusCode::FINISHED) {
+            auto scan_batch =
+                std::move(std::get<std::optional<arrow::ExecBatch>>(status.payload));
+            if (scan_batch.has_value()) {
+              output_batches.push_back(std::move(scan_batch.value()));
+            }
           } else {
             ASSERT_EQ(status.code, OperatorStatusCode::HAS_OUTPUT);
             ASSERT_FALSE(
