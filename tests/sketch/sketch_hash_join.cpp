@@ -765,7 +765,7 @@ Status ScanProcessor::Scan(ThreadId thread_id, TempVectorStack* temp_stack,
       ARRA_SET_AND_RETURN_NOT_OK(
           local_states_[thread_id].materialize->AppendBuildOnly(
               num_output_rows, key_ids_buf.mutable_data() + rows_appended,
-              key_ids_buf.mutable_data() + rows_appended, &ignored),
+              payload_ids_buf.mutable_data() + rows_appended, &ignored),
           { status = OperatorStatus::Other(__s); });
     }
 
