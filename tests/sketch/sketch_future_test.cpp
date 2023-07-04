@@ -1,4 +1,5 @@
 #include <arrow/api.h>
+#include <arrow/testing/gtest_util.h>
 #include <arrow/util/future.h>
 #include <arrow/util/logging.h>
 #include <arrow/util/thread_pool.h>
@@ -110,6 +111,113 @@ TEST(FollyFutureTest, ParallelSpawn) {
   folly::collectAll(futures).wait();
 
   std::cout << "thread count: " << tid_set.size() << std::endl;
+}
+
+enum class OperatorStatusCode { INIT, MORE, FINISHED, OTHER };
+
+struct OperatorOutput {
+  int output = -1;
+};
+
+struct OperatorStatus {
+  OperatorStatusCode code;
+  std::variant<OperatorOutput, arrow::Status> payload;
+
+  static OperatorStatus Init() { return OperatorStatus{OperatorStatusCode::INIT, {}}; }
+  static OperatorStatus More(int output) {
+    return OperatorStatus{OperatorStatusCode::MORE, OperatorOutput{output}};
+  }
+  static OperatorStatus Finished(int output) {
+    return OperatorStatus{OperatorStatusCode::FINISHED, OperatorOutput{output}};
+  }
+  static OperatorStatus Other(arrow::Status status) {
+    return OperatorStatus{OperatorStatusCode::OTHER, std::move(status)};
+  }
+};
+
+struct Operator {
+  Operator() = default;
+
+  Operator(size_t id, int num_rounds, int sleep_ms)
+      : id(id),
+        current_output(0),
+        num_rounds(num_rounds),
+        sleep_ms(sleep_ms),
+        round_to_error(num_rounds + 1),
+        error(arrow::Status::OK()) {}
+
+  Operator(size_t id, int num_rounds, int sleep_ms, int round_to_error,
+           arrow::Status error)
+      : id(id),
+        current_output(0),
+        num_rounds(num_rounds),
+        sleep_ms(sleep_ms),
+        round_to_error(round_to_error),
+        error(std::move(error)) {}
+
+  arrow::Status Run(OperatorStatus& status) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+
+    if (current_output >= num_rounds) {
+      status = OperatorStatus::Finished(current_output++);
+      return arrow::Status::OK();
+    }
+    if (current_output == round_to_error) {
+      status = OperatorStatus::Other(error);
+      return error;
+    }
+    status = OperatorStatus::More(current_output++);
+    return arrow::Status::OK();
+  }
+
+ private:
+  size_t id;
+  int current_output;
+  int num_rounds;
+  int sleep_ms;
+  int round_to_error;
+  arrow::Status error;
+};
+
+folly::SemiFuture<folly::Unit> OperatorTask(Operator& op, OperatorStatus& status) {
+  auto pred = [&]() {
+    return status.code == OperatorStatusCode::INIT ||
+           status.code == OperatorStatusCode::MORE;
+  };
+  auto thunk = [&]() {
+    // auto p = std::make_shared<folly::Promise<folly::Unit>>();
+    std::ignore = op.Run(status);
+    return folly::makeSemiFuture();
+  };
+  return folly::whileDo(pred, thunk);
+}
+
+TEST(FollyFutureTest, WhileDoFinish) {
+  constexpr size_t dop = 32;
+  constexpr int num_rounds = 42;
+  Operator op[dop];
+  OperatorStatus status[dop];
+  for (size_t i = 0; i < dop; ++i) {
+    op[i] = Operator(i, num_rounds, 50);
+    status[i] = OperatorStatus::Init();
+  }
+  folly::CPUThreadPoolExecutor e(4);
+  std::unordered_set<std::thread::id> tid_set;
+
+  std::vector<folly::Future<folly::Unit>> futures;
+  for (size_t i = 0; i < dop; ++i) {
+    futures.push_back(OperatorTask(op[i], status[i]).via(&e).thenValue([&](folly::Unit) {
+      tid_set.insert(std::this_thread::get_id());
+      return folly::Unit{};
+    }));
+  }
+  folly::collectAll(futures).wait();
+  std::cout << "thread count: " << tid_set.size() << std::endl;
+
+  for (size_t i = 0; i < dop; ++i) {
+    ASSERT_EQ(status[i].code, OperatorStatusCode::FINISHED);
+    ASSERT_EQ(std::get<OperatorOutput>(status[i].payload).output, num_rounds);
+  }
 }
 
 TEST(ArrowFutureTest, AllCompleteThen) {
