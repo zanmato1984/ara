@@ -49,18 +49,18 @@ struct OperatorStatus {
   }
 };
 
-using TaskGroupId = size_t;
 using TaskId = size_t;
 using ThreadId = size_t;
 
 using Task = std::function<arrow::Status(TaskId, OperatorStatus&)>;
-using TaskCont = std::function<arrow::Status(TaskId)>;
+using TaskCont = std::function<arrow::Status()>;
 using TaskGroup = std::tuple<Task, size_t, std::optional<TaskCont>>;
 using TaskGroups = std::vector<TaskGroup>;
 
 using PipelineTaskSource = std::function<arrow::Status(ThreadId, OperatorStatus&)>;
 using PipelineTaskPipe = std::function<arrow::Status(
     ThreadId, std::optional<arrow::ExecBatch>, OperatorStatus&)>;
+using PipelineTaskSink = std::function<arrow::Status(ThreadId, OperatorStatus&)>;
 
 constexpr size_t kMaxRowsPerBatch = 4096;
 
@@ -231,14 +231,38 @@ class ScanProcessor {
   std::vector<ThreadLocalState> local_states_;
 };
 
+class HashJoinBuildSink {
+ public:
+  Status Init(QueryContext* ctx, size_t dop, int64_t hardware_flags, MemoryPool* pool,
+              const HashJoinProjectionMaps* schema, JoinType join_type,
+              SwissTableForJoinBuild* hash_table_build, SwissTableForJoin* hash_table,
+              const std::vector<JoinResultMaterialize*>& materialize);
+
+  PipelineTaskPipe BuildSinkPipe();
+
+  TaskGroups BuildSinkFrontend();
+
+  TaskGroups BuildSinkBackend();
+
+ private:
+  QueryContext* ctx_;
+  size_t dop_;
+  SwissTableForJoinBuild* hash_table_build_;
+  std::mutex build_side_mutex_;
+  AccumulationQueue build_side_batches_;
+  BuildProcessor build_processor_;
+};
+
 class HashJoinScanSource {
  public:
   Status Init(QueryContext* ctx, JoinType join_type, SwissTableForJoin* hash_table,
               const std::vector<JoinResultMaterialize*>& materializ);
 
-  TaskGroups ScanSourceBackend();
+  PipelineTaskSource ScanSourceSource();
 
-  std::pair<TaskGroups, PipelineTaskSource> ScanSourceFrontend();
+  TaskGroups ScanSourceFrontend();
+
+  TaskGroups ScanSourceBackend();
 
  private:
   QueryContext* ctx_;
@@ -253,17 +277,13 @@ class HashJoin {
 
   std::shared_ptr<Schema> OutputSchema() const;
 
-  PipelineTaskPipe BuildPipe();
-
-  PipelineTaskPipe BuildDrain();
-
-  TaskGroups BuildBreak();
+  std::unique_ptr<HashJoinBuildSink> BuildSink();
 
   PipelineTaskPipe ProbePipe();
 
   PipelineTaskPipe ProbeDrain();
 
-  std::optional<HashJoinScanSource> ScanSource();
+  std::unique_ptr<HashJoinScanSource> ScanSource();
 
  private:
   QueryContext* ctx_;
@@ -284,13 +304,10 @@ class HashJoin {
   };
   std::vector<ThreadLocalState> local_states_;
 
-  BuildProcessor build_processor_;
   ProbeProcessor probe_processor_;
 
   SwissTableForJoin hash_table_;
   SwissTableForJoinBuild hash_table_build_;
-  std::mutex build_side_mutex_;
-  AccumulationQueue build_side_batches_;
 };
 
 }  // namespace detail

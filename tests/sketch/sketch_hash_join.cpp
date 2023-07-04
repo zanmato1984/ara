@@ -822,9 +822,6 @@ Status HashJoin::Init(QueryContext* ctx, size_t dop, const HashJoinNodeOptions& 
   for (int i = 0; i < dop_; ++i) {
     materialize[i] = &local_states_[i].materialize;
   }
-  ARRA_RETURN_NOT_OK(build_processor_.Init(hardware_flags_, pool_, schema_[1], join_type_,
-                                           &hash_table_build_, &hash_table_,
-                                           &build_side_batches_, materialize));
   ARRA_RETURN_NOT_OK(probe_processor_.Init(
       hardware_flags_, pool_, schema_[0]->num_cols(HashJoinProjection::KEY), schema_[0],
       join_type_, &key_cmp_, &hash_table_, materialize));
@@ -834,55 +831,17 @@ Status HashJoin::Init(QueryContext* ctx, size_t dop, const HashJoinNodeOptions& 
 
 std::shared_ptr<Schema> HashJoin::OutputSchema() const { return output_schema_; }
 
-PipelineTaskPipe HashJoin::BuildPipe() {
-  return [&](ThreadId thread_id, std::optional<arrow::ExecBatch> input,
-             OperatorStatus& status) {
-    status = OperatorStatus::HasOutput(std::nullopt);
-    if (!input.has_value()) {
-      return Status::OK();
-    }
-    std::lock_guard<std::mutex> guard(build_side_mutex_);
-    build_side_batches_.InsertBatch(std::move(input.value()));
-    return Status::OK();
-  };
-}
-
-PipelineTaskPipe HashJoin::BuildDrain() {
-  return [&](ThreadId thread_id, std::optional<arrow::ExecBatch> input,
-             OperatorStatus& status) {
-    status = OperatorStatus::Finished(std::nullopt);
-    return Status::OK();
-  };
-}
-
-TaskGroups HashJoin::BuildBreak() {
-  ARRA_DCHECK_OK(build_processor_.StartBuild());
-
-  auto build_task = [&](TaskId task_id, OperatorStatus& status) {
-    ARROW_ASSIGN_OR_RAISE(TempVectorStack * temp_stack, ctx_->GetTempStack(task_id));
-    return build_processor_.Build(task_id, temp_stack, status);
-  };
-  auto build_task_cont = [&](TaskId) {
-    ARRA_RETURN_NOT_OK(build_processor_.FinishBuild());
-    return build_processor_.StartMerge();
-  };
-
-  auto merge_task = [&](TaskId task_id, OperatorStatus& status) {
-    ARROW_ASSIGN_OR_RAISE(TempVectorStack * temp_stack, ctx_->GetTempStack(task_id));
-    return build_processor_.Merge(task_id, temp_stack, status);
-  };
-  auto num_merge_tasks = hash_table_build_.num_prtns();
-
-  auto finish_merge_task = [&](TaskId task_id, OperatorStatus& status) {
-    ARROW_ASSIGN_OR_RAISE(TempVectorStack * temp_stack, ctx_->GetTempStack(task_id));
-    return build_processor_.FinishMerge(temp_stack);
-  };
-
-  return {
-      {std::move(build_task), dop_, std::move(build_task_cont)},
-      {std::move(merge_task), num_merge_tasks, std::nullopt},
-      {std::move(finish_merge_task), 1, std::nullopt},
-  };
+std::unique_ptr<HashJoinBuildSink> HashJoin::BuildSink() {
+  std::vector<JoinResultMaterialize*> materialize;
+  materialize.resize(dop_);
+  for (int i = 0; i < dop_; ++i) {
+    materialize[i] = &local_states_[i].materialize;
+  }
+  std::unique_ptr<HashJoinBuildSink> build_sink = std::make_unique<HashJoinBuildSink>();
+  ARRA_DCHECK_OK(build_sink->Init(ctx_, dop_, hardware_flags_, pool_, schema_[1],
+                                  join_type_, &hash_table_build_, &hash_table_,
+                                  materialize));
+  return build_sink;
 }
 
 PipelineTaskPipe HashJoin::ProbePipe() {
@@ -902,12 +861,12 @@ PipelineTaskPipe HashJoin::ProbeDrain() {
       };
 }
 
-std::optional<HashJoinScanSource> HashJoin::ScanSource() {
+std::unique_ptr<HashJoinScanSource> HashJoin::ScanSource() {
   if (!NeedToScan(join_type_)) {
-    return std::nullopt;
+    return nullptr;
   }
-  std::optional<HashJoinScanSource> scan_source;
-  scan_source.emplace();
+  std::unique_ptr<HashJoinScanSource> scan_source =
+      std::make_unique<HashJoinScanSource>();
   std::vector<JoinResultMaterialize*> materialize;
   materialize.resize(dop_);
   for (int i = 0; i < dop_; ++i) {
@@ -917,6 +876,64 @@ std::optional<HashJoinScanSource> HashJoin::ScanSource() {
   return scan_source;
 }
 
+Status HashJoinBuildSink::Init(QueryContext* ctx, size_t dop, int64_t hardware_flags,
+                               MemoryPool* pool, const HashJoinProjectionMaps* schema,
+                               JoinType join_type,
+                               SwissTableForJoinBuild* hash_table_build,
+                               SwissTableForJoin* hash_table,
+                               const std::vector<JoinResultMaterialize*>& materialize) {
+  ctx_ = ctx;
+  dop_ = dop;
+  hash_table_build_ = hash_table_build;
+  return build_processor_.Init(hardware_flags, pool, schema, join_type, hash_table_build,
+                               hash_table, &build_side_batches_, materialize);
+}
+
+PipelineTaskPipe HashJoinBuildSink::BuildSinkPipe() {
+  return [&](ThreadId thread_id, std::optional<arrow::ExecBatch> input,
+             OperatorStatus& status) {
+    status = OperatorStatus::HasOutput(std::nullopt);
+    if (!input.has_value()) {
+      return Status::OK();
+    }
+    std::lock_guard<std::mutex> guard(build_side_mutex_);
+    build_side_batches_.InsertBatch(std::move(input.value()));
+    return Status::OK();
+  };
+}
+
+TaskGroups HashJoinBuildSink::BuildSinkFrontend() {
+  ARRA_DCHECK_OK(build_processor_.StartBuild());
+
+  auto build_task = [&](TaskId task_id, OperatorStatus& status) {
+    ARROW_ASSIGN_OR_RAISE(TempVectorStack * temp_stack, ctx_->GetTempStack(task_id));
+    return build_processor_.Build(task_id, temp_stack, status);
+  };
+  auto build_task_cont = [&]() {
+    ARRA_RETURN_NOT_OK(build_processor_.FinishBuild());
+    return build_processor_.StartMerge();
+  };
+
+  auto merge_task = [&](TaskId task_id, OperatorStatus& status) {
+    ARROW_ASSIGN_OR_RAISE(TempVectorStack * temp_stack, ctx_->GetTempStack(task_id));
+    return build_processor_.Merge(task_id, temp_stack, status);
+  };
+  auto num_merge_tasks = hash_table_build_->num_prtns();
+
+  auto finish_merge_task = [&](TaskId task_id, OperatorStatus& status) {
+    ARROW_ASSIGN_OR_RAISE(TempVectorStack * temp_stack, ctx_->GetTempStack(task_id));
+    return build_processor_.FinishMerge(temp_stack);
+  };
+
+  return {
+      {std::move(build_task), dop_, std::move(build_task_cont)},
+      {std::move(merge_task), num_merge_tasks, std::nullopt},
+      {std::move(finish_merge_task), 1, std::nullopt},
+  };
+}
+
+TaskGroups HashJoinBuildSink::BuildSinkBackend() { return {}; }
+
 Status HashJoinScanSource::Init(QueryContext* ctx, JoinType join_type,
                                 SwissTableForJoin* hash_table,
                                 const std::vector<JoinResultMaterialize*>& materializ) {
@@ -925,21 +942,22 @@ Status HashJoinScanSource::Init(QueryContext* ctx, JoinType join_type,
   return scan_processor_.Init(join_type, hash_table, materializ);
 }
 
-TaskGroups HashJoinScanSource::ScanSourceBackend() { return {}; }
+PipelineTaskSource HashJoinScanSource::ScanSourceSource() {
+  return [&](ThreadId thread_id, OperatorStatus& status) {
+    ARROW_ASSIGN_OR_RAISE(TempVectorStack * temp_stack, ctx_->GetTempStack(thread_id));
+    return scan_processor_.Scan(thread_id, temp_stack, status);
+  };
+}
 
-std::pair<TaskGroups, PipelineTaskSource> HashJoinScanSource::ScanSourceFrontend() {
+TaskGroups HashJoinScanSource::ScanSourceFrontend() {
   auto start_scan_task = [&](TaskId, OperatorStatus& status) {
     status = OperatorStatus::Finished(std::nullopt);
     return scan_processor_.StartScan();
   };
-  TaskGroups start_scan_task_groups{{std::move(start_scan_task), 1, std::nullopt}};
 
-  auto scan_source = [&](ThreadId thread_id, OperatorStatus& status) {
-    ARROW_ASSIGN_OR_RAISE(TempVectorStack * temp_stack, ctx_->GetTempStack(thread_id));
-    return scan_processor_.Scan(thread_id, temp_stack, status);
-  };
-
-  return {std::move(start_scan_task_groups), std::move(scan_source)};
+  return {{std::move(start_scan_task), 1, std::nullopt}};
 }
+
+TaskGroups HashJoinScanSource::ScanSourceBackend() { return {}; }
 
 }  // namespace arra::sketch::detail
