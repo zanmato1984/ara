@@ -185,9 +185,9 @@ folly::SemiFuture<folly::Unit> OperatorTask(Operator& op, OperatorStatus& status
            status.code == OperatorStatusCode::MORE;
   };
   auto thunk = [&]() {
-    // auto p = std::make_shared<folly::Promise<folly::Unit>>();
-    std::ignore = op.Run(status);
-    return folly::makeSemiFuture();
+    // std::ignore = op.Run(status);
+    // return folly::makeSemiFuture();
+    return folly::makeSemiFutureWith([&]() { std::ignore = op.Run(status); });
   };
   return folly::whileDo(pred, thunk);
 }
