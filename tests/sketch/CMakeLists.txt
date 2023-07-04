@@ -30,10 +30,6 @@ set(SKETCH_FUTURE_TEST_SRC
         "${CMAKE_CURRENT_SOURCE_DIR}/sketch_future_test.cpp")
 configure_test(sketch_future_test "${SKETCH_FUTURE_TEST_SRC}")
 
-set(SKETCH_HASH_JOIN_SRC
-        "${CMAKE_CURRENT_SOURCE_DIR}/sketch_hash_join.cpp")
-configure_test(sketch_hash_join "${SKETCH_HASH_JOIN_SRC}")
-
 set(SKETCH_HASH_JOIN_TEST_SRC
         "${CMAKE_CURRENT_SOURCE_DIR}/sketch_hash_join.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/sketch_hash_join_test.cpp")
