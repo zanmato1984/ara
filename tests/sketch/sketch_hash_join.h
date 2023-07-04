@@ -53,15 +53,6 @@ using TaskGroupId = size_t;
 using TaskId = size_t;
 using ThreadId = size_t;
 
-enum class ResourcePreference {
-  CPU = 0,
-  MEMORY = 1,
-  IO = 2,
-  DISK = 3,
-  NETWORK = 4,
-  GPU = 5,
-};
-
 using Task = std::function<arrow::Status(TaskId, OperatorStatus&)>;
 using TaskCont = std::function<arrow::Status(TaskId)>;
 using TaskGroup = std::tuple<Task, size_t, std::optional<TaskCont>>;
