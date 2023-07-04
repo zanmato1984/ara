@@ -854,7 +854,7 @@ PipelineTaskPipe HashJoin::ProbePipe() {
   };
 }
 
-PipelineTaskPipe HashJoin::ProbeDrain() {
+std::optional<PipelineTaskPipe> HashJoin::ProbeDrain() {
   return
       [&](ThreadId thread_id, std::optional<arrow::ExecBatch>, OperatorStatus& status) {
         return probe_processor_.Drain(thread_id, status);
@@ -889,7 +889,7 @@ Status HashJoinBuildSink::Init(QueryContext* ctx, size_t dop, int64_t hardware_f
                                hash_table, &build_side_batches_, materialize);
 }
 
-PipelineTaskPipe HashJoinBuildSink::BuildSinkPipe() {
+PipelineTaskPipe HashJoinBuildSink::Pipe() {
   return [&](ThreadId thread_id, std::optional<arrow::ExecBatch> input,
              OperatorStatus& status) {
     status = OperatorStatus::HasOutput(std::nullopt);
@@ -902,7 +902,7 @@ PipelineTaskPipe HashJoinBuildSink::BuildSinkPipe() {
   };
 }
 
-TaskGroups HashJoinBuildSink::BuildSinkFrontend() {
+TaskGroups HashJoinBuildSink::Frontend() {
   ARRA_DCHECK_OK(build_processor_.StartBuild());
 
   auto build_task = [&](TaskId task_id, OperatorStatus& status) {
@@ -932,7 +932,7 @@ TaskGroups HashJoinBuildSink::BuildSinkFrontend() {
   };
 }
 
-TaskGroups HashJoinBuildSink::BuildSinkBackend() { return {}; }
+TaskGroups HashJoinBuildSink::Backend() { return {}; }
 
 Status HashJoinScanSource::Init(QueryContext* ctx, JoinType join_type,
                                 SwissTableForJoin* hash_table,
@@ -942,14 +942,14 @@ Status HashJoinScanSource::Init(QueryContext* ctx, JoinType join_type,
   return scan_processor_.Init(join_type, hash_table, materializ);
 }
 
-PipelineTaskSource HashJoinScanSource::ScanSourceSource() {
+PipelineTaskSource HashJoinScanSource::Source() {
   return [&](ThreadId thread_id, OperatorStatus& status) {
     ARROW_ASSIGN_OR_RAISE(TempVectorStack * temp_stack, ctx_->GetTempStack(thread_id));
     return scan_processor_.Scan(thread_id, temp_stack, status);
   };
 }
 
-TaskGroups HashJoinScanSource::ScanSourceFrontend() {
+TaskGroups HashJoinScanSource::Frontend() {
   auto start_scan_task = [&](TaskId, OperatorStatus& status) {
     status = OperatorStatus::Finished(std::nullopt);
     return scan_processor_.StartScan();
@@ -958,6 +958,6 @@ TaskGroups HashJoinScanSource::ScanSourceFrontend() {
   return {{std::move(start_scan_task), 1, std::nullopt}};
 }
 
-TaskGroups HashJoinScanSource::ScanSourceBackend() { return {}; }
+TaskGroups HashJoinScanSource::Backend() { return {}; }
 
 }  // namespace arra::sketch::detail

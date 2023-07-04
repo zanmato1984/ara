@@ -60,7 +60,6 @@ using TaskGroups = std::vector<TaskGroup>;
 using PipelineTaskSource = std::function<arrow::Status(ThreadId, OperatorStatus&)>;
 using PipelineTaskPipe = std::function<arrow::Status(
     ThreadId, std::optional<arrow::ExecBatch>, OperatorStatus&)>;
-using PipelineTaskSink = std::function<arrow::Status(ThreadId, OperatorStatus&)>;
 
 constexpr size_t kMaxRowsPerBatch = 4096;
 
@@ -238,11 +237,11 @@ class HashJoinBuildSink {
               SwissTableForJoinBuild* hash_table_build, SwissTableForJoin* hash_table,
               const std::vector<JoinResultMaterialize*>& materialize);
 
-  PipelineTaskPipe BuildSinkPipe();
+  PipelineTaskPipe Pipe();
 
-  TaskGroups BuildSinkFrontend();
+  TaskGroups Frontend();
 
-  TaskGroups BuildSinkBackend();
+  TaskGroups Backend();
 
  private:
   QueryContext* ctx_;
@@ -258,11 +257,11 @@ class HashJoinScanSource {
   Status Init(QueryContext* ctx, JoinType join_type, SwissTableForJoin* hash_table,
               const std::vector<JoinResultMaterialize*>& materializ);
 
-  PipelineTaskSource ScanSourceSource();
+  PipelineTaskSource Source();
 
-  TaskGroups ScanSourceFrontend();
+  TaskGroups Frontend();
 
-  TaskGroups ScanSourceBackend();
+  TaskGroups Backend();
 
  private:
   QueryContext* ctx_;
@@ -281,7 +280,7 @@ class HashJoin {
 
   PipelineTaskPipe ProbePipe();
 
-  PipelineTaskPipe ProbeDrain();
+  std::optional<PipelineTaskPipe> ProbeDrain();
 
   std::unique_ptr<HashJoinScanSource> ScanSource();
 
@@ -312,7 +311,8 @@ class HashJoin {
 
 }  // namespace detail
 
-using HashJoinScanSource = detail::HashJoinScanSource;
 using HashJoin = detail::HashJoin;
+using HashJoinBuildSink = detail::HashJoinBuildSink;
+using HashJoinScanSource = detail::HashJoinScanSource;
 
 }  // namespace arra::sketch

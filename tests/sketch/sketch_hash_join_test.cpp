@@ -275,7 +275,7 @@ class TestHashJoinSerial : public testing::Test {
   void Build(const arrow::acero::BatchesWithSchema& build_batches) {
     auto build_sink = hash_join_.BuildSink();
 
-    auto build_pipe = build_sink->BuildSinkPipe();
+    auto build_pipe = build_sink->Pipe();
     for (int i = 0; i < build_batches.batches.size(); ++i) {
       OperatorStatus status;
       ASSERT_TRUE(
@@ -285,7 +285,7 @@ class TestHashJoinSerial : public testing::Test {
       ASSERT_FALSE(std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
     }
 
-    auto build_break = build_sink->BuildSinkFrontend();
+    auto build_break = build_sink->Frontend();
     RunTaskGroups(build_break);
   }
 
@@ -297,20 +297,20 @@ class TestHashJoinSerial : public testing::Test {
 
   arrow::Status Drain(ThreadId thread_id, OperatorStatus& status) {
     auto probe_drain = hash_join_.ProbeDrain();
-    return probe_drain(thread_id, std::nullopt, status);
+    return probe_drain.value()(thread_id, std::nullopt, status);
   }
 
   void StartScan() {
     scan_source_ = hash_join_.ScanSource();
     ASSERT_NE(scan_source_, nullptr);
-    ASSERT_TRUE(scan_source_->ScanSourceBackend().empty());
-    auto scan_groups = scan_source_->ScanSourceFrontend();
+    ASSERT_TRUE(scan_source_->Backend().empty());
+    auto scan_groups = scan_source_->Frontend();
     ASSERT_EQ(scan_groups.size(), 1);
     RunTaskGroup(scan_groups[0]);
   }
 
   arrow::Status Scan(ThreadId thread_id, OperatorStatus& status) {
-    auto scan = scan_source_->ScanSourceSource();
+    auto scan = scan_source_->Source();
     return scan(thread_id, status);
   }
 
@@ -978,90 +978,116 @@ using SerialFineProbeRightAnti =
 //     ::testing::ValuesIn(SerialProbeCases<SerialFineProbeRightAnti::JoinType>()),
 //     [](const auto& param_info) { return param_info.param.Name(param_info.index); });
 
-#if 0
-class Pipeline {
+class PipelineTask {
  public:
-  Pipeline(size_t dop, const PipelineTaskSource source, const PipelineTaskPipe& pipe,
-           const PipelineTaskPipe& drain, const PipelineTaskSink& sink)
-      : dop_(dop), source_(source), pipe_(pipe), drain_(drain), sink_(sink) {}
-
-  arrow::Status PipelineTask(ThreadId thread_id, OperatorStatus& status) {
-    OperatorStatus status_next;
-    if (local_states_[thread_id].pipe_has_more.has_value()) {
-      ARRA_RETURN_NOT_OK(
-          local_states_[thread_id].value()(thread_id, std::nullopt, status_next));
-      if (status.code != OperatorStatusCode::HAS_MORE_OUTPUT) {
-        local_states_[thread_id].pipe_has_more.reset();
+  PipelineTask(
+      size_t dop, const PipelineTaskSource source,
+      const std::vector<std::pair<PipelineTaskPipe, std::optional<PipelineTaskPipe>>>&
+          pipes)
+      : dop_(dop), source_(source), pipes_(pipes), local_states_(dop) {
+    std::vector<size_t> drains;
+    for (size_t i = 0; i < dop; ++i) {
+      if (pipes_[i].second.has_value()) {
+        drains.push_back(i);
       }
-      status = status_next;
+    }
+    for (size_t i = 0; i < dop; ++i) {
+      local_states_[i].drains = drains;
+    }
+  }
+
+  arrow::Status Run(ThreadId thread_id, OperatorStatus& status) {
+    if (!local_states_[thread_id].pipe_stack.empty()) {
+      auto pipe_id = local_states_[thread_id].pipe_stack.top();
+      local_states_[thread_id].pipe_stack.pop();
+      return Pipe(thread_id, status, pipe_id, std::nullopt);
+    }
+
+    if (!local_states_[thread_id].source_done) {
+      ARRA_RETURN_NOT_OK(source_(thread_id, status));
+      auto& output = std::get<std::optional<arrow::ExecBatch>>(status.payload);
+      if (status.code == OperatorStatusCode::FINISHED && !output.has_value()) {
+        if (!output.has_value()) {
+          return arrow::Status::OK();
+        }
+        local_states_[thread_id].source_done = true;
+      }
+      return Pipe(thread_id, status, 0, std::move(output));
+    }
+
+    if (local_states_[thread_id].draining >= local_states_[thread_id].drains.size()) {
+      status = OperatorStatus::Finished(std::nullopt);
       return arrow::Status::OK();
     }
 
-    if (local_states_[thread_id].source_done) {
+    for (; local_states_[thread_id].draining < local_states_[thread_id].drains.size();
+         ++local_states_[thread_id].draining) {
+      auto drain_id = local_states_[thread_id].drains[local_states_[thread_id].draining];
+      ARRA_RETURN_NOT_OK(
+          pipes_[drain_id].second.value()(thread_id, std::nullopt, status));
+      auto& output = std::get<std::optional<arrow::ExecBatch>>(status.payload);
+      return Pipe(thread_id, status, drain_id + 1, std::move(output));
     }
-    ARRA_RETURN_NOT_OK(source_(thread_id, status));
+
+    status = OperatorStatus::Finished(std::nullopt);
+    return arrow::Status::OK();
   }
 
  private:
-  arrow::Status PipeOne(ThreadId thread_id, OperatorStatus& status) {
-    if (local_states_[thread_id].pipe_has_more.has_value()) {
-      ARRA_RETURN_NOT_OK(
-          local_states_[thread_id].value()(thread_id, std::nullopt, status));
-      if (status.code != OperatorStatusCode::HAS_MORE_OUTPUT) {
-        local_states_[thread_id].pipe_has_more.reset();
+  arrow::Status Pipe(ThreadId thread_id, OperatorStatus& status, size_t pipe_id,
+                     std::optional<arrow::ExecBatch> input) {
+    for (size_t i = pipe_id; i < pipes_.size(); i++) {
+      ARRA_RETURN_NOT_OK(pipes_[i].first(thread_id, std::move(input), status));
+      if (status.code == OperatorStatusCode::HAS_MORE_OUTPUT) {
+        local_states_[thread_id].pipe_stack.push(i);
       }
-      return arrow::Status::OK();
+      input = std::move(std::get<std::optional<arrow::ExecBatch>>(status.payload));
+      if (!input.has_value()) {
+        break;
+      }
     }
-
-    if (local_states_[thread_id].source_done) {
-    }
-    ARRA_RETURN_NOT_OK(source_(thread_id, status));
+    return arrow::Status::OK();
   }
 
  private:
   size_t dop_;
   PipelineTaskSource source_;
-  PipelineTaskPipe pipe_;
-  PipelineTaskPipe drain_;
-  PipelineTaskSink sink_;
+  std::vector<std::pair<PipelineTaskPipe, std::optional<PipelineTaskPipe>>> pipes_;
 
   struct ThreadLocalState {
-    std::optional<PipelineTaskPipe> pipe_has_more;
-    bool source_done;
+    std::stack<size_t> pipe_stack;
+    bool source_done = false;
+    std::vector<size_t> drains;
+    size_t draining = 0;
   };
   std::vector<ThreadLocalState> local_states_;
 };
 
 class FollyFutureTaskRunner {
  public:
-  using RunnerTask = folly::SemiFuture<arrow::Status>;
+  using RunnerTask = folly::SemiFuture<OperatorStatus>;
   using RunnerTaskCont = folly::SemiFuture<arrow::Status>;
   using RunnerTaskGroup =
       std::tuple<std::vector<RunnerTask>, size_t, std::optional<RunnerTaskCont>>;
   using RunnerTaskGroups = std::vector<RunnerTaskGroup>;
 
-  static RunnerTask CompilePipeline(const PipelineTaskSource source,
-                                    const PipelineTaskPipe& pipe,
-                                    const PipelineTaskSink& sink, TaskId task_id,
-                                    OperatorStatus& status) {
-    auto pipeline = [&]() { ARRA_RETURN_NOT_OK(source(task_id, status)); };
-  }
-
-  static RunnerTask CompileTask(const Task& task, TaskId task_id,
-                                OperatorStatus& status) {
-    return folly::makeSemiFutureWith([&]() { return task(task_id, status); });
+  static RunnerTask CompileTask(const Task& task, TaskId task_id) {
+    return folly::makeSemiFutureWith([&]() {
+      OperatorStatus status;
+      ARRA_DCHECK_OK(task(task_id, status));
+      return status;
+    });
   }
 
   static RunnerTaskCont CompileTaskCont(const TaskCont& cont) {
     return folly::makeSemiFutureWith(cont);
   }
 
-  static RunnerTaskGroup CompileTaskGroup(const TaskGroup& group,
-                                          std::vector<OperatorStatus>& status) {
+  static RunnerTaskGroup CompileTaskGroup(const TaskGroup& group) {
     auto size = std::get<1>(group);
     std::vector<RunnerTask> tasks;
     for (size_t i = 0; i < size; i++) {
-      tasks.emplace_back(CompileTask(std::get<0>(group), i, status[i]));
+      tasks.emplace_back(CompileTask(std::get<0>(group), i));
     }
     std::optional<RunnerTaskCont> runner_cont = std::nullopt;
     if (auto cont = std::get<2>(group); cont.has_value()) {
@@ -1070,20 +1096,53 @@ class FollyFutureTaskRunner {
     return RunnerTaskGroup{std::move(tasks), size, std::move(runner_cont)};
   }
 
-  static RunnerTaskGroups CompileTaskGroup(
-      const TaskGroups& groups, std::vector<std::vector<OperatorStatus>>& status) {
+  static RunnerTaskGroups CompileTaskGroups(const TaskGroups& groups) {
     std::vector<RunnerTaskGroup> runner_groups;
     for (size_t i = 0; i < groups.size(); ++i) {
-      runner_groups.emplace_back(CompileTaskGroup(groups[i], status[i]));
+      runner_groups.emplace_back(CompileTaskGroup(groups[i]));
     }
     return runner_groups;
   }
 
   FollyFutureTaskRunner(size_t num_threads) : executor_(num_threads) {}
 
-  void RunTask(RunnerTask& task) { std::move(task).via(&executor_).wait(); }
+  void RunTask(RunnerTask& task) {
+    OperatorStatus status = OperatorStatus::HasOutput(std::nullopt);
+    auto pred = [&]() {
+      return status.code != OperatorStatusCode::FINISHED ||
+             status.code == OperatorStatusCode::OTHER;
+    };
+    auto thunk = [&]() {
+      return std::move(task).via(&executor_).thenValue([&](OperatorStatus s) {
+        status = s;
+      });
+    };
+    folly::whileDo(pred, thunk).wait();
+  }
+
+  void RunTasks(RunnerTask& task) { std::move(task).via(&executor_).wait(); }
+
+  void RunTasks(std::vector<RunnerTask>& tasks) {
+    std::vector<OperatorStatus> status;
+    for (size_t i = 0; i < tasks.size(); ++i) {
+      status.emplace_back(OperatorStatus::HasOutput(std::nullopt));
+    }
+    std::vector<folly::Future<folly::Unit>> futures;
+    for (size_t i = 0; i < tasks.size(); ++i) {
+      auto pred = [&]() {
+        return status[i].code != OperatorStatusCode::FINISHED ||
+               status[i].code == OperatorStatusCode::OTHER;
+      };
+      auto thunk = [&]() {
+        return std::move(tasks[i]).via(&executor_).thenValue([&](OperatorStatus s) {
+          status[i] = s;
+        });
+      };
+      futures.emplace_back(folly::whileDo(pred, thunk));
+    }
+    folly::collectAll(futures).wait();
+  }
 
  private:
   folly::CPUThreadPoolExecutor executor_;
 };
-#endif
