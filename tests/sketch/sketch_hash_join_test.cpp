@@ -1147,27 +1147,18 @@ class Driver {
 };
 
 class FollyFutureScheduler {
- public:
+ private:
   using SchedulerTask = std::pair<folly::SemiFuture<OperatorStatus>, OperatorStatus>;
   using SchedulerTaskCont = TaskCont;
+  using SchedulerTaskHandle = folly::SemiFuture<folly::Unit>;
+
+ public:
   using SchedulerTaskGroup =
       std::pair<std::vector<SchedulerTask>, std::optional<SchedulerTaskCont>>;
   using SchedulerTaskGroups = std::vector<SchedulerTaskGroup>;
 
-  using SchedulerTaskHandle = folly::Future<folly::Unit>;
   using SchedulerTaskGroupHandle = folly::Future<OperatorStatus>;
   using SchedulerTaskGroupsHandle = folly::Future<OperatorStatus>;
-
-  static SchedulerTask MakeTask(const Task& task, TaskId task_id) {
-    return {folly::makeSemiFutureWith([&]() {
-              OperatorStatus status;
-              ARRA_DCHECK_OK(task(task_id, status));
-              return status;
-            }),
-            OperatorStatus::HasOutput(std::nullopt)};
-  }
-
-  static SchedulerTaskCont MakeTaskCont(const TaskCont& cont) { return cont; }
 
   static SchedulerTaskGroup MakeTaskGroup(const TaskGroup& group) {
     auto size = std::get<1>(group);
@@ -1235,17 +1226,26 @@ class FollyFutureScheduler {
   }
 
  private:
+  static SchedulerTask MakeTask(const Task& task, TaskId task_id) {
+    return {folly::makeSemiFuture().deferValue([&, task_id](folly::Unit) {
+              OperatorStatus status;
+              ARRA_DCHECK_OK(task(task_id, status));
+              return status;
+            }),
+            OperatorStatus::HasOutput(std::nullopt)};
+  }
+
+  static SchedulerTaskCont MakeTaskCont(const TaskCont& cont) { return cont; }
+
   SchedulerTaskHandle ScheduleTask(SchedulerTask& task) {
     auto pred = [&]() {
-      return task.second.code != OperatorStatusCode::FINISHED ||
-             task.second.code == OperatorStatusCode::OTHER;
+      return task.second.code != OperatorStatusCode::FINISHED &&
+             task.second.code != OperatorStatusCode::OTHER;
     };
     auto thunk = [&]() {
-      return std::move(task.first).via(&executor_).thenValue([&](OperatorStatus s) {
-        task.second = s;
-      });
+      return std::move(task.first).deferValue([&](OperatorStatus s) { task.second = s; });
     };
-    return folly::whileDo(pred, thunk).via(&executor_);
+    return folly::whileDo(pred, thunk);
   }
 
  private:
