@@ -1063,6 +1063,89 @@ class PipelineTask {
   std::vector<ThreadLocalState> local_states_;
 };
 
+template <typename Scheduler>
+class Driver {
+ public:
+  Driver(SourceOp* build_source, SourceOp* probe_source, HashJoin* hash_join,
+         SinkOp* probe_sink, Scheduler* scheduler)
+      : build_source_(build_source),
+        probe_source_(probe_source),
+        hash_join_(hash_join),
+        probe_sink_(probe_sink),
+        scheduler_(scheduler) {}
+
+  void Run(size_t dop) {
+    auto build_sink = hash_join_->BuildSink();
+    RunPipeline(dop, build_source_, {}, build_sink.get());
+    RunPipeline(dop, probe_source_, {hash_join_}, probe_sink_);
+  }
+
+ private:
+  void RunPipeline(size_t dop, SourceOp* source, const std::vector<PipeOp*>& pipes,
+                   SinkOp* sink) {
+    auto sink_be = sink->Backend();
+    auto sink_be_tgs = Scheduler::MakeTaskGroups(sink_be);
+    auto sink_be_handle = scheduler_->ScheduleTaskGroups(sink_be_tgs);
+
+    std::vector<std::unique_ptr<SourceOp>> source_life_cycles;
+    std::vector<std::pair<SourceOp*, size_t>> sources;
+    sources.emplace_back(source, 0);
+    for (size_t i = 0; i < pipes.size(); i++) {
+      if (auto pipe_source = pipes[i]->Source(); pipe_source != nullptr) {
+        sources.emplace_back(pipe_source.get(), i + 1);
+        source_life_cycles.emplace_back(std::move(pipe_source));
+      }
+    }
+
+    for (const auto& [source, pipe_start] : sources) {
+      RunPipeline(dop, source, pipes, pipe_start, sink);
+    }
+
+    auto sink_fe = sink->Frontend();
+    auto sink_fe_tgs = Scheduler::MakeTaskGroups(sink_fe);
+    scheduler_->ScheduleTaskGroups(sink_fe_tgs).wait();
+
+    sink_be_handle.wait();
+  }
+
+  void RunPipeline(size_t dop, SourceOp* source, const std::vector<PipeOp*>& pipes,
+                   size_t pipe_start, SinkOp* sink) {
+    auto source_be = source->Backend();
+    auto source_be_tgs = Scheduler::MakeTaskGroups(source_be);
+    auto source_be_handle = scheduler_->ScheduleTaskGroups(source_be_tgs);
+
+    auto source_fe = source->Frontend();
+    auto source_fe_tgs = Scheduler::MakeTaskGroups(source_fe);
+    scheduler_->ScheduleTaskGroups(source_fe_tgs).wait();
+
+    auto source_source = source->Source();
+    std::vector<std::pair<PipelineTaskPipe, std::optional<PipelineTaskPipe>>>
+        pipe_and_drains;
+    for (size_t i = pipe_start; i < pipes.size(); ++i) {
+      auto pipe_pipe = pipes[i]->Pipe();
+      auto pipe_drain = pipes[i]->Drain();
+      pipe_and_drains.emplace_back(std::move(pipe_pipe), std::move(pipe_drain));
+    }
+    auto sink_pipe = sink->Pipe();
+    auto sink_drain = sink->Drain();
+    pipe_and_drains.emplace_back(std::move(sink_pipe), std::move(sink_drain));
+    PipelineTask pipeline_task(dop, source_source, pipe_and_drains);
+    TaskGroup pipeline{[&](ThreadId thread_id, OperatorStatus& status) {
+                         return pipeline_task.Run(thread_id, status);
+                       },
+                       dop, std::nullopt};
+    auto pipeline_tg = Scheduler::MakeTaskGroup(pipeline);
+    scheduler_->ScheduleTaskGroup(pipeline_tg).wait();
+
+    source_be_handle.wait();
+  }
+
+  SourceOp *build_source_, *probe_source_;
+  HashJoin* hash_join_;
+  SinkOp* probe_sink_;
+  Scheduler* scheduler_;
+};
+
 class FollyFutureScheduler {
  public:
   using SchedulerTask = std::pair<folly::SemiFuture<OperatorStatus>, OperatorStatus>;
@@ -1171,97 +1254,123 @@ class FollyFutureScheduler {
 
 class MemorySource : public SourceOp {
  public:
-  PipelineTaskSource Source() override { return {}; }
+  MemorySource(size_t dop, std::vector<arrow::ExecBatch> batches)
+      : dop_(dop), batches_(std::move(batches)) {
+    auto batches_per_thread = arrow::bit_util::CeilDiv(batches_.size(), dop_);
+    local_states_.resize(dop_);
+    for (size_t i = 0; i < dop_; i++) {
+      local_states_[i].batch_id = i * batches_per_thread;
+      local_states_[i].batch_end = (i + 1) * batches_per_thread;
+      local_states_[i].batch_offset = 0;
+    }
+  }
+
+  PipelineTaskSource Source() override {
+    PipelineTaskSource f = [&](ThreadId thread_id, OperatorStatus& status) {
+      if (local_states_[thread_id].batch_id >= local_states_[thread_id].batch_end ||
+          local_states_[thread_id].batch_id >= batches_.size()) {
+        status = OperatorStatus::Finished(std::nullopt);
+        return arrow::Status::OK();
+      }
+
+      if (size_t batch_length = batches_[local_states_[thread_id].batch_id].length;
+          batch_length > kMaxBatchSize) {
+        if (local_states_[thread_id].batch_offset < batch_length) {
+          size_t slice_length = std::min(
+              batch_length - local_states_[thread_id].batch_offset, kMaxBatchSize);
+          status =
+              OperatorStatus::HasOutput(batches_[local_states_[thread_id].batch_id].Slice(
+                  local_states_[thread_id].batch_offset, slice_length));
+          local_states_[thread_id].batch_offset += slice_length;
+          return arrow::Status::OK();
+        }
+        local_states_[thread_id].batch_id++;
+        local_states_[thread_id].batch_offset = 0;
+        return f(thread_id, status);
+      }
+
+      status = OperatorStatus::HasOutput(batches_[local_states_[thread_id].batch_id++]);
+      return arrow::Status::OK();
+    };
+
+    return f;
+  }
+
   TaskGroups Frontend() override { return {}; }
+
   TaskGroups Backend() override { return {}; }
+
+ private:
+  size_t dop_;
+  std::vector<arrow::ExecBatch> batches_;
+
+  struct ThreadLocalState {
+    size_t batch_id = 0;
+    size_t batch_end = 0;
+    size_t batch_offset = 0;
+  };
+  std::vector<ThreadLocalState> local_states_;
 };
 
 class MemorySink : public SinkOp {
  public:
-  PipelineTaskPipe Pipe() override { return {}; }
-  std::optional<PipelineTaskPipe> Drain() override { return {}; }
-  TaskGroups Frontend() override { return {}; }
-  TaskGroups Backend() override { return {}; }
-};
+  MemorySink(arrow::acero::BatchesWithSchema& batches) : batches_(batches) {}
 
-template <typename Scheduler>
-class Driver {
- public:
-  Driver(SourceOp* build_source, SourceOp* probe_source, HashJoin* hash_join,
-         SinkOp* probe_sink, Scheduler* scheduler)
-      : build_source_(build_source),
-        probe_source_(probe_source),
-        hash_join_(hash_join),
-        probe_sink_(probe_sink),
-        scheduler_(scheduler) {}
-
-  void Run(HashJoinCase* join_case) {
-    RunPipeline(join_case->dop_, build_source_, {}, hash_join_->BuildSink());
-    RunPipeline(join_case->dop_, probe_source_, {hash_join_}, hash_join_->BuildSink());
+  PipelineTaskPipe Pipe() override {
+    return [&](ThreadId, std::optional<arrow::ExecBatch> batch, OperatorStatus& status) {
+      ARRA_DCHECK(batch.has_value());
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        batches_.batches.push_back(std::move(batch.value()));
+      }
+      status = OperatorStatus::HasOutput(std::nullopt);
+      return arrow::Status::OK();
+    };
   }
+
+  std::optional<PipelineTaskPipe> Drain() override { return std::nullopt; }
+
+  TaskGroups Frontend() override { return {}; }
+
+  TaskGroups Backend() override { return {}; }
 
  private:
-  void RunPipeline(size_t dop, SourceOp* source, const std::vector<PipeOp*>& pipes,
-                   SinkOp* sink) {
-    auto sink_be = sink->Backend();
-    auto sink_be_tgs = Scheduler::MakeTaskGroups(sink_be);
-    auto sink_be_handle = scheduler_->ScheduleTaskGroups(sink_be_tgs);
-
-    std::vector<std::unique_ptr<SourceOp>> source_life_cycles;
-    std::vector<std::pair<SourceOp*, size_t>> sources;
-    sources.emplace_back(source, 0);
-    for (size_t i = 0; i < pipes.size(); i++) {
-      if (auto pipe_source = pipes[i]->Source(); pipe_source != nullptr) {
-        sources.emplace_back(pipe_source.get(), i + 1);
-        source_life_cycles.emplace_back(std::move(pipe_source));
-      }
-    }
-
-    for (const auto& [source, pipe_start] : sources) {
-      RunPipeline(dop, source, pipes, pipe_start, sink);
-    }
-
-    auto sink_fe = sink->Frontend();
-    auto sink_fe_tgs = Scheduler::MakeTaskGroups(sink_fe);
-    scheduler_->ScheduleTaskGroups(sink_fe_tgs).wait();
-
-    sink_be_handle.wait();
-  }
-
-  void RunPipeline(size_t dop, SourceOp* source, const std::vector<PipeOp*>& pipes,
-                   size_t pipe_start, SinkOp* sink) {
-    auto source_be = source->Backend();
-    auto source_be_tgs = Scheduler::MakeTaskGroups(source_be);
-    auto source_be_handle = scheduler_->ScheduleTaskGroups(source_be_tgs);
-
-    auto source_fe = source->Frontend();
-    auto source_fe_tgs = Scheduler::MakeTaskGroups(source_fe);
-    scheduler_->ScheduleTaskGroups(source_fe_tgs).wait();
-
-    auto source_source = source->Source();
-    std::vector<std::pair<PipelineTaskPipe, std::optional<PipelineTaskPipe>>>
-        pipe_and_drains;
-    for (size_t i = pipe_start; i < pipes.size(); ++i) {
-      auto pipe_pipe = pipes[i]->Pipe();
-      auto pipe_drain = pipes[i]->Drain();
-      pipe_and_drains.emplace_back(std::move(pipe_pipe), std::move(pipe_drain));
-    }
-    auto sink_pipe = sink->Pipe();
-    auto sink_drain = sink->Drain();
-    pipe_and_drains.emplace_back(std::move(sink_pipe), std::move(sink_drain));
-    PipelineTask pipeline_task(dop, source_source, pipe_and_drains);
-    TaskGroup pipeline{[&](ThreadId thread_id, OperatorStatus& status) {
-                         return pipeline_task.Run(thread_id, status);
-                       },
-                       dop, std::nullopt};
-    auto pipeline_tg = Scheduler::MakeTaskGroups(pipeline);
-    scheduler_->ScheduleTaskGroup(pipeline_tg).wait();
-
-    source_be_handle.wait();
-  }
-
-  SourceOp *build_source_, *probe_source_;
-  HashJoin* hash_join_;
-  SinkOp* probe_sink_;
-  Scheduler* scheduler_;
+  std::mutex mutex_;
+  arrow::acero::BatchesWithSchema& batches_;
 };
+
+TEST(Full, Temp) {
+  size_t dop = 16;
+  HashJoinCase join_case(16, arrow::acero::JoinType::RIGHT_OUTER, 8192, 32, 1, 32);
+
+  auto l_batches = HashJoinFixture::LeftBatches(join_case.left_multiplicity_intra_,
+                                                join_case.left_multiplicity_inter_);
+  auto r_batches = HashJoinFixture::RightBatches(join_case.right_multiplicity_intra_,
+                                                 join_case.right_multiplicity_inter_);
+  auto exp_batches = HashJoinFixture::ExpBatches(
+      join_case.options_.join_type,
+      join_case.left_multiplicity_intra_ * join_case.left_multiplicity_inter_,
+      join_case.right_multiplicity_intra_ * join_case.right_multiplicity_inter_);
+
+  auto query_ctx = std::make_unique<arrow::acero::QueryContext>(
+      arrow::acero::QueryOptions{}, arrow::compute::ExecContext());
+  ASSERT_TRUE(query_ctx->Init(join_case.dop_, nullptr).ok());
+
+  MemorySource build_source(join_case.dop_, std::move(r_batches.batches));
+  MemorySource probe_source(join_case.dop_, std::move(l_batches.batches));
+  HashJoin hash_join;
+  ASSERT_TRUE(hash_join
+                  .Init(query_ctx.get(), join_case.dop_, join_case.options_,
+                        *HashJoinFixture::LeftSchema(), *HashJoinFixture::RightSchema())
+                  .ok());
+  arrow::acero::BatchesWithSchema out_batches{{}, hash_join.OutputSchema()};
+  MemorySink probe_sink(out_batches);
+
+  FollyFutureScheduler scheduler(8);
+  Driver<FollyFutureScheduler> driver(&build_source, &probe_source, &hash_join,
+                                      &probe_sink, &scheduler);
+
+  driver.Run(join_case.dop_);
+
+  AssertBatchesEqual(out_batches, exp_batches);
+}
