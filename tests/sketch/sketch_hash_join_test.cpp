@@ -1028,7 +1028,9 @@ class PipelineTask {
       ARRA_RETURN_NOT_OK(
           pipes_[drain_id].second.value()(thread_id, std::nullopt, status));
       auto& output = std::get<std::optional<arrow::ExecBatch>>(status.payload);
-      return Pipe(thread_id, status, drain_id + 1, std::move(output));
+      if (output.has_value()) {
+        return Pipe(thread_id, status, drain_id + 1, std::move(output));
+      }
     }
 
     status = OperatorStatus::Finished(std::nullopt);
