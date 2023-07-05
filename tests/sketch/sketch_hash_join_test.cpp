@@ -1006,13 +1006,15 @@ class PipelineTask {
     if (!local_states_[thread_id].source_done) {
       ARRA_RETURN_NOT_OK(source_(thread_id, status));
       auto& output = std::get<std::optional<arrow::ExecBatch>>(status.payload);
-      if (status.code == OperatorStatusCode::FINISHED && !output.has_value()) {
-        if (!output.has_value()) {
-          return arrow::Status::OK();
-        }
+      if (status.code == OperatorStatusCode::FINISHED) {
         local_states_[thread_id].source_done = true;
+        if (output.has_value()) {
+          return Pipe(thread_id, status, 0, std::move(output));
+        }
+      } else {
+        ARRA_DCHECK(output.has_value());
+        return Pipe(thread_id, status, 0, std::move(output));
       }
-      return Pipe(thread_id, status, 0, std::move(output));
     }
 
     if (local_states_[thread_id].draining >= local_states_[thread_id].drains.size()) {
@@ -1103,9 +1105,11 @@ class Driver {
 
     auto sink_fe = sink->Frontend();
     auto sink_fe_tgs = Scheduler::MakeTaskGroups(sink_fe);
-    scheduler_->ScheduleTaskGroups(sink_fe_tgs).wait();
+    auto sink_fe_status = scheduler_->ScheduleTaskGroups(sink_fe_tgs).wait().value();
+    ASSERT_EQ(sink_fe_status.code, OperatorStatusCode::FINISHED);
 
-    sink_be_handle.wait();
+    auto sink_be_status = sink_be_handle.wait().value();
+    ASSERT_EQ(sink_be_status.code, OperatorStatusCode::FINISHED);
   }
 
   void RunPipeline(size_t dop, SourceOp* source, const std::vector<PipeOp*>& pipes,
@@ -1116,7 +1120,8 @@ class Driver {
 
     auto source_fe = source->Frontend();
     auto source_fe_tgs = Scheduler::MakeTaskGroups(source_fe);
-    scheduler_->ScheduleTaskGroups(source_fe_tgs).wait();
+    auto source_fe_status = scheduler_->ScheduleTaskGroups(source_fe_tgs).wait().value();
+    ASSERT_EQ(source_fe_status.code, OperatorStatusCode::FINISHED);
 
     auto source_source = source->Source();
     std::vector<std::pair<PipelineTaskPipe, std::optional<PipelineTaskPipe>>>
@@ -1135,9 +1140,11 @@ class Driver {
                        },
                        dop, std::nullopt};
     auto pipeline_tg = Scheduler::MakeTaskGroup(pipeline);
-    scheduler_->ScheduleTaskGroup(pipeline_tg).wait();
+    auto pipeline_status = scheduler_->ScheduleTaskGroup(pipeline_tg).wait().value();
+    ASSERT_EQ(pipeline_status.code, OperatorStatusCode::FINISHED);
 
-    source_be_handle.wait();
+    auto source_be_status = source_be_handle.wait().value();
+    ASSERT_EQ(source_be_status.code, OperatorStatusCode::FINISHED);
   }
 
   SourceOp *build_source_, *probe_source_;
@@ -1148,7 +1155,7 @@ class Driver {
 
 class FollyFutureScheduler {
  private:
-  using SchedulerTask = std::pair<folly::SemiFuture<OperatorStatus>, OperatorStatus>;
+  using SchedulerTask = std::pair<OperatorStatus, std::function<OperatorStatus()>>;
   using SchedulerTaskCont = TaskCont;
   using SchedulerTaskHandle = folly::SemiFuture<folly::Unit>;
 
@@ -1195,8 +1202,8 @@ class FollyFutureScheduler {
         .thenValue([&](auto&&) {
           OperatorStatus status = OperatorStatus::Finished(std::nullopt);
           for (size_t i = 0; i < tasks.size(); ++i) {
-            if (tasks[i].second.code != OperatorStatusCode::FINISHED) {
-              status = tasks[i].second;
+            if (tasks[i].first.code != OperatorStatusCode::FINISHED) {
+              status = tasks[i].first;
               break;
             }
           }
@@ -1205,7 +1212,9 @@ class FollyFutureScheduler {
         .thenValue([&](OperatorStatus status) {
           if (status.code == OperatorStatusCode::FINISHED && cont.has_value()) {
             auto s = cont.value()();
-            if (!s.ok()) status = OperatorStatus::Other(std::move(s));
+            if (!s.ok()) {
+              status = OperatorStatus::Other(std::move(s));
+            }
           }
           return status;
         });
@@ -1213,7 +1222,7 @@ class FollyFutureScheduler {
 
   SchedulerTaskGroupsHandle ScheduleTaskGroups(SchedulerTaskGroups& groups) {
     SchedulerTaskGroupsHandle handle =
-        folly::makeFuture(OperatorStatus::HasOutput(std::nullopt));
+        folly::makeFuture(OperatorStatus::Finished(std::nullopt));
     for (auto& group : groups) {
       handle = std::move(handle).thenValue([&](OperatorStatus status) {
         if (status.code != OperatorStatusCode::FINISHED) {
@@ -1227,23 +1236,22 @@ class FollyFutureScheduler {
 
  private:
   static SchedulerTask MakeTask(const Task& task, TaskId task_id) {
-    return {folly::makeSemiFuture().deferValue([&, task_id](folly::Unit) {
+    return {OperatorStatus::HasOutput(std::nullopt), [&task, task_id]() {
               OperatorStatus status;
               ARRA_DCHECK_OK(task(task_id, status));
               return status;
-            }),
-            OperatorStatus::HasOutput(std::nullopt)};
+            }};
   }
 
   static SchedulerTaskCont MakeTaskCont(const TaskCont& cont) { return cont; }
 
   SchedulerTaskHandle ScheduleTask(SchedulerTask& task) {
     auto pred = [&]() {
-      return task.second.code != OperatorStatusCode::FINISHED &&
-             task.second.code != OperatorStatusCode::OTHER;
+      return task.first.code != OperatorStatusCode::FINISHED &&
+             task.first.code != OperatorStatusCode::OTHER;
     };
     auto thunk = [&]() {
-      return std::move(task.first).deferValue([&](OperatorStatus s) { task.second = s; });
+      return folly::makeSemiFuture().defer([&](auto&&) { task.first = task.second(); });
     };
     return folly::whileDo(pred, thunk);
   }
