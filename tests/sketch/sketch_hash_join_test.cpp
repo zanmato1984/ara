@@ -291,17 +291,17 @@ class TestHashJoinSerial : public testing::Test {
 
   arrow::Status Probe(ThreadId thread_id, std::optional<arrow::ExecBatch> batch,
                       OperatorStatus& status) {
-    auto probe_pipe = hash_join_.ProbePipe();
+    auto probe_pipe = hash_join_.Pipe();
     return probe_pipe(thread_id, std::move(batch), status);
   }
 
   arrow::Status Drain(ThreadId thread_id, OperatorStatus& status) {
-    auto probe_drain = hash_join_.ProbeDrain();
+    auto probe_drain = hash_join_.Drain();
     return probe_drain.value()(thread_id, std::nullopt, status);
   }
 
   void StartScan() {
-    scan_source_ = hash_join_.ScanSource();
+    scan_source_ = hash_join_.Source();
     ASSERT_NE(scan_source_, nullptr);
     ASSERT_TRUE(scan_source_->Backend().empty());
     auto scan_groups = scan_source_->Frontend();
@@ -317,7 +317,7 @@ class TestHashJoinSerial : public testing::Test {
  private:
   std::unique_ptr<arrow::acero::QueryContext> query_ctx_;
   HashJoin hash_join_;
-  std::unique_ptr<HashJoinScanSource> scan_source_;
+  std::unique_ptr<SourceOp> scan_source_;
 
  private:
   void RunTaskGroups(const TaskGroups& groups) {
@@ -981,7 +981,7 @@ using SerialFineProbeRightAnti =
 class PipelineTask {
  public:
   PipelineTask(
-      size_t dop, const PipelineTaskSource source,
+      size_t dop, const PipelineTaskSource& source,
       const std::vector<std::pair<PipelineTaskPipe, std::optional<PipelineTaskPipe>>>&
           pipes)
       : dop_(dop), source_(source), pipes_(pipes), local_states_(dop) {
@@ -1063,86 +1063,205 @@ class PipelineTask {
   std::vector<ThreadLocalState> local_states_;
 };
 
-class FollyFutureTaskRunner {
+class FollyFutureScheduler {
  public:
-  using RunnerTask = folly::SemiFuture<OperatorStatus>;
-  using RunnerTaskCont = folly::SemiFuture<arrow::Status>;
-  using RunnerTaskGroup =
-      std::tuple<std::vector<RunnerTask>, size_t, std::optional<RunnerTaskCont>>;
-  using RunnerTaskGroups = std::vector<RunnerTaskGroup>;
+  using SchedulerTask = std::pair<folly::SemiFuture<OperatorStatus>, OperatorStatus>;
+  using SchedulerTaskCont = TaskCont;
+  using SchedulerTaskGroup =
+      std::pair<std::vector<SchedulerTask>, std::optional<SchedulerTaskCont>>;
+  using SchedulerTaskGroups = std::vector<SchedulerTaskGroup>;
 
-  static RunnerTask CompileTask(const Task& task, TaskId task_id) {
-    return folly::makeSemiFutureWith([&]() {
-      OperatorStatus status;
-      ARRA_DCHECK_OK(task(task_id, status));
-      return status;
-    });
+  using SchedulerTaskHandle = folly::Future<folly::Unit>;
+  using SchedulerTaskGroupHandle = folly::Future<OperatorStatus>;
+  using SchedulerTaskGroupsHandle = folly::Future<OperatorStatus>;
+
+  static SchedulerTask MakeTask(const Task& task, TaskId task_id) {
+    return {folly::makeSemiFutureWith([&]() {
+              OperatorStatus status;
+              ARRA_DCHECK_OK(task(task_id, status));
+              return status;
+            }),
+            OperatorStatus::HasOutput(std::nullopt)};
   }
 
-  static RunnerTaskCont CompileTaskCont(const TaskCont& cont) {
-    return folly::makeSemiFutureWith(cont);
-  }
+  static SchedulerTaskCont MakeTaskCont(const TaskCont& cont) { return cont; }
 
-  static RunnerTaskGroup CompileTaskGroup(const TaskGroup& group) {
+  static SchedulerTaskGroup MakeTaskGroup(const TaskGroup& group) {
     auto size = std::get<1>(group);
-    std::vector<RunnerTask> tasks;
+    std::vector<SchedulerTask> tasks;
     for (size_t i = 0; i < size; i++) {
-      tasks.emplace_back(CompileTask(std::get<0>(group), i));
+      tasks.emplace_back(MakeTask(std::get<0>(group), i));
     }
-    std::optional<RunnerTaskCont> runner_cont = std::nullopt;
+    std::optional<SchedulerTaskCont> runner_cont = std::nullopt;
     if (auto cont = std::get<2>(group); cont.has_value()) {
-      runner_cont = CompileTaskCont(cont.value());
+      runner_cont = MakeTaskCont(cont.value());
     }
-    return RunnerTaskGroup{std::move(tasks), size, std::move(runner_cont)};
+    return SchedulerTaskGroup{std::move(tasks), std::move(runner_cont)};
   }
 
-  static RunnerTaskGroups CompileTaskGroups(const TaskGroups& groups) {
-    std::vector<RunnerTaskGroup> runner_groups;
+  static SchedulerTaskGroups MakeTaskGroups(const TaskGroups& groups) {
+    std::vector<SchedulerTaskGroup> runner_groups;
     for (size_t i = 0; i < groups.size(); ++i) {
-      runner_groups.emplace_back(CompileTaskGroup(groups[i]));
+      runner_groups.emplace_back(MakeTaskGroup(groups[i]));
     }
     return runner_groups;
   }
 
-  FollyFutureTaskRunner(size_t num_threads) : executor_(num_threads) {}
+  FollyFutureScheduler(size_t num_threads) : executor_(num_threads) {}
 
-  void RunTask(RunnerTask& task) {
-    OperatorStatus status = OperatorStatus::HasOutput(std::nullopt);
-    auto pred = [&]() {
-      return status.code != OperatorStatusCode::FINISHED ||
-             status.code == OperatorStatusCode::OTHER;
-    };
-    auto thunk = [&]() {
-      return std::move(task).via(&executor_).thenValue([&](OperatorStatus s) {
-        status = s;
-      });
-    };
-    folly::whileDo(pred, thunk).wait();
+  SchedulerTaskGroupHandle ScheduleTaskGroup(SchedulerTaskGroup& group) {
+    auto& tasks = group.first;
+    auto& cont = group.second;
+    std::vector<SchedulerTaskHandle> futures;
+    for (size_t i = 0; i < tasks.size(); ++i) {
+      futures.emplace_back(ScheduleTask(tasks[i]));
+    }
+    return folly::collectAll(futures)
+        .via(&executor_)
+        .thenValue([&](auto&&) {
+          OperatorStatus status = OperatorStatus::Finished(std::nullopt);
+          for (size_t i = 0; i < tasks.size(); ++i) {
+            if (tasks[i].second.code != OperatorStatusCode::FINISHED) {
+              status = tasks[i].second;
+              break;
+            }
+          }
+          return status;
+        })
+        .thenValue([&](OperatorStatus status) {
+          if (status.code == OperatorStatusCode::FINISHED && cont.has_value()) {
+            auto s = cont.value()();
+            if (!s.ok()) status = OperatorStatus::Other(std::move(s));
+          }
+          return status;
+        });
   }
 
-  void RunTasks(RunnerTask& task) { std::move(task).via(&executor_).wait(); }
+  SchedulerTaskGroupsHandle ScheduleTaskGroups(SchedulerTaskGroups& groups) {
+    SchedulerTaskGroupsHandle handle =
+        folly::makeFuture(OperatorStatus::HasOutput(std::nullopt));
+    for (auto& group : groups) {
+      handle = std::move(handle).thenValue([&](OperatorStatus status) {
+        if (status.code != OperatorStatusCode::FINISHED) {
+          return folly::makeFuture(std::move(status));
+        }
+        return ScheduleTaskGroup(group);
+      });
+    }
+    return handle;
+  }
 
-  void RunTasks(std::vector<RunnerTask>& tasks) {
-    std::vector<OperatorStatus> status;
-    for (size_t i = 0; i < tasks.size(); ++i) {
-      status.emplace_back(OperatorStatus::HasOutput(std::nullopt));
-    }
-    std::vector<folly::Future<folly::Unit>> futures;
-    for (size_t i = 0; i < tasks.size(); ++i) {
-      auto pred = [&]() {
-        return status[i].code != OperatorStatusCode::FINISHED ||
-               status[i].code == OperatorStatusCode::OTHER;
-      };
-      auto thunk = [&]() {
-        return std::move(tasks[i]).via(&executor_).thenValue([&](OperatorStatus s) {
-          status[i] = s;
-        });
-      };
-      futures.emplace_back(folly::whileDo(pred, thunk));
-    }
-    folly::collectAll(futures).wait();
+ private:
+  SchedulerTaskHandle ScheduleTask(SchedulerTask& task) {
+    auto pred = [&]() {
+      return task.second.code != OperatorStatusCode::FINISHED ||
+             task.second.code == OperatorStatusCode::OTHER;
+    };
+    auto thunk = [&]() {
+      return std::move(task.first).via(&executor_).thenValue([&](OperatorStatus s) {
+        task.second = s;
+      });
+    };
+    return folly::whileDo(pred, thunk).via(&executor_);
   }
 
  private:
   folly::CPUThreadPoolExecutor executor_;
+};
+
+class MemorySource : public SourceOp {
+ public:
+  PipelineTaskSource Source() override { return {}; }
+  TaskGroups Frontend() override { return {}; }
+  TaskGroups Backend() override { return {}; }
+};
+
+class MemorySink : public SinkOp {
+ public:
+  PipelineTaskPipe Pipe() override { return {}; }
+  std::optional<PipelineTaskPipe> Drain() override { return {}; }
+  TaskGroups Frontend() override { return {}; }
+  TaskGroups Backend() override { return {}; }
+};
+
+template <typename Scheduler>
+class Driver {
+ public:
+  Driver(SourceOp* build_source, SourceOp* probe_source, HashJoin* hash_join,
+         SinkOp* probe_sink, Scheduler* scheduler)
+      : build_source_(build_source),
+        probe_source_(probe_source),
+        hash_join_(hash_join),
+        probe_sink_(probe_sink),
+        scheduler_(scheduler) {}
+
+  void Run(HashJoinCase* join_case) {
+    RunPipeline(join_case->dop_, build_source_, {}, hash_join_->BuildSink());
+    RunPipeline(join_case->dop_, probe_source_, {hash_join_}, hash_join_->BuildSink());
+  }
+
+ private:
+  void RunPipeline(size_t dop, SourceOp* source, const std::vector<PipeOp*>& pipes,
+                   SinkOp* sink) {
+    auto sink_be = sink->Backend();
+    auto sink_be_tgs = Scheduler::MakeTaskGroups(sink_be);
+    auto sink_be_handle = scheduler_->ScheduleTaskGroups(sink_be_tgs);
+
+    std::vector<std::unique_ptr<SourceOp>> source_life_cycles;
+    std::vector<std::pair<SourceOp*, size_t>> sources;
+    sources.emplace_back(source, 0);
+    for (size_t i = 0; i < pipes.size(); i++) {
+      if (auto pipe_source = pipes[i]->Source(); pipe_source != nullptr) {
+        sources.emplace_back(pipe_source.get(), i + 1);
+        source_life_cycles.emplace_back(std::move(pipe_source));
+      }
+    }
+
+    for (const auto& [source, pipe_start] : sources) {
+      RunPipeline(dop, source, pipes, pipe_start, sink);
+    }
+
+    auto sink_fe = sink->Frontend();
+    auto sink_fe_tgs = Scheduler::MakeTaskGroups(sink_fe);
+    scheduler_->ScheduleTaskGroups(sink_fe_tgs).wait();
+
+    sink_be_handle.wait();
+  }
+
+  void RunPipeline(size_t dop, SourceOp* source, const std::vector<PipeOp*>& pipes,
+                   size_t pipe_start, SinkOp* sink) {
+    auto source_be = source->Backend();
+    auto source_be_tgs = Scheduler::MakeTaskGroups(source_be);
+    auto source_be_handle = scheduler_->ScheduleTaskGroups(source_be_tgs);
+
+    auto source_fe = source->Frontend();
+    auto source_fe_tgs = Scheduler::MakeTaskGroups(source_fe);
+    scheduler_->ScheduleTaskGroups(source_fe_tgs).wait();
+
+    auto source_source = source->Source();
+    std::vector<std::pair<PipelineTaskPipe, std::optional<PipelineTaskPipe>>>
+        pipe_and_drains;
+    for (size_t i = pipe_start; i < pipes.size(); ++i) {
+      auto pipe_pipe = pipes[i]->Pipe();
+      auto pipe_drain = pipes[i]->Drain();
+      pipe_and_drains.emplace_back(std::move(pipe_pipe), std::move(pipe_drain));
+    }
+    auto sink_pipe = sink->Pipe();
+    auto sink_drain = sink->Drain();
+    pipe_and_drains.emplace_back(std::move(sink_pipe), std::move(sink_drain));
+    PipelineTask pipeline_task(dop, source_source, pipe_and_drains);
+    TaskGroup pipeline{[&](ThreadId thread_id, OperatorStatus& status) {
+                         return pipeline_task.Run(thread_id, status);
+                       },
+                       dop, std::nullopt};
+    auto pipeline_tg = Scheduler::MakeTaskGroups(pipeline);
+    scheduler_->ScheduleTaskGroup(pipeline_tg).wait();
+
+    source_be_handle.wait();
+  }
+
+  SourceOp *build_source_, *probe_source_;
+  HashJoin* hash_join_;
+  SinkOp* probe_sink_;
+  Scheduler* scheduler_;
 };

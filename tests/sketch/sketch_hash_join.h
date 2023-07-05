@@ -61,6 +61,31 @@ using PipelineTaskSource = std::function<arrow::Status(ThreadId, OperatorStatus&
 using PipelineTaskPipe = std::function<arrow::Status(
     ThreadId, std::optional<arrow::ExecBatch>, OperatorStatus&)>;
 
+class SourceOp {
+ public:
+  virtual ~SourceOp() = default;
+  virtual PipelineTaskSource Source() = 0;
+  virtual TaskGroups Frontend() = 0;
+  virtual TaskGroups Backend() = 0;
+};
+
+class PipeOp {
+ public:
+  virtual ~PipeOp() = default;
+  virtual PipelineTaskPipe Pipe() = 0;
+  virtual std::optional<PipelineTaskPipe> Drain() = 0;
+  virtual std::unique_ptr<SourceOp> Source() = 0;
+};
+
+class SinkOp {
+ public:
+  virtual ~SinkOp() = default;
+  virtual PipelineTaskPipe Pipe() = 0;
+  virtual std::optional<PipelineTaskPipe> Drain() = 0;
+  virtual TaskGroups Frontend() = 0;
+  virtual TaskGroups Backend() = 0;
+};
+
 constexpr size_t kMaxRowsPerBatch = 4096;
 
 namespace detail {
@@ -230,59 +255,20 @@ class ScanProcessor {
   std::vector<ThreadLocalState> local_states_;
 };
 
-class HashJoinBuildSink {
- public:
-  Status Init(QueryContext* ctx, size_t dop, int64_t hardware_flags, MemoryPool* pool,
-              const HashJoinProjectionMaps* schema, JoinType join_type,
-              SwissTableForJoinBuild* hash_table_build, SwissTableForJoin* hash_table,
-              const std::vector<JoinResultMaterialize*>& materialize);
-
-  PipelineTaskPipe Pipe();
-
-  TaskGroups Frontend();
-
-  TaskGroups Backend();
-
- private:
-  QueryContext* ctx_;
-  size_t dop_;
-  SwissTableForJoinBuild* hash_table_build_;
-  std::mutex build_side_mutex_;
-  AccumulationQueue build_side_batches_;
-  BuildProcessor build_processor_;
-};
-
-class HashJoinScanSource {
- public:
-  Status Init(QueryContext* ctx, JoinType join_type, SwissTableForJoin* hash_table,
-              const std::vector<JoinResultMaterialize*>& materializ);
-
-  PipelineTaskSource Source();
-
-  TaskGroups Frontend();
-
-  TaskGroups Backend();
-
- private:
-  QueryContext* ctx_;
-
-  ScanProcessor scan_processor_;
-};
-
-class HashJoin {
+class HashJoin : public PipeOp {
  public:
   Status Init(QueryContext* ctx, size_t dop, const HashJoinNodeOptions& options,
               const Schema& left_schema, const Schema& right_schema);
 
   std::shared_ptr<Schema> OutputSchema() const;
 
-  std::unique_ptr<HashJoinBuildSink> BuildSink();
+  std::unique_ptr<SinkOp> BuildSink();
 
-  PipelineTaskPipe ProbePipe();
+  PipelineTaskPipe Pipe() override;
 
-  std::optional<PipelineTaskPipe> ProbeDrain();
+  std::optional<PipelineTaskPipe> Drain() override;
 
-  std::unique_ptr<HashJoinScanSource> ScanSource();
+  std::unique_ptr<SourceOp> Source() override;
 
  private:
   QueryContext* ctx_;
@@ -307,6 +293,47 @@ class HashJoin {
 
   SwissTableForJoin hash_table_;
   SwissTableForJoinBuild hash_table_build_;
+};
+
+class HashJoinBuildSink : public SinkOp {
+ public:
+  Status Init(QueryContext* ctx, size_t dop, int64_t hardware_flags, MemoryPool* pool,
+              const HashJoinProjectionMaps* schema, JoinType join_type,
+              SwissTableForJoinBuild* hash_table_build, SwissTableForJoin* hash_table,
+              const std::vector<JoinResultMaterialize*>& materialize);
+
+  PipelineTaskPipe Pipe() override;
+
+  std::optional<PipelineTaskPipe> Drain() override;
+
+  TaskGroups Frontend() override;
+
+  TaskGroups Backend() override;
+
+ private:
+  QueryContext* ctx_;
+  size_t dop_;
+  SwissTableForJoinBuild* hash_table_build_;
+  std::mutex build_side_mutex_;
+  AccumulationQueue build_side_batches_;
+  BuildProcessor build_processor_;
+};
+
+class HashJoinScanSource : public SourceOp {
+ public:
+  Status Init(QueryContext* ctx, JoinType join_type, SwissTableForJoin* hash_table,
+              const std::vector<JoinResultMaterialize*>& materializ);
+
+  PipelineTaskSource Source() override;
+
+  TaskGroups Frontend() override;
+
+  TaskGroups Backend() override;
+
+ private:
+  QueryContext* ctx_;
+
+  ScanProcessor scan_processor_;
 };
 
 }  // namespace detail

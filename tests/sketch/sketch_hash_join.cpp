@@ -831,7 +831,7 @@ Status HashJoin::Init(QueryContext* ctx, size_t dop, const HashJoinNodeOptions& 
 
 std::shared_ptr<Schema> HashJoin::OutputSchema() const { return output_schema_; }
 
-std::unique_ptr<HashJoinBuildSink> HashJoin::BuildSink() {
+std::unique_ptr<SinkOp> HashJoin::BuildSink() {
   std::vector<JoinResultMaterialize*> materialize;
   materialize.resize(dop_);
   for (int i = 0; i < dop_; ++i) {
@@ -844,7 +844,7 @@ std::unique_ptr<HashJoinBuildSink> HashJoin::BuildSink() {
   return build_sink;
 }
 
-PipelineTaskPipe HashJoin::ProbePipe() {
+PipelineTaskPipe HashJoin::Pipe() {
   return [&](ThreadId thread_id, std::optional<arrow::ExecBatch> input,
              OperatorStatus& status) {
     ARROW_ASSIGN_OR_RAISE(TempVectorStack * temp_stack, ctx_->GetTempStack(thread_id));
@@ -854,14 +854,14 @@ PipelineTaskPipe HashJoin::ProbePipe() {
   };
 }
 
-std::optional<PipelineTaskPipe> HashJoin::ProbeDrain() {
+std::optional<PipelineTaskPipe> HashJoin::Drain() {
   return
       [&](ThreadId thread_id, std::optional<arrow::ExecBatch>, OperatorStatus& status) {
         return probe_processor_.Drain(thread_id, status);
       };
 }
 
-std::unique_ptr<HashJoinScanSource> HashJoin::ScanSource() {
+std::unique_ptr<SourceOp> HashJoin::Source() {
   if (!NeedToScan(join_type_)) {
     return nullptr;
   }
@@ -901,6 +901,8 @@ PipelineTaskPipe HashJoinBuildSink::Pipe() {
     return Status::OK();
   };
 }
+
+std::optional<PipelineTaskPipe> HashJoinBuildSink::Drain() { return std::nullopt; }
 
 TaskGroups HashJoinBuildSink::Frontend() {
   ARRA_DCHECK_OK(build_processor_.StartBuild());
