@@ -5,7 +5,7 @@ project(arra_tests VERSION 0.0.1 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 
 function(configure_test TEST_NAME TEST_SRC)
-  add_executable(${TEST_NAME} ${TEST_SRC} "${CMAKE_CURRENT_SOURCE_DIR}/arrow/acero/test_util_internal.cc")
+  add_executable(${TEST_NAME} ${TEST_SRC} "${CMAKE_SOURCE_DIR}/tests/arrow/acero/test_util_internal.cc")
   target_link_libraries(${TEST_NAME} arra Arrow::arrow_testing_shared GTest::GTest GTest::Main pthread)
   set_target_properties(${TEST_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/gtests")
   # With OSX and conda, we need to set the correct RPATH so that dependencies
@@ -28,30 +28,4 @@ set(FOO_TEST_SRC
   "${CMAKE_CURRENT_SOURCE_DIR}/foo_test.cpp")
 configure_test(foo_test "${FOO_TEST_SRC}")
 
-set(SKETCH_TEST_SRC
-        "${CMAKE_CURRENT_SOURCE_DIR}/sketch_test.cpp")
-configure_test(sketch_test "${SKETCH_TEST_SRC}")
-
-set(SKETCH_HASH_JOIN_TEST_SRC
-        "${CMAKE_CURRENT_SOURCE_DIR}/sketch_hash_join_test.cpp")
-configure_test(sketch_hash_join_test "${SKETCH_HASH_JOIN_TEST_SRC}")
-
-set(SKETCH_OPERATOR_TEST_SRC
-        "${CMAKE_CURRENT_SOURCE_DIR}/sketch_operator_test.cpp")
-configure_test(sketch_operator_test "${SKETCH_OPERATOR_TEST_SRC}")
-
-set(SKETCH_PIPELINE_TEST_SRC
-        "${CMAKE_CURRENT_SOURCE_DIR}/sketch_pipeline_test.cpp")
-configure_test(sketch_pipeline_test "${SKETCH_PIPELINE_TEST_SRC}")
-
-set(SKETCH_TASK_TEST_SRC
-        "${CMAKE_CURRENT_SOURCE_DIR}/sketch_task_test.cpp")
-configure_test(sketch_task_test "${SKETCH_TASK_TEST_SRC}")
-
-set(SKETCH_FUTURE_TEST_SRC
-        "${CMAKE_CURRENT_SOURCE_DIR}/sketch_future_test.cpp")
-configure_test(sketch_future_test "${SKETCH_FUTURE_TEST_SRC}")
-
-set(SKETCH_SWISS_JOIN_TEST_SRC
-        "${CMAKE_CURRENT_SOURCE_DIR}/sketch_swiss_join_test.cpp")
-configure_test(sketch_swiss_join_test "${SKETCH_SWISS_JOIN_TEST_SRC}")
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/sketch")
