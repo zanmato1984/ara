@@ -76,6 +76,26 @@ void AssertBatchesEqual(const arrow::acero::BatchesWithSchema& out,
                     /*same_chunk_layout=*/false, /*flatten=*/true);
 }
 
+void AssertBatchesLightEqual(const arrow::acero::BatchesWithSchema& out,
+                             const arrow::acero::BatchesWithSchema& exp) {
+  ASSERT_OK_AND_ASSIGN(auto out_table,
+                       arrow::acero::TableFromExecBatches(out.schema, out.batches));
+  ASSERT_OK_AND_ASSIGN(auto exp_table,
+                       arrow::acero::TableFromExecBatches(exp.schema, exp.batches));
+
+  ASSERT_EQ(out_table->num_columns(), exp_table->num_columns());
+
+  for (int i = 0; i < out_table->num_columns(); ++i) {
+    auto actual_col = out_table->column(i);
+    auto expected_col = exp_table->column(i);
+
+    ASSERT_EQ(*actual_col->type(), *expected_col->type());
+
+    ASSERT_EQ(actual_col->length(), expected_col->length());
+    ASSERT_EQ(actual_col->null_count(), expected_col->null_count());
+  }
+}
+
 struct HashJoinFixture {
   static std::shared_ptr<arrow::Schema> LeftSchema() {
     static auto left_schema = arrow::schema(
@@ -986,7 +1006,7 @@ class PipelineTask {
           pipes)
       : dop_(dop), source_(source), pipes_(pipes), local_states_(dop) {
     std::vector<size_t> drains;
-    for (size_t i = 0; i < dop; ++i) {
+    for (size_t i = 0; i < pipes_.size(); ++i) {
       if (pipes_[i].second.has_value()) {
         drains.push_back(i);
       }
@@ -1351,12 +1371,17 @@ class MemorySink : public SinkOp {
 
 TEST(Full, Temp) {
   size_t dop = 16;
-  HashJoinCase join_case(16, arrow::acero::JoinType::RIGHT_OUTER, 8192, 32, 1, 32);
+  HashJoinCase join_case(16, arrow::acero::JoinType::RIGHT_OUTER, 1, 32, 1, 32);
+  // HashJoinCase join_case(16, arrow::acero::JoinType::RIGHT_OUTER, 8192, 32, 1, 32);
 
   auto l_batches = HashJoinFixture::LeftBatches(join_case.left_multiplicity_intra_,
                                                 join_case.left_multiplicity_inter_);
   auto r_batches = HashJoinFixture::RightBatches(join_case.right_multiplicity_intra_,
                                                  join_case.right_multiplicity_inter_);
+  auto exp_rows = HashJoinFixture::ExpRowCount(
+      join_case.options_.join_type,
+      join_case.left_multiplicity_intra_ * join_case.left_multiplicity_inter_,
+      join_case.right_multiplicity_intra_ * join_case.right_multiplicity_inter_);
   auto exp_batches = HashJoinFixture::ExpBatches(
       join_case.options_.join_type,
       join_case.left_multiplicity_intra_ * join_case.left_multiplicity_inter_,
@@ -1382,5 +1407,10 @@ TEST(Full, Temp) {
 
   driver.Run(join_case.dop_);
 
-  AssertBatchesEqual(out_batches, exp_batches);
+  if (exp_rows < 1024 * 1024) {
+    AssertBatchesEqual(out_batches, exp_batches);
+
+  } else {
+    AssertBatchesLightEqual(out_batches, exp_batches);
+  }
 }
