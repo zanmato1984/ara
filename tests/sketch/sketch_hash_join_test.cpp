@@ -286,9 +286,10 @@ struct HashJoinCase {
       right_multiplicity_inter_;
 };
 
-class TestHashJoinSerial : public testing::Test {
+class TestHashJoin : public testing::Test {
  protected:
   HashJoinCase join_case_;
+  std::unique_ptr<arrow::acero::QueryContext> query_ctx_;
 
   void SetUp() override {
     query_ctx_ = std::make_unique<arrow::acero::QueryContext>(
@@ -297,8 +298,14 @@ class TestHashJoinSerial : public testing::Test {
 
   void Init(HashJoinCase join_case) {
     join_case_ = std::move(join_case);
-
     ASSERT_TRUE(query_ctx_->Init(join_case_.dop_, nullptr).ok());
+  }
+};
+
+class TestHashJoinSerial : public TestHashJoin {
+ protected:
+  void Init(HashJoinCase join_case) {
+    TestHashJoin::Init(std::move(join_case));
     ASSERT_TRUE(hash_join_
                     .Init(query_ctx_.get(), join_case_.dop_, join_case_.options_,
                           *HashJoinFixture::LeftSchema(), *HashJoinFixture::RightSchema())
@@ -352,7 +359,6 @@ class TestHashJoinSerial : public testing::Test {
   }
 
  private:
-  std::unique_ptr<arrow::acero::QueryContext> query_ctx_;
   HashJoin hash_join_;
   std::unique_ptr<SourceOp> scan_source_;
 
