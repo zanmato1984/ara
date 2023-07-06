@@ -775,7 +775,7 @@ Status ScanProcessor::Scan(ThreadId thread_id, TempVectorStack* temp_stack,
   }
 
   if (!has_output) {
-    status = OperatorStatus::Finished(std::nullopt);
+    return Scan(thread_id, temp_stack, status);
   }
 
   return Status::OK();
