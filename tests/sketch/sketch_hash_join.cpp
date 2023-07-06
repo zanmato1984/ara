@@ -419,9 +419,9 @@ Status ProbeProcessor::InnerOuter(ThreadId thread_id, TempVectorStack* temp_stac
 
       // If we are to exceed the maximum number of rows per batch, output.
       if (local_states_[thread_id].materialize->num_rows() + num_matches_next >
-          kMaxRowsPerBatch) {
+          kMaxPipeBatchSize) {
         rows_appended =
-            kMaxRowsPerBatch - local_states_[thread_id].materialize->num_rows();
+            kMaxPipeBatchSize - local_states_[thread_id].materialize->num_rows();
         num_matches_next -= rows_appended;
         int ignored;
         ARRA_RETURN_NOT_OK(local_states_[thread_id].materialize->Append(
@@ -471,9 +471,9 @@ Status ProbeProcessor::InnerOuter(ThreadId thread_id, TempVectorStack* temp_stac
 
         // If we are to exceed the maximum number of rows per batch, output.
         if (local_states_[thread_id].materialize->num_rows() + num_passing_ids >
-            kMaxRowsPerBatch) {
+            kMaxPipeBatchSize) {
           rows_appended =
-              kMaxRowsPerBatch - local_states_[thread_id].materialize->num_rows();
+              kMaxPipeBatchSize - local_states_[thread_id].materialize->num_rows();
           num_passing_ids -= rows_appended;
           int ignored;
           ARRA_RETURN_NOT_OK(local_states_[thread_id].materialize->AppendProbeOnly(
@@ -557,8 +557,9 @@ Status ProbeProcessor::LeftSemiAnti(ThreadId thread_id, TempVectorStack* temp_st
 
     // If we are to exceed the maximum number of rows per batch, output.
     if (local_states_[thread_id].materialize->num_rows() + num_passing_ids >
-        kMaxRowsPerBatch) {
-      rows_appended = kMaxRowsPerBatch - local_states_[thread_id].materialize->num_rows();
+        kMaxPipeBatchSize) {
+      rows_appended =
+          kMaxPipeBatchSize - local_states_[thread_id].materialize->num_rows();
       num_passing_ids -= rows_appended;
       int ignored;
       ARRA_RETURN_NOT_OK(local_states_[thread_id].materialize->AppendProbeOnly(
@@ -704,9 +705,8 @@ Status ScanProcessor::Scan(ThreadId thread_id, TempVectorStack* temp_stack,
   for (int64_t mini_batch_start = start_row; mini_batch_start < end_row && !has_output;) {
     // Compute the size of the next mini-batch
     //
-    int64_t mini_batch_size_next =
-        std::min(end_row - mini_batch_start,
-                 static_cast<int64_t>(arrow::util::MiniBatch::kMiniBatchLength));
+    int64_t mini_batch_size_next = std::min(
+        end_row - mini_batch_start, static_cast<int64_t>(MiniBatch::kMiniBatchLength));
 
     // Get the list of key and payload ids from this mini-batch to output.
     //
@@ -738,8 +738,9 @@ Status ScanProcessor::Scan(ThreadId thread_id, TempVectorStack* temp_stack,
 
     // If we are to exceed the maximum number of rows per batch, output.
     if (local_states_[thread_id].materialize->num_rows() + num_output_rows >
-        kMaxRowsPerBatch) {
-      rows_appended = kMaxRowsPerBatch - local_states_[thread_id].materialize->num_rows();
+        kMaxPipeBatchSize) {
+      rows_appended =
+          kMaxPipeBatchSize - local_states_[thread_id].materialize->num_rows();
       num_output_rows -= rows_appended;
       int ignored;
       ARRA_SET_AND_RETURN_NOT_OK(local_states_[thread_id].materialize->AppendBuildOnly(
@@ -844,8 +845,7 @@ std::unique_ptr<SinkOp> HashJoin::BuildSink() {
 }
 
 PipelineTaskPipe HashJoin::Pipe() {
-  return [&](ThreadId thread_id, std::optional<arrow::ExecBatch> input,
-             OperatorStatus& status) {
+  return [&](ThreadId thread_id, std::optional<ExecBatch> input, OperatorStatus& status) {
     ARROW_ASSIGN_OR_RAISE(TempVectorStack * temp_stack, ctx_->GetTempStack(thread_id));
     auto temp_column_arrays = &local_states_[thread_id].temp_column_arrays;
     return probe_processor_.Probe(thread_id, std::move(input), temp_stack,
@@ -854,10 +854,9 @@ PipelineTaskPipe HashJoin::Pipe() {
 }
 
 std::optional<PipelineTaskPipe> HashJoin::Drain() {
-  return
-      [&](ThreadId thread_id, std::optional<arrow::ExecBatch>, OperatorStatus& status) {
-        return probe_processor_.Drain(thread_id, status);
-      };
+  return [&](ThreadId thread_id, std::optional<ExecBatch>, OperatorStatus& status) {
+    return probe_processor_.Drain(thread_id, status);
+  };
 }
 
 std::unique_ptr<SourceOp> HashJoin::Source() {
@@ -889,8 +888,7 @@ Status HashJoinBuildSink::Init(QueryContext* ctx, size_t dop, int64_t hardware_f
 }
 
 PipelineTaskPipe HashJoinBuildSink::Pipe() {
-  return [&](ThreadId thread_id, std::optional<arrow::ExecBatch> input,
-             OperatorStatus& status) {
+  return [&](ThreadId thread_id, std::optional<ExecBatch> input, OperatorStatus& status) {
     status = OperatorStatus::HasOutput(std::nullopt);
     if (!input.has_value()) {
       return Status::OK();
@@ -960,5 +958,239 @@ TaskGroups HashJoinScanSource::Frontend() {
 }
 
 TaskGroups HashJoinScanSource::Backend() { return {}; }
+
+MemorySource::MemorySource(size_t dop, std::vector<ExecBatch> batches)
+    : dop_(dop), batches_(std::move(batches)) {
+  auto batches_per_thread = CeilDiv(batches_.size(), dop_);
+  local_states_.resize(dop_);
+  for (size_t i = 0; i < dop_; i++) {
+    local_states_[i].batch_id = i * batches_per_thread;
+    local_states_[i].batch_end = (i + 1) * batches_per_thread;
+    local_states_[i].batch_offset = 0;
+  }
+}
+
+PipelineTaskSource MemorySource::Source() {
+  PipelineTaskSource f = [&](ThreadId thread_id, OperatorStatus& status) {
+    if (local_states_[thread_id].batch_id >= local_states_[thread_id].batch_end ||
+        local_states_[thread_id].batch_id >= batches_.size()) {
+      status = OperatorStatus::Finished(std::nullopt);
+      return Status::OK();
+    }
+
+    if (size_t batch_length = batches_[local_states_[thread_id].batch_id].length;
+        batch_length > kMaxSourceBatchSize) {
+      if (local_states_[thread_id].batch_offset < batch_length) {
+        size_t slice_length = std::min(
+            batch_length - local_states_[thread_id].batch_offset, kMaxSourceBatchSize);
+        status =
+            OperatorStatus::HasOutput(batches_[local_states_[thread_id].batch_id].Slice(
+                local_states_[thread_id].batch_offset, slice_length));
+        local_states_[thread_id].batch_offset += slice_length;
+        return Status::OK();
+      }
+      local_states_[thread_id].batch_id++;
+      local_states_[thread_id].batch_offset = 0;
+      return f(thread_id, status);
+    }
+
+    status = OperatorStatus::HasOutput(batches_[local_states_[thread_id].batch_id++]);
+    return Status::OK();
+  };
+
+  return f;
+}
+
+TaskGroups MemorySource::Frontend() { return {}; }
+
+TaskGroups MemorySource::Backend() { return {}; }
+
+MemorySink::MemorySink(BatchesWithSchema& batches) : batches_(batches) {}
+
+PipelineTaskPipe MemorySink::Pipe() {
+  return [&](ThreadId, std::optional<ExecBatch> batch, OperatorStatus& status) {
+    ARRA_DCHECK(batch.has_value());
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      batches_.batches.push_back(std::move(batch.value()));
+    }
+    status = OperatorStatus::HasOutput(std::nullopt);
+    return Status::OK();
+  };
+}
+
+std::optional<PipelineTaskPipe> MemorySink::Drain() { return std::nullopt; }
+
+TaskGroups MemorySink::Frontend() { return {}; }
+
+TaskGroups MemorySink::Backend() { return {}; }
+
+PipelineTask::PipelineTask(
+    size_t dop, const PipelineTaskSource& source,
+    const std::vector<std::pair<PipelineTaskPipe, std::optional<PipelineTaskPipe>>>&
+        pipes)
+    : dop_(dop), source_(source), pipes_(pipes), local_states_(dop) {
+  std::vector<size_t> drains;
+  for (size_t i = 0; i < pipes_.size(); ++i) {
+    if (pipes_[i].second.has_value()) {
+      drains.push_back(i);
+    }
+  }
+  for (size_t i = 0; i < dop; ++i) {
+    local_states_[i].drains = drains;
+  }
+}
+
+Status PipelineTask::Run(ThreadId thread_id, OperatorStatus& status) {
+  if (!local_states_[thread_id].pipe_stack.empty()) {
+    auto pipe_id = local_states_[thread_id].pipe_stack.top();
+    local_states_[thread_id].pipe_stack.pop();
+    return Pipe(thread_id, status, pipe_id, std::nullopt);
+  }
+
+  if (!local_states_[thread_id].source_done) {
+    ARRA_RETURN_NOT_OK(source_(thread_id, status));
+    auto& output = std::get<std::optional<ExecBatch>>(status.payload);
+    if (status.code == OperatorStatusCode::FINISHED) {
+      local_states_[thread_id].source_done = true;
+      if (output.has_value()) {
+        return Pipe(thread_id, status, 0, std::move(output));
+      }
+    } else {
+      ARRA_DCHECK(output.has_value());
+      return Pipe(thread_id, status, 0, std::move(output));
+    }
+  }
+
+  if (local_states_[thread_id].draining >= local_states_[thread_id].drains.size()) {
+    status = OperatorStatus::Finished(std::nullopt);
+    return Status::OK();
+  }
+
+  for (; local_states_[thread_id].draining < local_states_[thread_id].drains.size();
+       ++local_states_[thread_id].draining) {
+    auto drain_id = local_states_[thread_id].drains[local_states_[thread_id].draining];
+    ARRA_RETURN_NOT_OK(pipes_[drain_id].second.value()(thread_id, std::nullopt, status));
+    auto& output = std::get<std::optional<ExecBatch>>(status.payload);
+    if (output.has_value()) {
+      return Pipe(thread_id, status, drain_id + 1, std::move(output));
+    }
+  }
+
+  status = OperatorStatus::Finished(std::nullopt);
+  return Status::OK();
+}
+
+Status PipelineTask::Pipe(ThreadId thread_id, OperatorStatus& status, size_t pipe_id,
+                          std::optional<ExecBatch> input) {
+  for (size_t i = pipe_id; i < pipes_.size(); i++) {
+    ARRA_RETURN_NOT_OK(pipes_[i].first(thread_id, std::move(input), status));
+    if (status.code == OperatorStatusCode::HAS_MORE_OUTPUT) {
+      local_states_[thread_id].pipe_stack.push(i);
+    }
+    input = std::move(std::get<std::optional<ExecBatch>>(status.payload));
+    if (!input.has_value()) {
+      break;
+    }
+  }
+  return Status::OK();
+}
+
+FollyFutureScheduler::SchedulerTaskGroup FollyFutureScheduler::MakeTaskGroup(
+    const TaskGroup& group) {
+  auto size = std::get<1>(group);
+  std::vector<SchedulerTask> tasks;
+  for (size_t i = 0; i < size; i++) {
+    tasks.emplace_back(MakeTask(std::get<0>(group), i));
+  }
+  std::optional<SchedulerTaskCont> runner_cont = std::nullopt;
+  if (auto cont = std::get<2>(group); cont.has_value()) {
+    runner_cont = MakeTaskCont(cont.value());
+  }
+  return SchedulerTaskGroup{std::move(tasks), std::move(runner_cont)};
+}
+
+FollyFutureScheduler::SchedulerTaskGroups FollyFutureScheduler::MakeTaskGroups(
+    const TaskGroups& groups) {
+  std::vector<SchedulerTaskGroup> runner_groups;
+  for (size_t i = 0; i < groups.size(); ++i) {
+    runner_groups.emplace_back(MakeTaskGroup(groups[i]));
+  }
+  return runner_groups;
+}
+
+FollyFutureScheduler::FollyFutureScheduler(size_t num_threads) : executor_(num_threads) {}
+
+FollyFutureScheduler::SchedulerTaskGroupHandle FollyFutureScheduler::ScheduleTaskGroup(
+    SchedulerTaskGroup& group) {
+  auto& tasks = group.first;
+  auto& cont = group.second;
+  std::vector<SchedulerTaskHandle> futures;
+  for (size_t i = 0; i < tasks.size(); ++i) {
+    futures.emplace_back(ScheduleTask(tasks[i]));
+  }
+  return folly::collectAll(futures)
+      .via(&executor_)
+      .thenValue([&](auto&&) {
+        OperatorStatus status = OperatorStatus::Finished(std::nullopt);
+        for (size_t i = 0; i < tasks.size(); ++i) {
+          if (tasks[i].first.code != OperatorStatusCode::FINISHED) {
+            status = tasks[i].first;
+            break;
+          }
+        }
+        return status;
+      })
+      .thenValue([&](OperatorStatus status) {
+        if (status.code == OperatorStatusCode::FINISHED && cont.has_value()) {
+          auto s = cont.value()();
+          if (!s.ok()) {
+            status = OperatorStatus::Other(std::move(s));
+          }
+        }
+        return status;
+      });
+}
+
+FollyFutureScheduler::SchedulerTaskGroupsHandle FollyFutureScheduler::ScheduleTaskGroups(
+    SchedulerTaskGroups& groups) {
+  SchedulerTaskGroupsHandle handle =
+      folly::makeFuture(OperatorStatus::Finished(std::nullopt));
+  for (auto& group : groups) {
+    handle = std::move(handle).thenValue([&](OperatorStatus status) {
+      if (status.code != OperatorStatusCode::FINISHED) {
+        return folly::makeFuture(std::move(status));
+      }
+      return ScheduleTaskGroup(group);
+    });
+  }
+  return handle;
+}
+
+FollyFutureScheduler::SchedulerTask FollyFutureScheduler::MakeTask(const Task& task,
+                                                                   TaskId task_id) {
+  return {OperatorStatus::HasOutput(std::nullopt), [&task, task_id]() {
+            OperatorStatus status;
+            ARRA_DCHECK_OK(task(task_id, status));
+            return status;
+          }};
+}
+
+FollyFutureScheduler::SchedulerTaskCont FollyFutureScheduler::MakeTaskCont(
+    const TaskCont& cont) {
+  return cont;
+}
+
+FollyFutureScheduler::SchedulerTaskHandle FollyFutureScheduler::ScheduleTask(
+    SchedulerTask& task) {
+  auto pred = [&]() {
+    return task.first.code != OperatorStatusCode::FINISHED &&
+           task.first.code != OperatorStatusCode::OTHER;
+  };
+  auto thunk = [&]() {
+    return folly::makeSemiFuture().defer([&](auto&&) { task.first = task.second(); });
+  };
+  return folly::whileDo(pred, thunk);
+}
 
 }  // namespace arra::sketch::detail

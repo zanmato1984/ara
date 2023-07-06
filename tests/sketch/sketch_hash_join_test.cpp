@@ -1,17 +1,10 @@
-#include <arrow/acero/exec_plan.h>
 #include <arrow/acero/query_context.h>
-#include <arrow/acero/util.h>
 #include <arrow/compute/exec.h>
-#include <folly/executors/CPUThreadPoolExecutor.h>
-#include <folly/futures/Future.h>
 #include <gtest/gtest.h>
 
-#include "arrow/acero/test_util_internal.h"
 #include "sketch_hash_join.h"
 
 using namespace arra::sketch;
-
-constexpr size_t kMaxBatchSize = 1 << 15;
 
 void AppendBatchesFromString(arrow::acero::BatchesWithSchema& out_batches,
                              const std::vector<std::string_view>& json_strings,
@@ -525,7 +518,7 @@ class SerialFineProbeInnerLeft : public SerialProbe<join_type> {
 
     for (size_t thread_id = 0; thread_id < this->join_case_.dop_; thread_id++) {
       OperatorStatus status = OperatorStatus::Other(arrow::Status::UnknownError(""));
-      if (exp_rows <= kMaxRowsPerBatch) {
+      if (exp_rows <= kMaxPipeBatchSize) {
         ASSERT_OK(this->Probe(thread_id, l_batches.batches[0], status));
         ASSERT_EQ(status.code, OperatorStatusCode::HAS_OUTPUT);
         ASSERT_FALSE(
@@ -539,13 +532,13 @@ class SerialFineProbeInnerLeft : public SerialProbe<join_type> {
         AssertBatchesEqual(
             arrow::acero::BatchesWithSchema{{drain_batch.value()}, this->OutputSchema()},
             exp_batches);
-      } else if (exp_rows <= 2 * kMaxRowsPerBatch) {
+      } else if (exp_rows <= 2 * kMaxPipeBatchSize) {
         ASSERT_OK(this->Probe(thread_id, l_batches.batches[0], status));
         ASSERT_EQ(status.code, OperatorStatusCode::HAS_MORE_OUTPUT);
         auto probe_batch_first =
             std::get<std::optional<arrow::ExecBatch>>(status.payload);
         ASSERT_TRUE(probe_batch_first.has_value());
-        ASSERT_EQ(probe_batch_first.value().length, kMaxRowsPerBatch);
+        ASSERT_EQ(probe_batch_first.value().length, kMaxPipeBatchSize);
 
         ASSERT_OK(this->Probe(thread_id, std::nullopt, status));
         ASSERT_EQ(status.code, OperatorStatusCode::HAS_OUTPUT);
@@ -556,7 +549,7 @@ class SerialFineProbeInnerLeft : public SerialProbe<join_type> {
         ASSERT_EQ(status.code, OperatorStatusCode::FINISHED);
         auto drain_batch = std::get<std::optional<arrow::ExecBatch>>(status.payload);
         ASSERT_TRUE(drain_batch.has_value());
-        ASSERT_EQ(drain_batch.value().length, exp_rows - kMaxRowsPerBatch);
+        ASSERT_EQ(drain_batch.value().length, exp_rows - kMaxPipeBatchSize);
         AssertBatchesEqual(
             arrow::acero::BatchesWithSchema{
                 {probe_batch_first.value(), drain_batch.value()}, this->OutputSchema()},
@@ -567,21 +560,21 @@ class SerialFineProbeInnerLeft : public SerialProbe<join_type> {
         auto probe_batch_first =
             std::move(std::get<std::optional<arrow::ExecBatch>>(status.payload));
         ASSERT_TRUE(probe_batch_first.has_value());
-        ASSERT_EQ(probe_batch_first.value().length, kMaxRowsPerBatch);
+        ASSERT_EQ(probe_batch_first.value().length, kMaxPipeBatchSize);
 
         ASSERT_OK(this->Probe(thread_id, std::nullopt, status));
         ASSERT_EQ(status.code, OperatorStatusCode::HAS_MORE_OUTPUT);
         auto probe_batch_second =
             std::move(std::get<std::optional<arrow::ExecBatch>>(status.payload));
         ASSERT_TRUE(probe_batch_second.has_value());
-        ASSERT_EQ(probe_batch_second.value().length, kMaxRowsPerBatch);
+        ASSERT_EQ(probe_batch_second.value().length, kMaxPipeBatchSize);
 
         ASSERT_OK(this->Drain(thread_id, status));
         ASSERT_EQ(status.code, OperatorStatusCode::FINISHED);
         auto drain_batch = std::get<std::optional<arrow::ExecBatch>>(status.payload);
         ASSERT_TRUE(drain_batch.has_value());
         ASSERT_GT(drain_batch.value().length, 0);
-        ASSERT_LT(drain_batch.value().length, kMaxRowsPerBatch);
+        ASSERT_LT(drain_batch.value().length, kMaxPipeBatchSize);
       }
     }
   }
@@ -614,13 +607,13 @@ class SerialFineProbeInnerLeft : public SerialProbe<join_type> {
     for (size_t thread_id = 0; thread_id < this->join_case_.dop_; thread_id++) {
       OperatorStatus status = OperatorStatus::Other(arrow::Status::UnknownError(""));
 
-      if (exp_rows_single <= kMaxRowsPerBatch) {
+      if (exp_rows_single <= kMaxPipeBatchSize) {
         ASSERT_OK(this->Probe(thread_id, l_batches.batches[0], status));
         ASSERT_EQ(status.code, OperatorStatusCode::HAS_OUTPUT);
         ASSERT_FALSE(
             std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
 
-        if (exp_rows_single * 2 <= kMaxRowsPerBatch) {
+        if (exp_rows_single * 2 <= kMaxPipeBatchSize) {
           ASSERT_OK(this->Probe(thread_id, l_batches.batches[0], status));
           ASSERT_EQ(status.code, OperatorStatusCode::HAS_OUTPUT);
           ASSERT_FALSE(
@@ -639,7 +632,7 @@ class SerialFineProbeInnerLeft : public SerialProbe<join_type> {
           ASSERT_EQ(status.code, OperatorStatusCode::HAS_MORE_OUTPUT);
           auto probe_batch = std::get<std::optional<arrow::ExecBatch>>(status.payload);
           ASSERT_TRUE(probe_batch.has_value());
-          ASSERT_EQ(probe_batch.value().length, kMaxRowsPerBatch);
+          ASSERT_EQ(probe_batch.value().length, kMaxPipeBatchSize);
 
           ASSERT_OK(this->Probe(thread_id, std::nullopt, status));
           ASSERT_EQ(status.code, OperatorStatusCode::HAS_OUTPUT);
@@ -650,7 +643,7 @@ class SerialFineProbeInnerLeft : public SerialProbe<join_type> {
           ASSERT_EQ(status.code, OperatorStatusCode::FINISHED);
           auto drain_batch = std::get<std::optional<arrow::ExecBatch>>(status.payload);
           ASSERT_TRUE(drain_batch.has_value());
-          ASSERT_EQ(drain_batch.value().length, exp_rows_single * 2 - kMaxRowsPerBatch);
+          ASSERT_EQ(drain_batch.value().length, exp_rows_single * 2 - kMaxPipeBatchSize);
           AssertBatchesEqual(
               arrow::acero::BatchesWithSchema{{probe_batch.value(), drain_batch.value()},
                                               this->OutputSchema()},
@@ -662,9 +655,9 @@ class SerialFineProbeInnerLeft : public SerialProbe<join_type> {
         auto probe_batch_first =
             std::get<std::optional<arrow::ExecBatch>>(status.payload);
         ASSERT_TRUE(probe_batch_first.has_value());
-        ASSERT_EQ(probe_batch_first.value().length, kMaxRowsPerBatch);
+        ASSERT_EQ(probe_batch_first.value().length, kMaxPipeBatchSize);
 
-        if (exp_rows_single <= kMaxRowsPerBatch + kMaxRowsPerBatch / 2) {
+        if (exp_rows_single <= kMaxPipeBatchSize + kMaxPipeBatchSize / 2) {
           ASSERT_OK(this->Probe(thread_id, std::nullopt, status));
           ASSERT_EQ(status.code, OperatorStatusCode::HAS_OUTPUT);
           ASSERT_FALSE(
@@ -675,7 +668,7 @@ class SerialFineProbeInnerLeft : public SerialProbe<join_type> {
           auto probe_batch_second =
               std::get<std::optional<arrow::ExecBatch>>(status.payload);
           ASSERT_TRUE(probe_batch_second.has_value());
-          ASSERT_EQ(probe_batch_second.value().length, kMaxRowsPerBatch);
+          ASSERT_EQ(probe_batch_second.value().length, kMaxPipeBatchSize);
 
           ASSERT_OK(this->Probe(thread_id, std::nullopt, status));
           ASSERT_EQ(status.code, OperatorStatusCode::HAS_OUTPUT);
@@ -687,13 +680,13 @@ class SerialFineProbeInnerLeft : public SerialProbe<join_type> {
           auto drain_batch = std::get<std::optional<arrow::ExecBatch>>(status.payload);
           ASSERT_TRUE(drain_batch.has_value());
           ASSERT_EQ(drain_batch.value().length,
-                    exp_rows_single * 2 - kMaxRowsPerBatch * 2);
+                    exp_rows_single * 2 - kMaxPipeBatchSize * 2);
           AssertBatchesEqual(arrow::acero::BatchesWithSchema{{probe_batch_first.value(),
                                                               probe_batch_second.value(),
                                                               drain_batch.value()},
                                                              this->OutputSchema()},
                              exp_batches_double);
-        } else if (exp_rows_single <= kMaxRowsPerBatch * 2) {
+        } else if (exp_rows_single <= kMaxPipeBatchSize * 2) {
           ASSERT_OK(this->Probe(thread_id, std::nullopt, status));
           ASSERT_EQ(status.code, OperatorStatusCode::HAS_OUTPUT);
           ASSERT_FALSE(
@@ -704,14 +697,14 @@ class SerialFineProbeInnerLeft : public SerialProbe<join_type> {
           auto probe_batch_second =
               std::get<std::optional<arrow::ExecBatch>>(status.payload);
           ASSERT_TRUE(probe_batch_first.has_value());
-          ASSERT_EQ(probe_batch_first.value().length, kMaxRowsPerBatch);
+          ASSERT_EQ(probe_batch_first.value().length, kMaxPipeBatchSize);
 
           ASSERT_OK(this->Probe(thread_id, std::nullopt, status));
           ASSERT_EQ(status.code, OperatorStatusCode::HAS_MORE_OUTPUT);
           auto probe_batch_third =
               std::get<std::optional<arrow::ExecBatch>>(status.payload);
           ASSERT_TRUE(probe_batch_third.has_value());
-          ASSERT_EQ(probe_batch_third.value().length, kMaxRowsPerBatch);
+          ASSERT_EQ(probe_batch_third.value().length, kMaxPipeBatchSize);
 
           ASSERT_OK(this->Probe(thread_id, std::nullopt, status));
           ASSERT_EQ(status.code, OperatorStatusCode::HAS_OUTPUT);
@@ -723,7 +716,7 @@ class SerialFineProbeInnerLeft : public SerialProbe<join_type> {
           auto drain_batch = std::get<std::optional<arrow::ExecBatch>>(status.payload);
           ASSERT_TRUE(drain_batch.has_value());
           ASSERT_EQ(drain_batch.value().length,
-                    exp_rows_single * 2 - kMaxRowsPerBatch * 3);
+                    exp_rows_single * 2 - kMaxPipeBatchSize * 3);
           AssertBatchesEqual(
               arrow::acero::BatchesWithSchema{
                   {probe_batch_first.value(), probe_batch_second.value(),
@@ -736,14 +729,14 @@ class SerialFineProbeInnerLeft : public SerialProbe<join_type> {
           auto probe_batch_second =
               std::get<std::optional<arrow::ExecBatch>>(status.payload);
           ASSERT_TRUE(probe_batch_second.has_value());
-          ASSERT_EQ(probe_batch_second.value().length, kMaxRowsPerBatch);
+          ASSERT_EQ(probe_batch_second.value().length, kMaxPipeBatchSize);
 
           ASSERT_OK(this->Drain(thread_id, status));
           ASSERT_EQ(status.code, OperatorStatusCode::FINISHED);
           auto drain_batch = std::get<std::optional<arrow::ExecBatch>>(status.payload);
           ASSERT_TRUE(drain_batch.has_value());
           ASSERT_GT(drain_batch.value().length, 0);
-          ASSERT_LT(drain_batch.value().length, kMaxRowsPerBatch);
+          ASSERT_LT(drain_batch.value().length, kMaxPipeBatchSize);
         }
       }
     }
@@ -822,7 +815,7 @@ class SerialFineProbeRightFullOuter : public SerialProbe<join_type> {
     for (size_t thread_id = 0; thread_id < this->join_case_.dop_; thread_id++) {
       OperatorStatus status = OperatorStatus::Other(arrow::Status::UnknownError(""));
       std::vector<arrow::ExecBatch> output_batches;
-      if (exp_rows_probe <= kMaxRowsPerBatch) {
+      if (exp_rows_probe <= kMaxPipeBatchSize) {
         ASSERT_OK(this->Probe(thread_id, l_batches.batches[0], status));
         ASSERT_EQ(status.code, OperatorStatusCode::HAS_OUTPUT);
         ASSERT_FALSE(
@@ -832,12 +825,12 @@ class SerialFineProbeRightFullOuter : public SerialProbe<join_type> {
         ASSERT_EQ(status.code, OperatorStatusCode::FINISHED);
         ASSERT_FALSE(
             std::get<std::optional<arrow::ExecBatch>>(status.payload).has_value());
-      } else if (exp_rows_probe <= 2 * kMaxRowsPerBatch) {
+      } else if (exp_rows_probe <= 2 * kMaxPipeBatchSize) {
         ASSERT_OK(this->Probe(thread_id, l_batches.batches[0], status));
         ASSERT_EQ(status.code, OperatorStatusCode::HAS_MORE_OUTPUT);
         auto probe_batch = std::get<std::optional<arrow::ExecBatch>>(status.payload);
         ASSERT_TRUE(probe_batch.has_value());
-        ASSERT_EQ(probe_batch.value().length, kMaxRowsPerBatch);
+        ASSERT_EQ(probe_batch.value().length, kMaxPipeBatchSize);
         output_batches.push_back(std::move(probe_batch.value()));
 
         ASSERT_OK(this->Probe(thread_id, std::nullopt, status));
@@ -852,7 +845,7 @@ class SerialFineProbeRightFullOuter : public SerialProbe<join_type> {
       } else {
         size_t offset = 0, total_length = l_batches.batches[0].length;
         do {
-          size_t slice_length = std::min(total_length - offset, kMaxBatchSize);
+          size_t slice_length = std::min(total_length - offset, kMaxSourceBatchSize);
           arrow::ExecBatch batch = l_batches.batches[0].Slice(offset, slice_length);
 
           ASSERT_OK(this->Probe(thread_id, batch, status));
@@ -865,7 +858,7 @@ class SerialFineProbeRightFullOuter : public SerialProbe<join_type> {
             auto probe_batch_first =
                 std::move(std::get<std::optional<arrow::ExecBatch>>(status.payload));
             ASSERT_TRUE(probe_batch_first.has_value());
-            ASSERT_EQ(probe_batch_first.value().length, kMaxRowsPerBatch);
+            ASSERT_EQ(probe_batch_first.value().length, kMaxPipeBatchSize);
             output_batches.push_back(std::move(probe_batch_first.value()));
           }
 
@@ -875,7 +868,7 @@ class SerialFineProbeRightFullOuter : public SerialProbe<join_type> {
               auto probe_batch =
                   std::move(std::get<std::optional<arrow::ExecBatch>>(status.payload));
               ASSERT_TRUE(probe_batch.has_value());
-              ASSERT_EQ(probe_batch.value().length, kMaxRowsPerBatch);
+              ASSERT_EQ(probe_batch.value().length, kMaxPipeBatchSize);
               output_batches.push_back(std::move(probe_batch.value()));
             }
           }
@@ -1020,377 +1013,6 @@ using SerialFineProbeRightAnti =
 //     SerialFineProbeRightAntiCases, SerialFineProbeRightAnti,
 //     ::testing::ValuesIn(SerialProbeCases<SerialFineProbeRightAnti::JoinType>()),
 //     [](const auto& param_info) { return param_info.param.Name(param_info.index); });
-
-class PipelineTask {
- public:
-  PipelineTask(
-      size_t dop, const PipelineTaskSource& source,
-      const std::vector<std::pair<PipelineTaskPipe, std::optional<PipelineTaskPipe>>>&
-          pipes)
-      : dop_(dop), source_(source), pipes_(pipes), local_states_(dop) {
-    std::vector<size_t> drains;
-    for (size_t i = 0; i < pipes_.size(); ++i) {
-      if (pipes_[i].second.has_value()) {
-        drains.push_back(i);
-      }
-    }
-    for (size_t i = 0; i < dop; ++i) {
-      local_states_[i].drains = drains;
-    }
-  }
-
-  arrow::Status Run(ThreadId thread_id, OperatorStatus& status) {
-    if (!local_states_[thread_id].pipe_stack.empty()) {
-      auto pipe_id = local_states_[thread_id].pipe_stack.top();
-      local_states_[thread_id].pipe_stack.pop();
-      return Pipe(thread_id, status, pipe_id, std::nullopt);
-    }
-
-    if (!local_states_[thread_id].source_done) {
-      ARRA_RETURN_NOT_OK(source_(thread_id, status));
-      auto& output = std::get<std::optional<arrow::ExecBatch>>(status.payload);
-      if (status.code == OperatorStatusCode::FINISHED) {
-        local_states_[thread_id].source_done = true;
-        if (output.has_value()) {
-          return Pipe(thread_id, status, 0, std::move(output));
-        }
-      } else {
-        ARRA_DCHECK(output.has_value());
-        return Pipe(thread_id, status, 0, std::move(output));
-      }
-    }
-
-    if (local_states_[thread_id].draining >= local_states_[thread_id].drains.size()) {
-      status = OperatorStatus::Finished(std::nullopt);
-      return arrow::Status::OK();
-    }
-
-    for (; local_states_[thread_id].draining < local_states_[thread_id].drains.size();
-         ++local_states_[thread_id].draining) {
-      auto drain_id = local_states_[thread_id].drains[local_states_[thread_id].draining];
-      ARRA_RETURN_NOT_OK(
-          pipes_[drain_id].second.value()(thread_id, std::nullopt, status));
-      auto& output = std::get<std::optional<arrow::ExecBatch>>(status.payload);
-      if (output.has_value()) {
-        return Pipe(thread_id, status, drain_id + 1, std::move(output));
-      }
-    }
-
-    status = OperatorStatus::Finished(std::nullopt);
-    return arrow::Status::OK();
-  }
-
- private:
-  arrow::Status Pipe(ThreadId thread_id, OperatorStatus& status, size_t pipe_id,
-                     std::optional<arrow::ExecBatch> input) {
-    for (size_t i = pipe_id; i < pipes_.size(); i++) {
-      ARRA_RETURN_NOT_OK(pipes_[i].first(thread_id, std::move(input), status));
-      if (status.code == OperatorStatusCode::HAS_MORE_OUTPUT) {
-        local_states_[thread_id].pipe_stack.push(i);
-      }
-      input = std::move(std::get<std::optional<arrow::ExecBatch>>(status.payload));
-      if (!input.has_value()) {
-        break;
-      }
-    }
-    return arrow::Status::OK();
-  }
-
- private:
-  size_t dop_;
-  PipelineTaskSource source_;
-  std::vector<std::pair<PipelineTaskPipe, std::optional<PipelineTaskPipe>>> pipes_;
-
-  struct ThreadLocalState {
-    std::stack<size_t> pipe_stack;
-    bool source_done = false;
-    std::vector<size_t> drains;
-    size_t draining = 0;
-  };
-  std::vector<ThreadLocalState> local_states_;
-};
-
-template <typename Scheduler>
-class Driver {
- public:
-  Driver(SourceOp* build_source, SourceOp* probe_source, HashJoin* hash_join,
-         SinkOp* probe_sink, Scheduler* scheduler)
-      : build_source_(build_source),
-        probe_source_(probe_source),
-        hash_join_(hash_join),
-        probe_sink_(probe_sink),
-        scheduler_(scheduler) {}
-
-  void Run(size_t dop) {
-    auto build_sink = hash_join_->BuildSink();
-    RunPipeline(dop, build_source_, {}, build_sink.get());
-    RunPipeline(dop, probe_source_, {hash_join_}, probe_sink_);
-  }
-
- private:
-  void RunPipeline(size_t dop, SourceOp* source, const std::vector<PipeOp*>& pipes,
-                   SinkOp* sink) {
-    auto sink_be = sink->Backend();
-    auto sink_be_tgs = Scheduler::MakeTaskGroups(sink_be);
-    auto sink_be_handle = scheduler_->ScheduleTaskGroups(sink_be_tgs);
-
-    std::vector<std::unique_ptr<SourceOp>> source_lifecycles;
-    std::vector<std::pair<SourceOp*, size_t>> sources;
-    sources.emplace_back(source, 0);
-    for (size_t i = 0; i < pipes.size(); i++) {
-      if (auto pipe_source = pipes[i]->Source(); pipe_source != nullptr) {
-        sources.emplace_back(pipe_source.get(), i + 1);
-        source_lifecycles.emplace_back(std::move(pipe_source));
-      }
-    }
-
-    for (const auto& [source, pipe_start] : sources) {
-      RunPipeline(dop, source, pipes, pipe_start, sink);
-    }
-
-    auto sink_fe = sink->Frontend();
-    auto sink_fe_tgs = Scheduler::MakeTaskGroups(sink_fe);
-    auto sink_fe_status = scheduler_->ScheduleTaskGroups(sink_fe_tgs).wait().value();
-    ASSERT_EQ(sink_fe_status.code, OperatorStatusCode::FINISHED);
-
-    auto sink_be_status = sink_be_handle.wait().value();
-    ASSERT_EQ(sink_be_status.code, OperatorStatusCode::FINISHED);
-  }
-
-  void RunPipeline(size_t dop, SourceOp* source, const std::vector<PipeOp*>& pipes,
-                   size_t pipe_start, SinkOp* sink) {
-    auto source_be = source->Backend();
-    auto source_be_tgs = Scheduler::MakeTaskGroups(source_be);
-    auto source_be_handle = scheduler_->ScheduleTaskGroups(source_be_tgs);
-
-    auto source_fe = source->Frontend();
-    auto source_fe_tgs = Scheduler::MakeTaskGroups(source_fe);
-    auto source_fe_status = scheduler_->ScheduleTaskGroups(source_fe_tgs).wait().value();
-    ASSERT_EQ(source_fe_status.code, OperatorStatusCode::FINISHED);
-
-    auto source_source = source->Source();
-    std::vector<std::pair<PipelineTaskPipe, std::optional<PipelineTaskPipe>>>
-        pipe_and_drains;
-    for (size_t i = pipe_start; i < pipes.size(); ++i) {
-      auto pipe_pipe = pipes[i]->Pipe();
-      auto pipe_drain = pipes[i]->Drain();
-      pipe_and_drains.emplace_back(std::move(pipe_pipe), std::move(pipe_drain));
-    }
-    auto sink_pipe = sink->Pipe();
-    auto sink_drain = sink->Drain();
-    pipe_and_drains.emplace_back(std::move(sink_pipe), std::move(sink_drain));
-    PipelineTask pipeline_task(dop, source_source, pipe_and_drains);
-    TaskGroup pipeline{[&](ThreadId thread_id, OperatorStatus& status) {
-                         return pipeline_task.Run(thread_id, status);
-                       },
-                       dop, std::nullopt};
-    auto pipeline_tg = Scheduler::MakeTaskGroup(pipeline);
-    auto pipeline_status = scheduler_->ScheduleTaskGroup(pipeline_tg).wait().value();
-    ASSERT_EQ(pipeline_status.code, OperatorStatusCode::FINISHED);
-
-    auto source_be_status = source_be_handle.wait().value();
-    ASSERT_EQ(source_be_status.code, OperatorStatusCode::FINISHED);
-  }
-
-  SourceOp *build_source_, *probe_source_;
-  HashJoin* hash_join_;
-  SinkOp* probe_sink_;
-  Scheduler* scheduler_;
-};
-
-class FollyFutureScheduler {
- private:
-  using SchedulerTask = std::pair<OperatorStatus, std::function<OperatorStatus()>>;
-  using SchedulerTaskCont = TaskCont;
-  using SchedulerTaskHandle = folly::SemiFuture<folly::Unit>;
-
- public:
-  using SchedulerTaskGroup =
-      std::pair<std::vector<SchedulerTask>, std::optional<SchedulerTaskCont>>;
-  using SchedulerTaskGroups = std::vector<SchedulerTaskGroup>;
-
-  using SchedulerTaskGroupHandle = folly::Future<OperatorStatus>;
-  using SchedulerTaskGroupsHandle = folly::Future<OperatorStatus>;
-
-  static SchedulerTaskGroup MakeTaskGroup(const TaskGroup& group) {
-    auto size = std::get<1>(group);
-    std::vector<SchedulerTask> tasks;
-    for (size_t i = 0; i < size; i++) {
-      tasks.emplace_back(MakeTask(std::get<0>(group), i));
-    }
-    std::optional<SchedulerTaskCont> runner_cont = std::nullopt;
-    if (auto cont = std::get<2>(group); cont.has_value()) {
-      runner_cont = MakeTaskCont(cont.value());
-    }
-    return SchedulerTaskGroup{std::move(tasks), std::move(runner_cont)};
-  }
-
-  static SchedulerTaskGroups MakeTaskGroups(const TaskGroups& groups) {
-    std::vector<SchedulerTaskGroup> runner_groups;
-    for (size_t i = 0; i < groups.size(); ++i) {
-      runner_groups.emplace_back(MakeTaskGroup(groups[i]));
-    }
-    return runner_groups;
-  }
-
-  FollyFutureScheduler(size_t num_threads) : executor_(num_threads) {}
-
-  SchedulerTaskGroupHandle ScheduleTaskGroup(SchedulerTaskGroup& group) {
-    auto& tasks = group.first;
-    auto& cont = group.second;
-    std::vector<SchedulerTaskHandle> futures;
-    for (size_t i = 0; i < tasks.size(); ++i) {
-      futures.emplace_back(ScheduleTask(tasks[i]));
-    }
-    return folly::collectAll(futures)
-        .via(&executor_)
-        .thenValue([&](auto&&) {
-          OperatorStatus status = OperatorStatus::Finished(std::nullopt);
-          for (size_t i = 0; i < tasks.size(); ++i) {
-            if (tasks[i].first.code != OperatorStatusCode::FINISHED) {
-              status = tasks[i].first;
-              break;
-            }
-          }
-          return status;
-        })
-        .thenValue([&](OperatorStatus status) {
-          if (status.code == OperatorStatusCode::FINISHED && cont.has_value()) {
-            auto s = cont.value()();
-            if (!s.ok()) {
-              status = OperatorStatus::Other(std::move(s));
-            }
-          }
-          return status;
-        });
-  }
-
-  SchedulerTaskGroupsHandle ScheduleTaskGroups(SchedulerTaskGroups& groups) {
-    SchedulerTaskGroupsHandle handle =
-        folly::makeFuture(OperatorStatus::Finished(std::nullopt));
-    for (auto& group : groups) {
-      handle = std::move(handle).thenValue([&](OperatorStatus status) {
-        if (status.code != OperatorStatusCode::FINISHED) {
-          return folly::makeFuture(std::move(status));
-        }
-        return ScheduleTaskGroup(group);
-      });
-    }
-    return handle;
-  }
-
- private:
-  static SchedulerTask MakeTask(const Task& task, TaskId task_id) {
-    return {OperatorStatus::HasOutput(std::nullopt), [&task, task_id]() {
-              OperatorStatus status;
-              ARRA_DCHECK_OK(task(task_id, status));
-              return status;
-            }};
-  }
-
-  static SchedulerTaskCont MakeTaskCont(const TaskCont& cont) { return cont; }
-
-  SchedulerTaskHandle ScheduleTask(SchedulerTask& task) {
-    auto pred = [&]() {
-      return task.first.code != OperatorStatusCode::FINISHED &&
-             task.first.code != OperatorStatusCode::OTHER;
-    };
-    auto thunk = [&]() {
-      return folly::makeSemiFuture().defer([&](auto&&) { task.first = task.second(); });
-    };
-    return folly::whileDo(pred, thunk);
-  }
-
- private:
-  folly::CPUThreadPoolExecutor executor_;
-};
-
-class MemorySource : public SourceOp {
- public:
-  MemorySource(size_t dop, std::vector<arrow::ExecBatch> batches)
-      : dop_(dop), batches_(std::move(batches)) {
-    auto batches_per_thread = arrow::bit_util::CeilDiv(batches_.size(), dop_);
-    local_states_.resize(dop_);
-    for (size_t i = 0; i < dop_; i++) {
-      local_states_[i].batch_id = i * batches_per_thread;
-      local_states_[i].batch_end = (i + 1) * batches_per_thread;
-      local_states_[i].batch_offset = 0;
-    }
-  }
-
-  PipelineTaskSource Source() override {
-    PipelineTaskSource f = [&](ThreadId thread_id, OperatorStatus& status) {
-      if (local_states_[thread_id].batch_id >= local_states_[thread_id].batch_end ||
-          local_states_[thread_id].batch_id >= batches_.size()) {
-        status = OperatorStatus::Finished(std::nullopt);
-        return arrow::Status::OK();
-      }
-
-      if (size_t batch_length = batches_[local_states_[thread_id].batch_id].length;
-          batch_length > kMaxBatchSize) {
-        if (local_states_[thread_id].batch_offset < batch_length) {
-          size_t slice_length = std::min(
-              batch_length - local_states_[thread_id].batch_offset, kMaxBatchSize);
-          status =
-              OperatorStatus::HasOutput(batches_[local_states_[thread_id].batch_id].Slice(
-                  local_states_[thread_id].batch_offset, slice_length));
-          local_states_[thread_id].batch_offset += slice_length;
-          return arrow::Status::OK();
-        }
-        local_states_[thread_id].batch_id++;
-        local_states_[thread_id].batch_offset = 0;
-        return f(thread_id, status);
-      }
-
-      status = OperatorStatus::HasOutput(batches_[local_states_[thread_id].batch_id++]);
-      return arrow::Status::OK();
-    };
-
-    return f;
-  }
-
-  TaskGroups Frontend() override { return {}; }
-
-  TaskGroups Backend() override { return {}; }
-
- private:
-  size_t dop_;
-  std::vector<arrow::ExecBatch> batches_;
-
-  struct ThreadLocalState {
-    size_t batch_id = 0;
-    size_t batch_end = 0;
-    size_t batch_offset = 0;
-  };
-  std::vector<ThreadLocalState> local_states_;
-};
-
-class MemorySink : public SinkOp {
- public:
-  MemorySink(arrow::acero::BatchesWithSchema& batches) : batches_(batches) {}
-
-  PipelineTaskPipe Pipe() override {
-    return [&](ThreadId, std::optional<arrow::ExecBatch> batch, OperatorStatus& status) {
-      ARRA_DCHECK(batch.has_value());
-      {
-        std::lock_guard<std::mutex> lock(mutex_);
-        batches_.batches.push_back(std::move(batch.value()));
-      }
-      status = OperatorStatus::HasOutput(std::nullopt);
-      return arrow::Status::OK();
-    };
-  }
-
-  std::optional<PipelineTaskPipe> Drain() override { return std::nullopt; }
-
-  TaskGroups Frontend() override { return {}; }
-
-  TaskGroups Backend() override { return {}; }
-
- private:
-  std::mutex mutex_;
-  arrow::acero::BatchesWithSchema& batches_;
-};
 
 TEST(Full, Temp) {
   size_t dop = 4;
