@@ -78,22 +78,39 @@ void AssertBatchesEqual(const arrow::acero::BatchesWithSchema& out,
 
 void AssertBatchesLightEqual(const arrow::acero::BatchesWithSchema& out,
                              const arrow::acero::BatchesWithSchema& exp) {
-  ASSERT_OK_AND_ASSIGN(auto out_table,
-                       arrow::acero::TableFromExecBatches(out.schema, out.batches));
-  ASSERT_OK_AND_ASSIGN(auto exp_table,
-                       arrow::acero::TableFromExecBatches(exp.schema, exp.batches));
+  ASSERT_EQ(*out.schema, *exp.schema);
+  size_t num_cols = exp.schema->num_fields();
 
-  ASSERT_EQ(out_table->num_columns(), exp_table->num_columns());
-
-  for (int i = 0; i < out_table->num_columns(); ++i) {
-    auto actual_col = out_table->column(i);
-    auto expected_col = exp_table->column(i);
-
-    ASSERT_EQ(*actual_col->type(), *expected_col->type());
-
-    ASSERT_EQ(actual_col->length(), expected_col->length());
-    ASSERT_EQ(actual_col->null_count(), expected_col->null_count());
+  std::vector<std::shared_ptr<arrow::DataType>> exp_types;
+  for (const auto& f : exp.schema->fields()) {
+    exp_types.push_back(f->type());
   }
+
+  size_t exp_num_rows = 0;
+  std::vector<size_t> exp_num_nulls(num_cols, 0);
+  for (size_t i = 0; i < exp.batches.size(); ++i) {
+    exp_num_rows += exp.batches[i].length;
+    for (size_t j = 0; j < exp.batches[i].values.size(); ++j) {
+      auto col = exp.batches[i].values[j].array();
+      exp_num_nulls[j] += col->GetNullCount();
+    }
+  }
+
+  size_t out_num_rows = 0;
+  std::vector<size_t> out_num_nulls(num_cols, 0);
+  for (size_t i = 0; i < out.batches.size(); ++i) {
+    ASSERT_EQ(out.batches[i].num_values(), num_cols);
+    out_num_rows += out.batches[i].length;
+    for (size_t j = 0; j < out.batches[i].values.size(); ++j) {
+      ASSERT_TRUE(out.batches[i].values[j].is_array());
+      auto col = out.batches[i].values[j].array();
+      ASSERT_EQ(*col->type, *exp_types[j]);
+      out_num_nulls[j] += col->GetNullCount();
+    }
+  }
+
+  ASSERT_EQ(out_num_rows, exp_num_rows);
+  ASSERT_EQ(out_num_nulls, exp_num_nulls);
 }
 
 struct HashJoinFixture {
@@ -1111,13 +1128,13 @@ class Driver {
     auto sink_be_tgs = Scheduler::MakeTaskGroups(sink_be);
     auto sink_be_handle = scheduler_->ScheduleTaskGroups(sink_be_tgs);
 
-    std::vector<std::unique_ptr<SourceOp>> source_life_cycles;
+    std::vector<std::unique_ptr<SourceOp>> source_lifecycles;
     std::vector<std::pair<SourceOp*, size_t>> sources;
     sources.emplace_back(source, 0);
     for (size_t i = 0; i < pipes.size(); i++) {
       if (auto pipe_source = pipes[i]->Source(); pipe_source != nullptr) {
         sources.emplace_back(pipe_source.get(), i + 1);
-        source_life_cycles.emplace_back(std::move(pipe_source));
+        source_lifecycles.emplace_back(std::move(pipe_source));
       }
     }
 
@@ -1370,9 +1387,8 @@ class MemorySink : public SinkOp {
 };
 
 TEST(Full, Temp) {
-  size_t dop = 16;
-  HashJoinCase join_case(16, arrow::acero::JoinType::RIGHT_OUTER, 1, 32, 1, 32);
-  // HashJoinCase join_case(16, arrow::acero::JoinType::RIGHT_OUTER, 8192, 32, 1, 32);
+  size_t dop = 4;
+  HashJoinCase join_case(16, arrow::acero::JoinType::RIGHT_OUTER, 8192, 32, 1, 32);
 
   auto l_batches = HashJoinFixture::LeftBatches(join_case.left_multiplicity_intra_,
                                                 join_case.left_multiplicity_inter_);
@@ -1409,7 +1425,6 @@ TEST(Full, Temp) {
 
   if (exp_rows < 1024 * 1024) {
     AssertBatchesEqual(out_batches, exp_batches);
-
   } else {
     AssertBatchesLightEqual(out_batches, exp_batches);
   }
