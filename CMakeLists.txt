@@ -33,7 +33,8 @@ if(ARRA_USE_INTERNAL_ARROW)
     URL "https://github.com/apache/arrow/archive/refs/tags/apache-arrow-12.0.0.tar.gz"
     URL_HASH "SHA256=f25901c486e1e79cde8b78b3e7b1d889919f942549996003a7341a8ee86addaa"
     BUILD_IN_SOURCE 1
-    CMAKE_ARGS "${ARROW_CMAKE_ARGS}")
+    CMAKE_ARGS "${ARROW_CMAKE_ARGS}"
+    DOWNLOAD_EXTRACT_TIMESTAMP false)
   file(MAKE_DIRECTORY "${ARROW_PREFIX}/include")
   add_library(Arrow::arrow_shared SHARED IMPORTED)
   set_target_properties(Arrow::arrow_shared PROPERTIES IMPORTED_LOCATION "${ARROW_SHARED_LIBRARY}" INTERFACE_INCLUDE_DIRECTORIES "${ARROW_PREFIX}/include")
