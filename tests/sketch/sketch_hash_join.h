@@ -447,10 +447,10 @@ class Driver {
     auto sink_fe = sink->Frontend();
     auto sink_fe_tgs = Scheduler::MakeTaskGroups(sink_fe);
     auto sink_fe_status = scheduler_->ScheduleTaskGroups(sink_fe_tgs).wait().value();
-    ASSERT_EQ(sink_fe_status.code, OperatorStatusCode::FINISHED);
+    ARRA_DCHECK(sink_fe_status.code == OperatorStatusCode::FINISHED);
 
     auto sink_be_status = sink_be_handle.wait().value();
-    ASSERT_EQ(sink_be_status.code, OperatorStatusCode::FINISHED);
+    ARRA_DCHECK(sink_be_status.code == OperatorStatusCode::FINISHED);
   }
 
   void RunPipeline(size_t dop, SourceOp* source, const std::vector<PipeOp*>& pipes,
@@ -462,7 +462,7 @@ class Driver {
     auto source_fe = source->Frontend();
     auto source_fe_tgs = Scheduler::MakeTaskGroups(source_fe);
     auto source_fe_status = scheduler_->ScheduleTaskGroups(source_fe_tgs).wait().value();
-    ASSERT_EQ(source_fe_status.code, OperatorStatusCode::FINISHED);
+    ARRA_DCHECK(source_fe_status.code == OperatorStatusCode::FINISHED);
 
     auto source_source = source->Source();
     std::vector<std::pair<PipelineTaskPipe, std::optional<PipelineTaskPipe>>>
@@ -482,10 +482,10 @@ class Driver {
                        dop, std::nullopt};
     auto pipeline_tg = Scheduler::MakeTaskGroup(pipeline);
     auto pipeline_status = scheduler_->ScheduleTaskGroup(pipeline_tg).wait().value();
-    ASSERT_EQ(pipeline_status.code, OperatorStatusCode::FINISHED);
+    ARRA_DCHECK(pipeline_status.code == OperatorStatusCode::FINISHED);
 
     auto source_be_status = source_be_handle.wait().value();
-    ASSERT_EQ(source_be_status.code, OperatorStatusCode::FINISHED);
+    ARRA_DCHECK(source_be_status.code == OperatorStatusCode::FINISHED);
   }
 
   SourceOp *build_source_, *probe_source_;
