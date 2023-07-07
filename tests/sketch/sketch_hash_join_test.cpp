@@ -1026,7 +1026,7 @@ class ParallelDriver : public TestHashJoin,
   void Init() { TestHashJoin::Init(std::move(GetParam())); }
 
   template <typename Scheduler>
-  void Run(Scheduler* scheduler) {
+  void RunOneJoin(Scheduler* scheduler) {
     auto l_batches = HashJoinFixture::LeftBatches(join_case_.left_multiplicity_intra_,
                                                   join_case_.left_multiplicity_inter_);
     auto r_batches = HashJoinFixture::RightBatches(join_case_.right_multiplicity_intra_,
@@ -1049,7 +1049,10 @@ class ParallelDriver : public TestHashJoin,
     arrow::acero::BatchesWithSchema out_batches{{}, hash_join.OutputSchema()};
     MemorySink probe_sink(out_batches);
 
-    Driver<Scheduler> driver(&build_source, &probe_source, &hash_join, &probe_sink,
+    auto build_sink = hash_join.BuildSink();
+
+    Driver<Scheduler> driver({{&build_source, {}, build_sink.get()},
+                              {&probe_source, {&hash_join}, &probe_sink}},
                              scheduler);
 
     driver.Run(join_case_.dop_);
@@ -1062,15 +1065,18 @@ class ParallelDriver : public TestHashJoin,
   }
 };
 
-TEST_P(ParallelDriver, RunFollyFutureScheduler) {
+TEST_P(ParallelDriver, OneJoinFollyFutureScheduler) {
   Init();
   FollyFutureScheduler scheduler(8);
-  Run(&scheduler);
+  RunOneJoin(&scheduler);
 }
 
 std::vector<HashJoinCase> ParallelDriverCases() {
   std::vector<HashJoinCase> cases;
   const std::vector<std::tuple<size_t, size_t, size_t, size_t>> small_cases{
+      {0, 0, 0, 0},    {1, 0, 0, 0},    {0, 1, 0, 0},    {1, 1, 0, 0},    {0, 0, 1, 0},
+      {1, 0, 1, 0},    {0, 1, 1, 0},    {1, 1, 1, 0},    {0, 0, 0, 1},    {1, 0, 0, 1},
+      {0, 1, 0, 1},    {1, 1, 0, 1},    {0, 0, 1, 1},    {1, 0, 1, 1},    {0, 1, 1, 1},
       {1, 1, 1, 1},    {31, 1, 31, 1},  {32, 1, 31, 1},  {1, 31, 31, 1},  {1, 32, 31, 1},
       {31, 1, 32, 1},  {32, 1, 32, 1},  {1, 31, 32, 1},  {1, 32, 32, 1},  {31, 1, 1, 31},
       {32, 1, 1, 31},  {1, 31, 1, 31},  {1, 32, 1, 31},  {31, 1, 1, 31},  {32, 1, 1, 31},

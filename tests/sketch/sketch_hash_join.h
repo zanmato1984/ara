@@ -379,6 +379,12 @@ class MemorySink : public SinkOp {
   BatchesWithSchema& batches_;
 };
 
+struct Pipeline {
+  SourceOp* source;
+  std::vector<PipeOp*> pipes;
+  SinkOp* sink;
+};
+
 class PipelineTask {
  public:
   PipelineTask(
@@ -409,18 +415,13 @@ class PipelineTask {
 template <typename Scheduler>
 class Driver {
  public:
-  Driver(SourceOp* build_source, SourceOp* probe_source, HashJoin* hash_join,
-         SinkOp* probe_sink, Scheduler* scheduler)
-      : build_source_(build_source),
-        probe_source_(probe_source),
-        hash_join_(hash_join),
-        probe_sink_(probe_sink),
-        scheduler_(scheduler) {}
+  Driver(std::vector<Pipeline> pipelines, Scheduler* scheduler)
+      : pipelines_(std::move(pipelines)), scheduler_(scheduler) {}
 
   void Run(size_t dop) {
-    auto build_sink = hash_join_->BuildSink();
-    RunPipeline(dop, build_source_, {}, build_sink.get());
-    RunPipeline(dop, probe_source_, {hash_join_}, probe_sink_);
+    for (const auto& pipeline : pipelines_) {
+      RunPipeline(dop, pipeline.source, pipeline.pipes, pipeline.sink);
+    }
   }
 
  private:
@@ -488,9 +489,8 @@ class Driver {
     ARRA_DCHECK(source_be_status.code == OperatorStatusCode::FINISHED);
   }
 
-  SourceOp *build_source_, *probe_source_;
-  HashJoin* hash_join_;
-  SinkOp* probe_sink_;
+ private:
+  std::vector<Pipeline> pipelines_;
   Scheduler* scheduler_;
 };
 
