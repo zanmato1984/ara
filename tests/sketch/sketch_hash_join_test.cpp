@@ -106,6 +106,14 @@ void AssertBatchesLightEqual(const arrow::acero::BatchesWithSchema& out,
   ASSERT_EQ(out_num_nulls, exp_num_nulls);
 }
 
+size_t BatchesRowCount(const arrow::acero::BatchesWithSchema& batches) {
+  size_t num_rows = 0;
+  for (size_t i = 0; i < batches.batches.size(); ++i) {
+    num_rows += batches.batches[i].length;
+  }
+  return num_rows;
+}
+
 struct HashJoinFixture {
   static std::shared_ptr<arrow::Schema> LeftSchema() {
     static auto left_schema = arrow::schema(
@@ -244,6 +252,47 @@ struct HashJoinFixture {
                                          multiplicity_right);
       }
     }
+  }
+
+  static size_t ExpRowCountRightDeep(arrow::acero::JoinType join_type,
+                                     size_t multiplicity_left,
+                                     size_t multiplicity_right) {
+    if (join_type == arrow::acero::JoinType::INNER) {
+      return 1 * multiplicity_left * multiplicity_right * multiplicity_left +
+             2 * multiplicity_left * multiplicity_right * multiplicity_left +
+             2 * multiplicity_left * multiplicity_right * 2 * multiplicity_left;
+    } else if (join_type == arrow::acero::JoinType::RIGHT_SEMI) {
+      return 4 * multiplicity_right;
+    } else if (join_type == arrow::acero::JoinType::LEFT_ANTI) {
+      return 5 * multiplicity_left;
+    } else if (join_type == arrow::acero::JoinType::FULL_OUTER) {
+      size_t ml = multiplicity_left, mr = multiplicity_right;
+      size_t outer_inner = 1 * ml * mr * ml + 2 * ml * mr * ml + 2 * ml * mr * 2 * ml;
+      size_t outer_lo = 6 * ml;
+      size_t outer_ro = 6 * ml + 6 * mr;
+      return outer_inner + outer_lo + outer_ro;
+    }
+    return 0;
+  }
+
+  static size_t ExpRowCountLeftDeep(arrow::acero::JoinType join_type,
+                                    size_t multiplicity_left, size_t multiplicity_right) {
+    if (join_type == arrow::acero::JoinType::INNER) {
+      return 1 * multiplicity_left * multiplicity_right * multiplicity_left +
+             2 * multiplicity_left * multiplicity_right * multiplicity_left +
+             2 * multiplicity_left * multiplicity_right * 2 * multiplicity_left;
+    } else if (join_type == arrow::acero::JoinType::RIGHT_SEMI) {
+      return 4 * multiplicity_right;
+    } else if (join_type == arrow::acero::JoinType::LEFT_ANTI) {
+      return 6 * multiplicity_left;
+    } else if (join_type == arrow::acero::JoinType::FULL_OUTER) {
+      size_t ml = multiplicity_left, mr = multiplicity_right;
+      size_t outer_inner = 1 * ml * mr * ml + 2 * ml * mr * ml + 2 * ml * mr * 2 * ml;
+      size_t outer_lo = 6 * ml + 6 * mr;
+      size_t outer_ro = 6 * mr;
+      return outer_inner + outer_lo + outer_ro;
+    }
+    return 0;
   }
 };
 
@@ -427,7 +476,7 @@ TEST_P(SerialBuildOnly, BuildOnly) {
   Build(r_batches);
 }
 
-std::vector<BuildOnlyCase> SerialBuildOnlyCases() {
+std::vector<BuildOnlyCase> SerialBuildOnlyParams() {
   std::vector<BuildOnlyCase> cases;
   for (auto dop : {1, 16}) {
     for (auto join_type :
@@ -446,8 +495,8 @@ std::vector<BuildOnlyCase> SerialBuildOnlyCases() {
   return cases;
 }
 
-INSTANTIATE_TEST_SUITE_P(SerialBuildOnlyCases, SerialBuildOnly,
-                         testing::ValuesIn(SerialBuildOnlyCases()),
+INSTANTIATE_TEST_SUITE_P(SerialBuildOnlySuite, SerialBuildOnly,
+                         testing::ValuesIn(SerialBuildOnlyParams()),
                          [](const auto& param_info) {
                            return param_info.param.Name(param_info.index);
                          });
@@ -477,7 +526,7 @@ class SerialProbe : public TestHashJoinSerial,
 };
 
 template <arrow::acero::JoinType join_type>
-const std::vector<ProbeCase<join_type>> SerialProbeCases() {
+const std::vector<ProbeCase<join_type>> SerialProbeParams() {
   std::vector<ProbeCase<join_type>> cases;
   for (auto dop : {1, 4}) {
     for (auto num_res : {63, 64, 127, 128, 255, 256, 511, 512, 1023, 1024, 2047, 2048,
@@ -760,29 +809,29 @@ using SerialFineProbeLeftAnti =
 TEST_P(SerialFineProbeInner, ProbeOne) { ProbeOne(); }
 TEST_P(SerialFineProbeInner, ProbeTwo) { ProbeTwo(); }
 INSTANTIATE_TEST_SUITE_P(
-    SerialFineProbeInnerCases, SerialFineProbeInner,
-    ::testing::ValuesIn(SerialProbeCases<SerialFineProbeInner::JoinType>()),
+    SerialFineProbeInnerSuite, SerialFineProbeInner,
+    ::testing::ValuesIn(SerialProbeParams<SerialFineProbeInner::JoinType>()),
     [](const auto& param_info) { return param_info.param.Name(param_info.index); });
 
 TEST_P(SerialFineProbeLeftOuter, ProbeOne) { ProbeOne(); }
 TEST_P(SerialFineProbeLeftOuter, ProbeTwo) { ProbeTwo(); }
 INSTANTIATE_TEST_SUITE_P(
-    SerialFineProbeLeftOuterCases, SerialFineProbeLeftOuter,
-    ::testing::ValuesIn(SerialProbeCases<SerialFineProbeLeftOuter::JoinType>()),
+    SerialFineProbeLeftOuterSuite, SerialFineProbeLeftOuter,
+    ::testing::ValuesIn(SerialProbeParams<SerialFineProbeLeftOuter::JoinType>()),
     [](const auto& param_info) { return param_info.param.Name(param_info.index); });
 
 TEST_P(SerialFineProbeLeftSemi, ProbeOne) { ProbeOne(); }
 TEST_P(SerialFineProbeLeftSemi, ProbeTwo) { ProbeTwo(); }
 INSTANTIATE_TEST_SUITE_P(
-    SerialFineProbeLeftSemiCases, SerialFineProbeLeftSemi,
-    ::testing::ValuesIn(SerialProbeCases<SerialFineProbeLeftSemi::JoinType>()),
+    SerialFineProbeLeftSemiSuite, SerialFineProbeLeftSemi,
+    ::testing::ValuesIn(SerialProbeParams<SerialFineProbeLeftSemi::JoinType>()),
     [](const auto& param_info) { return param_info.param.Name(param_info.index); });
 
 TEST_P(SerialFineProbeLeftAnti, ProbeOne) { ProbeOne(); }
 TEST_P(SerialFineProbeLeftAnti, ProbeTwo) { ProbeTwo(); }
 INSTANTIATE_TEST_SUITE_P(
-    SerialFineProbeLeftAntiCases, SerialFineProbeLeftAnti,
-    ::testing::ValuesIn(SerialProbeCases<SerialFineProbeLeftAnti::JoinType>()),
+    SerialFineProbeLeftAntiSuite, SerialFineProbeLeftAnti,
+    ::testing::ValuesIn(SerialProbeParams<SerialFineProbeLeftAnti::JoinType>()),
     [](const auto& param_info) { return param_info.param.Name(param_info.index); });
 
 template <arrow::acero::JoinType join_type>
@@ -926,14 +975,14 @@ using SerialFineProbeFullOuter =
 
 TEST_P(SerialFineProbeRightOuter, ProbeOneScan) { ProbeOneScan(); }
 INSTANTIATE_TEST_SUITE_P(
-    SerialFineProbeRightOuterCases, SerialFineProbeRightOuter,
-    ::testing::ValuesIn(SerialProbeCases<SerialFineProbeRightOuter::JoinType>()),
+    SerialFineProbeRightOuterSuite, SerialFineProbeRightOuter,
+    ::testing::ValuesIn(SerialProbeParams<SerialFineProbeRightOuter::JoinType>()),
     [](const auto& param_info) { return param_info.param.Name(param_info.index); });
 
 TEST_P(SerialFineProbeFullOuter, ProbeOneScan) { ProbeOneScan(); }
 INSTANTIATE_TEST_SUITE_P(
-    SerialFineProbeFullOuterCases, SerialFineProbeFullOuter,
-    ::testing::ValuesIn(SerialProbeCases<SerialFineProbeFullOuter::JoinType>()),
+    SerialFineProbeFullOuterSuite, SerialFineProbeFullOuter,
+    ::testing::ValuesIn(SerialProbeParams<SerialFineProbeFullOuter::JoinType>()),
     [](const auto& param_info) { return param_info.param.Name(param_info.index); });
 
 template <arrow::acero::JoinType join_type>
@@ -1010,23 +1059,26 @@ using SerialFineProbeRightAnti =
 
 TEST_P(SerialFineProbeRightSemi, ProbeOneScan) { ProbeOneScan(); }
 INSTANTIATE_TEST_SUITE_P(
-    SerialFineProbeRightSemiCases, SerialFineProbeRightSemi,
-    ::testing::ValuesIn(SerialProbeCases<SerialFineProbeRightSemi::JoinType>()),
+    SerialFineProbeRightSemiSuite, SerialFineProbeRightSemi,
+    ::testing::ValuesIn(SerialProbeParams<SerialFineProbeRightSemi::JoinType>()),
     [](const auto& param_info) { return param_info.param.Name(param_info.index); });
 
 TEST_P(SerialFineProbeRightAnti, ProbeOneScan) { ProbeOneScan(); }
 INSTANTIATE_TEST_SUITE_P(
-    SerialFineProbeRightAntiCases, SerialFineProbeRightAnti,
-    ::testing::ValuesIn(SerialProbeCases<SerialFineProbeRightAnti::JoinType>()),
+    SerialFineProbeRightAntiSuite, SerialFineProbeRightAnti,
+    ::testing::ValuesIn(SerialProbeParams<SerialFineProbeRightAnti::JoinType>()),
     [](const auto& param_info) { return param_info.param.Name(param_info.index); });
 
-class ParallelDriver : public TestHashJoin,
-                       public testing::WithParamInterface<HashJoinCase> {
+class DriverParallelJoin : public TestHashJoin,
+                           public testing::WithParamInterface<HashJoinCase> {
  protected:
   void Init() { TestHashJoin::Init(std::move(GetParam())); }
+};
 
+class DriverParallelOneJoin : public DriverParallelJoin {
+ protected:
   template <typename Scheduler>
-  void RunOneJoin(Scheduler* scheduler) {
+  void OneJoin(Scheduler* scheduler) {
     auto l_batches = HashJoinFixture::LeftBatches(join_case_.left_multiplicity_intra_,
                                                   join_case_.left_multiplicity_inter_);
     auto r_batches = HashJoinFixture::RightBatches(join_case_.right_multiplicity_intra_,
@@ -1065,13 +1117,13 @@ class ParallelDriver : public TestHashJoin,
   }
 };
 
-TEST_P(ParallelDriver, OneJoinFollyFutureScheduler) {
+TEST_P(DriverParallelOneJoin, OneJoinFollyFutureScheduler) {
   Init();
-  FollyFutureScheduler scheduler(8);
-  RunOneJoin(&scheduler);
+  FollyFutureScheduler scheduler(16);
+  OneJoin(&scheduler);
 }
 
-std::vector<HashJoinCase> ParallelDriverCases() {
+std::vector<HashJoinCase> DriverParallelOneJoinParams() {
   std::vector<HashJoinCase> cases;
   const std::vector<std::tuple<size_t, size_t, size_t, size_t>> small_cases{
       {0, 0, 0, 0},    {1, 0, 0, 0},    {0, 1, 0, 0},    {1, 1, 0, 0},    {0, 0, 1, 0},
@@ -1117,8 +1169,127 @@ std::vector<HashJoinCase> ParallelDriverCases() {
   return cases;
 }
 
-INSTANTIATE_TEST_SUITE_P(ParallelDriverCases, ParallelDriver,
-                         ::testing::ValuesIn(ParallelDriverCases()),
+INSTANTIATE_TEST_SUITE_P(DriverParallelOneJoinSuite, DriverParallelOneJoin,
+                         ::testing::ValuesIn(DriverParallelOneJoinParams()),
+                         [](const auto& param_info) {
+                           return param_info.param.Name(param_info.index);
+                         });
+
+class DriverParallelTwoJoins : public DriverParallelJoin {
+ protected:
+  template <typename Scheduler>
+  void RightDeep(Scheduler* scheduler) {
+    auto l_batches = HashJoinFixture::LeftBatches(join_case_.left_multiplicity_intra_,
+                                                  join_case_.left_multiplicity_inter_);
+    auto r_batches = HashJoinFixture::RightBatches(join_case_.right_multiplicity_intra_,
+                                                   join_case_.right_multiplicity_inter_);
+
+    MemorySource build_source(join_case_.dop_, std::move(r_batches.batches));
+    MemorySource probe_source_1(join_case_.dop_, l_batches.batches),
+        probe_source_2(join_case_.dop_, std::move(l_batches.batches));
+    HashJoin hash_join_1, hash_join_2;
+    ASSERT_OK(hash_join_1.Init(query_ctx_.get(), join_case_.dop_, join_case_.options_,
+                               *HashJoinFixture::LeftSchema(),
+                               *HashJoinFixture::RightSchema()));
+    if (join_case_.options_.join_type == arrow::acero::JoinType::LEFT_ANTI) {
+      join_case_.options_.right_keys = {{0}};
+    } else {
+      join_case_.options_.right_keys = {
+          {int(hash_join_1.OutputSchema()->fields().size() - 1)}};
+    }
+    ASSERT_OK(hash_join_2.Init(query_ctx_.get(), join_case_.dop_, join_case_.options_,
+                               *HashJoinFixture::LeftSchema(),
+                               *hash_join_1.OutputSchema()));
+    arrow::acero::BatchesWithSchema out_batches{{}, hash_join_2.OutputSchema()};
+    MemorySink probe_sink(out_batches);
+
+    auto build_sink_1 = hash_join_1.BuildSink(), build_sink_2 = hash_join_2.BuildSink();
+
+    Driver<Scheduler> driver({{&build_source, {}, build_sink_1.get()},
+                              {&probe_source_1, {&hash_join_1}, build_sink_2.get()},
+                              {&probe_source_2, {&hash_join_2}, &probe_sink}},
+                             scheduler);
+
+    driver.Run(join_case_.dop_);
+
+    auto exp_rows = HashJoinFixture::ExpRowCountRightDeep(
+        join_case_.options_.join_type,
+        join_case_.left_multiplicity_intra_ * join_case_.left_multiplicity_inter_,
+        join_case_.right_multiplicity_intra_ * join_case_.right_multiplicity_inter_);
+    auto act_rows = BatchesRowCount(out_batches);
+
+    ASSERT_EQ(act_rows, exp_rows);
+  }
+
+  template <typename Scheduler>
+  void LeftDeep(Scheduler* scheduler) {
+    auto l_batches = HashJoinFixture::LeftBatches(join_case_.left_multiplicity_intra_,
+                                                  join_case_.left_multiplicity_inter_);
+    auto r_batches = HashJoinFixture::RightBatches(join_case_.right_multiplicity_intra_,
+                                                   join_case_.right_multiplicity_inter_);
+
+    MemorySource build_source_1(join_case_.dop_, r_batches.batches),
+        build_source_2(join_case_.dop_, r_batches.batches);
+    MemorySource probe_source(join_case_.dop_, std::move(l_batches.batches));
+    HashJoin hash_join_1, hash_join_2;
+    ASSERT_OK(hash_join_1.Init(query_ctx_.get(), join_case_.dop_, join_case_.options_,
+                               *HashJoinFixture::LeftSchema(),
+                               *HashJoinFixture::RightSchema()));
+    if (join_case_.options_.join_type == arrow::acero::JoinType::RIGHT_SEMI) {
+      join_case_.options_.left_keys = {{1}};
+    }
+    ASSERT_OK(hash_join_2.Init(query_ctx_.get(), join_case_.dop_, join_case_.options_,
+                               *hash_join_1.OutputSchema(),
+                               *HashJoinFixture::RightSchema()));
+    arrow::acero::BatchesWithSchema out_batches{{}, hash_join_2.OutputSchema()};
+    MemorySink probe_sink(out_batches);
+
+    auto build_sink_1 = hash_join_1.BuildSink(), build_sink_2 = hash_join_2.BuildSink();
+
+    Driver<Scheduler> driver({{&build_source_1, {}, build_sink_1.get()},
+                              {&build_source_2, {}, build_sink_2.get()},
+                              {&probe_source, {&hash_join_1, &hash_join_2}, &probe_sink}},
+                             scheduler);
+
+    driver.Run(join_case_.dop_);
+  }
+};
+
+TEST_P(DriverParallelTwoJoins, RightDeepFollyFutureScheduler) {
+  Init();
+  FollyFutureScheduler scheduler(16);
+  RightDeep(&scheduler);
+}
+
+TEST_P(DriverParallelTwoJoins, LeftDeepFollyFutureScheduler) {
+  Init();
+  FollyFutureScheduler scheduler(16);
+  LeftDeep(&scheduler);
+}
+
+std::vector<HashJoinCase> DriverParallelTwoJoinsParams() {
+  std::vector<HashJoinCase> cases;
+  const std::vector<std::tuple<size_t, size_t, size_t, size_t>> mul_combines{
+      {15, 15, 15, 15}, {16, 15, 15, 15}, {15, 16, 15, 15}, {16, 16, 15, 15},
+      {15, 15, 16, 15}, {16, 15, 16, 15}, {15, 16, 16, 15}, {16, 16, 16, 15},
+      {15, 15, 15, 16}, {16, 15, 15, 16}, {15, 16, 15, 16}, {16, 16, 15, 16},
+      {15, 15, 16, 16}, {16, 15, 16, 16}, {15, 16, 16, 16}, {16, 16, 16, 16},
+  };
+  for (auto join_type :
+       {arrow::acero::JoinType::INNER, arrow::acero::JoinType::RIGHT_SEMI,
+        arrow::acero::JoinType::LEFT_ANTI, arrow::acero::JoinType::FULL_OUTER}) {
+    for (auto dop : {8, 16}) {
+      for (auto [left_intra, left_inter, right_intra, right_inter] : mul_combines) {
+        cases.emplace_back(dop, join_type, left_intra, left_inter, right_intra,
+                           right_inter);
+      }
+    }
+  }
+  return cases;
+}
+
+INSTANTIATE_TEST_SUITE_P(DriverParallelTwoJoinsSuite, DriverParallelTwoJoins,
+                         ::testing::ValuesIn(DriverParallelTwoJoinsParams()),
                          [](const auto& param_info) {
                            return param_info.param.Name(param_info.index);
                          });
