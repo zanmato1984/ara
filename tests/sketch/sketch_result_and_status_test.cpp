@@ -6,7 +6,6 @@
 #include <gtest/gtest.h>
 
 #define ARRA_DCHECK ARROW_DCHECK
-#define ARRA_DCHECK_OK ARROW_DCHECK_OK
 
 namespace arra::sketch {
 
