@@ -245,11 +245,11 @@ class PipelineTask {
       return result.status();
     }
     ARRA_DCHECK(result->IsNeedsMore() || result->IsBackpressure());
-    if (!result->IsBackpressure()) {
-      local_states_[thread_id].backpressure = false;
-      return TaskStatus::Continue();
+    if (result->IsBackpressure()) {
+      local_states_[thread_id].backpressure = true;
+      return TaskStatus::Backpressure();
     }
-    return TaskStatus::Backpressure();
+    return TaskStatus::Continue();
   }
 
  private:
@@ -422,7 +422,8 @@ class FollyFutureScheduler {
   static ConcreteTask MakeTask(const Task& task, TaskId task_id,
                                arrow::Result<TaskStatus>& result) {
     auto pred = [&]() {
-      return result.ok() && (result->IsContinue() || result->IsYield());
+      return result.ok() &&
+             (result->IsContinue() || result->IsBackpressure() || result->IsYield());
     };
     auto thunk = [&, task_id]() {
       return folly::makeSemiFuture().defer(
@@ -754,5 +755,138 @@ TEST(SketchTest, AccumulateThree) {
     for (size_t i = dop; i < dop * 2; ++i) {
       ASSERT_EQ(sink.batches_[i], (Batch{1, 1, 1}));
     }
+  }
+}
+
+TEST(SketchTest, Backpressure) {
+  struct BackpressureContext {
+    bool backpressure = false;
+    bool exit = false;
+    size_t source_backpressure = 0, source_non_backpressure = 0;
+    size_t pipe_backpressure = 0, pipe_non_backpressure = 0;
+  };
+  using BackpressureContexts = std::vector<BackpressureContext>;
+
+  class BackpressureSource : public SourceOp {
+   public:
+    BackpressureSource(BackpressureContexts& ctx) : ctx_(ctx) {}
+
+    PipelineTaskSource Source() override {
+      return [&](ThreadId thread_id) -> arrow::Result<OperatorResult> {
+        if (ctx_[thread_id].backpressure) {
+          ctx_[thread_id].source_backpressure++;
+        } else {
+          ctx_[thread_id].source_non_backpressure++;
+        }
+
+        if (ctx_[thread_id].exit) {
+          return OperatorResult::Finished(std::nullopt);
+        } else {
+          return OperatorResult::HasMore({});
+        }
+      };
+    }
+
+    TaskGroups Frontend() override { return {}; }
+
+    TaskGroups Backend() override { return {}; }
+
+   private:
+    BackpressureContexts& ctx_;
+  };
+
+  class BackpressurePipe : public PipeOp {
+   public:
+    BackpressurePipe(BackpressureContexts& ctx) : ctx_(ctx) {}
+
+    PipelineTaskPipe Pipe() override {
+      return [&](ThreadId thread_id,
+                 std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+        if (ctx_[thread_id].backpressure) {
+          ctx_[thread_id].pipe_backpressure++;
+        } else {
+          ctx_[thread_id].pipe_non_backpressure++;
+        }
+        return OperatorResult::Even(std::move(input.value()));
+      };
+    }
+
+    std::optional<PipelineTaskDrain> Drain() override { return std::nullopt; }
+
+    std::unique_ptr<SourceOp> Source() override { return nullptr; }
+
+   private:
+    BackpressureContexts& ctx_;
+  };
+
+  class BackpressureSink : public SinkOp {
+   public:
+    BackpressureSink(size_t dop, BackpressureContexts& ctx, size_t backpressure_start,
+                     size_t backpressure_stop, size_t exit)
+        : ctx_(ctx),
+          backpressure_start_(backpressure_start),
+          backpressure_stop_(backpressure_stop),
+          exit_(exit) {
+      thread_locals_.resize(dop);
+    }
+
+    PipelineTaskSink Sink() override {
+      return [&](ThreadId thread_id,
+                 std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+        size_t counter = ++thread_locals_[thread_id].counter;
+        if (counter >= exit_) {
+          ctx_[thread_id].exit = true;
+          return OperatorResult::NeedsMore();
+        }
+        if (counter == backpressure_start_) {
+          ctx_[thread_id].backpressure = true;
+        }
+        if (counter == backpressure_stop_) {
+          ctx_[thread_id].backpressure = false;
+        }
+        if (counter > backpressure_start_ && counter <= backpressure_stop_) {
+          ARRA_DCHECK(!input.has_value());
+        } else {
+          ARRA_DCHECK(input.has_value());
+        }
+        if (counter >= backpressure_start_ && counter < backpressure_stop_) {
+          return OperatorResult::Backpressure();
+        }
+        return OperatorResult::NeedsMore();
+      };
+    }
+
+    TaskGroups Frontend() override { return {}; }
+
+    TaskGroups Backend() override { return {}; }
+
+   private:
+    BackpressureContexts& ctx_;
+    size_t backpressure_start_, backpressure_stop_, exit_;
+
+    struct ThreadLocal {
+      size_t counter = 0;
+    };
+    std::vector<ThreadLocal> thread_locals_;
+  };
+
+  size_t dop = 8;
+  BackpressureContexts ctx(dop);
+  BackpressureSource source(ctx);
+  BackpressurePipe pipe(ctx);
+  BackpressureSink sink(dop, ctx, 100, 200, 300);
+  Pipeline pipeline{&source, {&pipe}, &sink};
+  FollyFutureScheduler scheduler(4);
+  Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
+  auto result = driver.Run(dop);
+  ASSERT_OK(result);
+  ASSERT_TRUE(result->IsFinished());
+  for (const auto& c : ctx) {
+    ASSERT_EQ(c.backpressure, false);
+    ASSERT_EQ(c.exit, true);
+    ASSERT_EQ(c.source_backpressure, 0);
+    ASSERT_EQ(c.source_non_backpressure, 201);
+    ASSERT_EQ(c.pipe_backpressure, 0);
+    ASSERT_EQ(c.pipe_non_backpressure, 200);
   }
 }
