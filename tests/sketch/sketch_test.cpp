@@ -54,7 +54,7 @@ struct OperatorResult {
  private:
   enum class OperatorStatus {
     NEEDS_MORE,
-    EVEN,
+    HAS_EVEN,
     HAS_MORE,
     BACKPRESSURE,
     YIELD,
@@ -68,7 +68,7 @@ struct OperatorResult {
 
  public:
   bool IsNeedsMore() { return status_ == OperatorStatus::NEEDS_MORE; }
-  bool IsEven() { return status_ == OperatorStatus::EVEN; }
+  bool IsHasEven() { return status_ == OperatorStatus::HAS_EVEN; }
   bool IsHasMore() { return status_ == OperatorStatus::HAS_MORE; }
   bool IsBackpressure() { return status_ == OperatorStatus::BACKPRESSURE; }
   bool IsYield() { return status_ == OperatorStatus::YIELD; }
@@ -76,14 +76,14 @@ struct OperatorResult {
   bool IsCancelled() { return status_ == OperatorStatus::CANCELLED; }
 
   std::optional<Batch>& GetOutput() {
-    ARRA_DCHECK(IsEven() || IsHasMore() || IsFinished());
+    ARRA_DCHECK(IsHasEven() || IsHasMore() || IsFinished());
     return output_;
   }
 
  public:
   static OperatorResult NeedsMore() { return OperatorResult(OperatorStatus::NEEDS_MORE); }
-  static OperatorResult Even(Batch output) {
-    return OperatorResult(OperatorStatus::EVEN, std::move(output));
+  static OperatorResult HasEven(Batch output) {
+    return OperatorResult(OperatorStatus::HAS_EVEN, std::move(output));
   }
   static OperatorResult HasMore(Batch output) {
     return OperatorResult{OperatorStatus::HAS_MORE, std::move(output)};
@@ -227,8 +227,8 @@ class PipelineTask {
         cancelled = true;
         return result.status();
       }
-      ARRA_DCHECK(result->IsNeedsMore() || result->IsEven() || result->IsHasMore());
-      if (result->IsEven() || result->IsHasMore()) {
+      ARRA_DCHECK(result->IsNeedsMore() || result->IsHasEven() || result->IsHasMore());
+      if (result->IsHasEven() || result->IsHasMore()) {
         if (result->IsHasMore()) {
           local_states_[thread_id].pipe_stack.push(i);
         }
@@ -465,7 +465,7 @@ class IdentityPipe : public PipeOp {
   PipelineTaskPipe Pipe() override {
     return [&](ThreadId, std::optional<Batch> input) -> arrow::Result<OperatorResult> {
       if (input.has_value()) {
-        return OperatorResult::Even(std::move(input.value()));
+        return OperatorResult::HasEven(std::move(input.value()));
       }
       return OperatorResult::NeedsMore();
     };
@@ -476,14 +476,19 @@ class IdentityPipe : public PipeOp {
   std::unique_ptr<SourceOp> Source() override { return nullptr; }
 };
 
-class TimesNPipe : public PipeOp {
+class TimesNInOnePipe : public PipeOp {
  public:
-  TimesNPipe(size_t n) : n_(n) {}
+  TimesNInOnePipe(size_t n) : n_(n) {}
 
   PipelineTaskPipe Pipe() override {
     return [&](ThreadId, std::optional<Batch> input) -> arrow::Result<OperatorResult> {
       if (input.has_value()) {
-        return OperatorResult::Even(std::move(input.value()));
+        auto& batch = input.value();
+        Batch output(batch.size() * n_);
+        for (size_t i = 0; i < n_; ++i) {
+          std::copy(batch.begin(), batch.end(), output.begin() + i * batch.size());
+        }
+        return OperatorResult::HasEven(std::move(output));
       }
       return OperatorResult::NeedsMore();
     };
@@ -495,6 +500,45 @@ class TimesNPipe : public PipeOp {
 
  private:
   size_t n_;
+};
+
+class TimesNInNPipe : public PipeOp {
+ public:
+  TimesNInNPipe(size_t n, size_t dop) : n_(n), dop_(dop) { thread_locals_.resize(dop_); }
+
+  PipelineTaskPipe Pipe() override {
+    return [&](ThreadId thread_id,
+               std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+      if (thread_locals_[thread_id].batches.empty()) {
+        ARRA_DCHECK(input.has_value());
+        for (size_t i = 0; i < n_; i++) {
+          thread_locals_[thread_id].batches.push_back(input.value());
+        }
+      } else {
+        ARRA_DCHECK(!input.has_value());
+      }
+      auto batch = thread_locals_[thread_id].batches.back();
+      thread_locals_[thread_id].batches.pop_back();
+      if (thread_locals_[thread_id].batches.empty()) {
+        return OperatorResult::HasEven(std::move(batch));
+      } else {
+        return OperatorResult::HasMore(std::move(batch));
+      }
+    };
+  }
+
+  std::optional<PipelineTaskDrain> Drain() override { return std::nullopt; }
+
+  std::unique_ptr<SourceOp> Source() override { return nullptr; }
+
+ private:
+  size_t n_, dop_;
+
+ private:
+  struct ThreadLocal {
+    std::vector<Batch> batches;
+  };
+  std::vector<ThreadLocal> thread_locals_;
 };
 
 class MemorySink : public SinkOp {
@@ -530,4 +574,35 @@ TEST(SketchTest, OneToOne) {
   ASSERT_TRUE(result->IsFinished());
   ASSERT_EQ(sink.batches_.size(), 1);
   ASSERT_EQ(sink.batches_[0], Batch{1});
+}
+
+TEST(SketchTest, OneToThreeInOne) {
+  OneSource source;
+  TimesNInOnePipe pipe(3);
+  MemorySink sink;
+  Pipeline pipeline{&source, {&pipe}, &sink};
+  FollyFutureScheduler scheduler(4);
+  Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
+  auto result = driver.Run(8);
+  ASSERT_OK(result);
+  ASSERT_TRUE(result->IsFinished());
+  ASSERT_EQ(sink.batches_.size(), 1);
+  ASSERT_EQ(sink.batches_[0], (Batch{1, 1, 1}));
+}
+
+TEST(SketchTest, OneToThreeInThree) {
+  size_t dop = 8;
+  OneSource source;
+  TimesNInNPipe pipe(3, dop);
+  MemorySink sink;
+  Pipeline pipeline{&source, {&pipe}, &sink};
+  FollyFutureScheduler scheduler(4);
+  Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
+  auto result = driver.Run(dop);
+  ASSERT_OK(result);
+  ASSERT_TRUE(result->IsFinished());
+  ASSERT_EQ(sink.batches_.size(), 3);
+  for (size_t i = 0; i < 3; ++i) {
+    ASSERT_EQ(sink.batches_[i], (Batch{1}));
+  }
 }
