@@ -758,7 +758,7 @@ TEST(SketchTest, AccumulateThree) {
   }
 }
 
-TEST(SketchTest, Backpressure) {
+TEST(SketchTest, BasicBackpressure) {
   struct BackpressureContext {
     bool backpressure = false;
     bool exit = false;
@@ -888,5 +888,135 @@ TEST(SketchTest, Backpressure) {
     ASSERT_EQ(c.source_non_backpressure, 201);
     ASSERT_EQ(c.pipe_backpressure, 0);
     ASSERT_EQ(c.pipe_non_backpressure, 200);
+  }
+}
+
+TEST(SketchTest, BasicError) {
+  class ErrorGenerator {
+   public:
+    ErrorGenerator(size_t trigger) : trigger_(trigger) {}
+
+    arrow::Result<OperatorResult> operator()(OperatorResult non_error) {
+      if (counter_++ == trigger_) {
+        return arrow::Status::Invalid("42");
+      }
+      return non_error;
+    }
+
+   private:
+    size_t trigger_;
+
+    std::atomic<size_t> counter_ = 0;
+  };
+
+  class ErrorSource : public SourceOp {
+   public:
+    ErrorSource(std::unique_ptr<ErrorGenerator> err_gen = nullptr)
+        : err_gen_(std::move(err_gen)) {}
+
+    PipelineTaskSource Source() override {
+      return [&](ThreadId) -> arrow::Result<OperatorResult> {
+        if (err_gen_ != nullptr) {
+          return (*err_gen_)(OperatorResult::HasMore({}));
+        }
+        return OperatorResult::HasMore({});
+      };
+    }
+
+    TaskGroups Frontend() override { return {}; }
+
+    TaskGroups Backend() override { return {}; }
+
+   private:
+    std::unique_ptr<ErrorGenerator> err_gen_;
+  };
+
+  class ErrorPipe : public PipeOp {
+   public:
+    ErrorPipe(std::unique_ptr<ErrorGenerator> err_gen = nullptr)
+        : err_gen_(std::move(err_gen)) {}
+
+    PipelineTaskPipe Pipe() override {
+      return [&](ThreadId, std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+        if (err_gen_ != nullptr) {
+          return (*err_gen_)(OperatorResult::Even(std::move(input.value())));
+        }
+        return OperatorResult::Even(std::move(input.value()));
+      };
+    }
+
+    std::optional<PipelineTaskDrain> Drain() override { return std::nullopt; }
+
+    std::unique_ptr<SourceOp> Source() override { return nullptr; }
+
+   private:
+    std::unique_ptr<ErrorGenerator> err_gen_;
+  };
+
+  class ErrorSink : public SinkOp {
+   public:
+    ErrorSink(std::unique_ptr<ErrorGenerator> err_gen = nullptr)
+        : err_gen_(std::move(err_gen)) {}
+
+    PipelineTaskSink Sink() override {
+      return [&](ThreadId, std::optional<Batch>) -> arrow::Result<OperatorResult> {
+        if (err_gen_ != nullptr) {
+          return (*err_gen_)(OperatorResult::NeedsMore());
+        }
+        return OperatorResult::NeedsMore();
+      };
+    }
+
+    TaskGroups Frontend() override { return {}; }
+
+    TaskGroups Backend() override { return {}; }
+
+   private:
+    std::unique_ptr<ErrorGenerator> err_gen_;
+  };
+
+  {
+    size_t dop = 8;
+    auto err_gen = std::make_unique<ErrorGenerator>(42);
+    ErrorSource source(std::move(err_gen));
+    ErrorPipe pipe;
+    ErrorSink sink;
+    Pipeline pipeline{&source, {&pipe}, &sink};
+    FollyFutureScheduler scheduler(4);
+    Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
+    auto result = driver.Run(dop);
+    ASSERT_NOT_OK(result);
+    ASSERT_TRUE(result.status().IsInvalid());
+    ASSERT_EQ(result.status().message(), "42");
+  }
+
+  {
+    size_t dop = 8;
+    auto err_gen = std::make_unique<ErrorGenerator>(42);
+    ErrorSource source;
+    ErrorPipe pipe(std::move(err_gen));
+    ErrorSink sink;
+    Pipeline pipeline{&source, {&pipe}, &sink};
+    FollyFutureScheduler scheduler(4);
+    Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
+    auto result = driver.Run(dop);
+    ASSERT_NOT_OK(result);
+    ASSERT_TRUE(result.status().IsInvalid());
+    ASSERT_EQ(result.status().message(), "42");
+  }
+
+  {
+    size_t dop = 8;
+    auto err_gen = std::make_unique<ErrorGenerator>(42);
+    ErrorSource source;
+    ErrorPipe pipe;
+    ErrorSink sink(std::move(err_gen));
+    Pipeline pipeline{&source, {&pipe}, &sink};
+    FollyFutureScheduler scheduler(4);
+    Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
+    auto result = driver.Run(dop);
+    ASSERT_NOT_OK(result);
+    ASSERT_TRUE(result.status().IsInvalid());
+    ASSERT_EQ(result.status().message(), "42");
   }
 }
