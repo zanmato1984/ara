@@ -54,7 +54,7 @@ struct OperatorResult {
  private:
   enum class OperatorStatus {
     NEEDS_MORE,
-    HAS_EVEN,
+    EVEN,
     HAS_MORE,
     BACKPRESSURE,
     YIELD,
@@ -68,7 +68,7 @@ struct OperatorResult {
 
  public:
   bool IsNeedsMore() { return status_ == OperatorStatus::NEEDS_MORE; }
-  bool IsHasEven() { return status_ == OperatorStatus::HAS_EVEN; }
+  bool IsEven() { return status_ == OperatorStatus::EVEN; }
   bool IsHasMore() { return status_ == OperatorStatus::HAS_MORE; }
   bool IsBackpressure() { return status_ == OperatorStatus::BACKPRESSURE; }
   bool IsYield() { return status_ == OperatorStatus::YIELD; }
@@ -76,14 +76,14 @@ struct OperatorResult {
   bool IsCancelled() { return status_ == OperatorStatus::CANCELLED; }
 
   std::optional<Batch>& GetOutput() {
-    ARRA_DCHECK(IsHasEven() || IsHasMore() || IsFinished());
+    ARRA_DCHECK(IsEven() || IsHasMore() || IsFinished());
     return output_;
   }
 
  public:
   static OperatorResult NeedsMore() { return OperatorResult(OperatorStatus::NEEDS_MORE); }
-  static OperatorResult HasEven(Batch output) {
-    return OperatorResult(OperatorStatus::HAS_EVEN, std::move(output));
+  static OperatorResult Even(Batch output) {
+    return OperatorResult(OperatorStatus::EVEN, std::move(output));
   }
   static OperatorResult HasMore(Batch output) {
     return OperatorResult{OperatorStatus::HAS_MORE, std::move(output)};
@@ -227,8 +227,8 @@ class PipelineTask {
         cancelled = true;
         return result.status();
       }
-      ARRA_DCHECK(result->IsNeedsMore() || result->IsHasEven() || result->IsHasMore());
-      if (result->IsHasEven() || result->IsHasMore()) {
+      ARRA_DCHECK(result->IsNeedsMore() || result->IsEven() || result->IsHasMore());
+      if (result->IsEven() || result->IsHasMore()) {
         if (result->IsHasMore()) {
           local_states_[thread_id].pipe_stack.push(i);
         }
@@ -441,14 +441,56 @@ class FollyFutureScheduler {
 
 using namespace arra::sketch;
 
-class OneSource : public SourceOp {
+class MemorySource : public SourceOp {
  public:
+  MemorySource(std::list<Batch> batches) : batches_(std::move(batches)) {}
+
   PipelineTaskSource Source() override {
     return [&](ThreadId) -> arrow::Result<OperatorResult> {
-      if (!done.exchange(true)) {
-        return OperatorResult::HasMore({1});
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (batches_.empty()) {
+        return OperatorResult::Finished(std::nullopt);
       }
-      return OperatorResult::Finished(std::nullopt);
+      auto output = std::move(batches_.front());
+      batches_.pop_front();
+      if (batches_.empty()) {
+        return OperatorResult::Finished(std::move(output));
+      } else {
+        return OperatorResult::HasMore(std::move(output));
+      }
+    };
+  }
+
+  TaskGroups Frontend() override { return {}; }
+
+  TaskGroups Backend() override { return {}; }
+
+ public:
+  std::mutex mutex_;
+  std::list<Batch> batches_;
+};
+
+class DistributedMemorySource : public SourceOp {
+ public:
+  DistributedMemorySource(size_t dop, std::list<Batch> batches) : dop_(dop) {
+    thread_locals_.resize(dop_);
+    for (auto& tl : thread_locals_) {
+      tl.batches_ = batches;
+    }
+  }
+
+  PipelineTaskSource Source() override {
+    return [&](ThreadId thread_id) -> arrow::Result<OperatorResult> {
+      if (thread_locals_[thread_id].batches_.empty()) {
+        return OperatorResult::Finished(std::nullopt);
+      }
+      auto output = std::move(thread_locals_[thread_id].batches_.front());
+      thread_locals_[thread_id].batches_.pop_front();
+      if (thread_locals_[thread_id].batches_.empty()) {
+        return OperatorResult::Finished(std::move(output));
+      } else {
+        return OperatorResult::HasMore(std::move(output));
+      }
     };
   }
 
@@ -457,86 +499,9 @@ class OneSource : public SourceOp {
   TaskGroups Backend() override { return {}; }
 
  private:
-  std::atomic<bool> done = false;
-};
-
-class IdentityPipe : public PipeOp {
- public:
-  PipelineTaskPipe Pipe() override {
-    return [&](ThreadId, std::optional<Batch> input) -> arrow::Result<OperatorResult> {
-      if (input.has_value()) {
-        return OperatorResult::HasEven(std::move(input.value()));
-      }
-      return OperatorResult::NeedsMore();
-    };
-  }
-
-  std::optional<PipelineTaskDrain> Drain() override { return std::nullopt; }
-
-  std::unique_ptr<SourceOp> Source() override { return nullptr; }
-};
-
-class TimesNInOnePipe : public PipeOp {
- public:
-  TimesNInOnePipe(size_t n) : n_(n) {}
-
-  PipelineTaskPipe Pipe() override {
-    return [&](ThreadId, std::optional<Batch> input) -> arrow::Result<OperatorResult> {
-      if (input.has_value()) {
-        auto& batch = input.value();
-        Batch output(batch.size() * n_);
-        for (size_t i = 0; i < n_; ++i) {
-          std::copy(batch.begin(), batch.end(), output.begin() + i * batch.size());
-        }
-        return OperatorResult::HasEven(std::move(output));
-      }
-      return OperatorResult::NeedsMore();
-    };
-  }
-
-  std::optional<PipelineTaskDrain> Drain() override { return std::nullopt; }
-
-  std::unique_ptr<SourceOp> Source() override { return nullptr; }
-
- private:
-  size_t n_;
-};
-
-class TimesNInNPipe : public PipeOp {
- public:
-  TimesNInNPipe(size_t n, size_t dop) : n_(n), dop_(dop) { thread_locals_.resize(dop_); }
-
-  PipelineTaskPipe Pipe() override {
-    return [&](ThreadId thread_id,
-               std::optional<Batch> input) -> arrow::Result<OperatorResult> {
-      if (thread_locals_[thread_id].batches.empty()) {
-        ARRA_DCHECK(input.has_value());
-        for (size_t i = 0; i < n_; i++) {
-          thread_locals_[thread_id].batches.push_back(input.value());
-        }
-      } else {
-        ARRA_DCHECK(!input.has_value());
-      }
-      auto batch = thread_locals_[thread_id].batches.back();
-      thread_locals_[thread_id].batches.pop_back();
-      if (thread_locals_[thread_id].batches.empty()) {
-        return OperatorResult::HasEven(std::move(batch));
-      } else {
-        return OperatorResult::HasMore(std::move(batch));
-      }
-    };
-  }
-
-  std::optional<PipelineTaskDrain> Drain() override { return std::nullopt; }
-
-  std::unique_ptr<SourceOp> Source() override { return nullptr; }
-
- private:
-  size_t n_, dop_;
-
- private:
+  size_t dop_;
   struct ThreadLocal {
-    std::vector<Batch> batches;
+    std::list<Batch> batches_;
   };
   std::vector<ThreadLocal> thread_locals_;
 };
@@ -563,37 +528,122 @@ class MemorySink : public SinkOp {
 };
 
 TEST(SketchTest, OneToOne) {
-  OneSource source;
+  class IdentityPipe : public PipeOp {
+   public:
+    PipelineTaskPipe Pipe() override {
+      return [&](ThreadId, std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+        if (input.has_value()) {
+          return OperatorResult::Even(std::move(input.value()));
+        }
+        return OperatorResult::NeedsMore();
+      };
+    }
+
+    std::optional<PipelineTaskDrain> Drain() override { return std::nullopt; }
+
+    std::unique_ptr<SourceOp> Source() override { return nullptr; }
+  };
+
+  size_t dop = 8;
+  MemorySource source({{1}});
   IdentityPipe pipe;
   MemorySink sink;
   Pipeline pipeline{&source, {&pipe}, &sink};
   FollyFutureScheduler scheduler(4);
   Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
-  auto result = driver.Run(8);
+  auto result = driver.Run(dop);
   ASSERT_OK(result);
   ASSERT_TRUE(result->IsFinished());
   ASSERT_EQ(sink.batches_.size(), 1);
-  ASSERT_EQ(sink.batches_[0], Batch{1});
+  ASSERT_EQ(sink.batches_[0], (Batch{1}));
 }
 
-TEST(SketchTest, OneToThreeInOne) {
-  OneSource source;
-  TimesNInOnePipe pipe(3);
+TEST(SketchTest, OneToThreeFlat) {
+  class TimesNFlatPipe : public PipeOp {
+   public:
+    TimesNFlatPipe(size_t n) : n_(n) {}
+
+    PipelineTaskPipe Pipe() override {
+      return [&](ThreadId, std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+        if (input.has_value()) {
+          auto& batch = input.value();
+          Batch output(batch.size() * n_);
+          for (size_t i = 0; i < n_; ++i) {
+            std::copy(batch.begin(), batch.end(), output.begin() + i * batch.size());
+          }
+          return OperatorResult::Even(std::move(output));
+        }
+        return OperatorResult::NeedsMore();
+      };
+    }
+
+    std::optional<PipelineTaskDrain> Drain() override { return std::nullopt; }
+
+    std::unique_ptr<SourceOp> Source() override { return nullptr; }
+
+   private:
+    size_t n_;
+  };
+
+  size_t dop = 8;
+  MemorySource source({{1}});
+  TimesNFlatPipe pipe(3);
   MemorySink sink;
   Pipeline pipeline{&source, {&pipe}, &sink};
   FollyFutureScheduler scheduler(4);
   Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
-  auto result = driver.Run(8);
+  auto result = driver.Run(dop);
   ASSERT_OK(result);
   ASSERT_TRUE(result->IsFinished());
   ASSERT_EQ(sink.batches_.size(), 1);
   ASSERT_EQ(sink.batches_[0], (Batch{1, 1, 1}));
 }
 
-TEST(SketchTest, OneToThreeInThree) {
+TEST(SketchTest, OneToThreeSliced) {
+  class TimesNSlicedPipe : public PipeOp {
+   public:
+    TimesNSlicedPipe(size_t dop, size_t n) : dop_(dop), n_(n) {
+      thread_locals_.resize(dop_);
+    }
+
+    PipelineTaskPipe Pipe() override {
+      return [&](ThreadId thread_id,
+                 std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+        if (thread_locals_[thread_id].batches.empty()) {
+          ARRA_DCHECK(input.has_value());
+          for (size_t i = 0; i < n_; i++) {
+            thread_locals_[thread_id].batches.push_back(input.value());
+          }
+        } else {
+          ARRA_DCHECK(!input.has_value());
+        }
+        auto output = std::move(thread_locals_[thread_id].batches.front());
+        thread_locals_[thread_id].batches.pop_front();
+        if (thread_locals_[thread_id].batches.empty()) {
+          return OperatorResult::Even(std::move(output));
+        } else {
+          return OperatorResult::HasMore(std::move(output));
+        }
+      };
+    }
+
+    std::optional<PipelineTaskDrain> Drain() override { return std::nullopt; }
+
+    std::unique_ptr<SourceOp> Source() override { return nullptr; }
+
+   private:
+    size_t dop_, n_;
+
+   private:
+    struct ThreadLocal {
+      std::list<Batch> batches;
+    };
+    std::vector<ThreadLocal> thread_locals_;
+  };
+
   size_t dop = 8;
-  OneSource source;
-  TimesNInNPipe pipe(3, dop);
+  MemorySource source({{1}});
+  TimesNSlicedPipe pipe(dop, 3);
   MemorySink sink;
   Pipeline pipeline{&source, {&pipe}, &sink};
   FollyFutureScheduler scheduler(4);
@@ -604,5 +654,105 @@ TEST(SketchTest, OneToThreeInThree) {
   ASSERT_EQ(sink.batches_.size(), 3);
   for (size_t i = 0; i < 3; ++i) {
     ASSERT_EQ(sink.batches_[i], (Batch{1}));
+  }
+}
+
+TEST(SketchTest, AccumulateThree) {
+  class AccumulatePipe : public PipeOp {
+   public:
+    AccumulatePipe(size_t dop, size_t n) : dop_(dop), n_(n) {
+      thread_locals_.resize(dop_);
+    }
+
+    PipelineTaskPipe Pipe() override {
+      PipelineTaskPipe f =
+          [&](ThreadId thread_id,
+              std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+        if (thread_locals_[thread_id].batch.size() >= n_) {
+          ARRA_DCHECK(!input.has_value());
+          Batch output(thread_locals_[thread_id].batch.begin(),
+                       thread_locals_[thread_id].batch.begin() + n_);
+          thread_locals_[thread_id].batch =
+              Batch(thread_locals_[thread_id].batch.begin() + n_,
+                    thread_locals_[thread_id].batch.end());
+          if (thread_locals_[thread_id].batch.size() > n_) {
+            return OperatorResult::HasMore(std::move(output));
+          } else {
+            return OperatorResult::Even(std::move(output));
+          }
+        }
+        ARRA_DCHECK(input.has_value());
+        thread_locals_[thread_id].batch.insert(thread_locals_[thread_id].batch.end(),
+                                               input.value().begin(),
+                                               input.value().end());
+        if (thread_locals_[thread_id].batch.size() >= n_) {
+          return f(thread_id, std::nullopt);
+        } else {
+          return OperatorResult::NeedsMore();
+        }
+      };
+
+      return f;
+    }
+
+    std::optional<PipelineTaskDrain> Drain() override {
+      return [&](ThreadId thread_id) -> arrow::Result<OperatorResult> {
+        if (thread_locals_[thread_id].batch.empty()) {
+          return OperatorResult::Finished(std::nullopt);
+        } else {
+          return OperatorResult::Finished(std::move(thread_locals_[thread_id].batch));
+        }
+      };
+    }
+
+    std::unique_ptr<SourceOp> Source() override { return nullptr; }
+
+   private:
+    size_t dop_, n_;
+
+   private:
+    struct ThreadLocal {
+      Batch batch;
+    };
+    std::vector<ThreadLocal> thread_locals_;
+  };
+
+  {
+    size_t dop = 8;
+    DistributedMemorySource source(dop, {{1}, {1}, {1}});
+    AccumulatePipe pipe(dop, 3);
+    MemorySink sink;
+    Pipeline pipeline{&source, {&pipe}, &sink};
+    FollyFutureScheduler scheduler(4);
+    Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
+    auto result = driver.Run(dop);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsFinished());
+    ASSERT_EQ(sink.batches_.size(), dop);
+    for (size_t i = 0; i < dop; ++i) {
+      ASSERT_EQ(sink.batches_[i], (Batch{1, 1, 1}));
+    }
+  }
+
+  {
+    size_t dop = 8;
+    DistributedMemorySource source(dop, {{1}, {1}, {1}, {1}, {1}});
+    AccumulatePipe pipe(dop, 3);
+    MemorySink sink;
+    Pipeline pipeline{&source, {&pipe}, &sink};
+    FollyFutureScheduler scheduler(4);
+    Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
+    auto result = driver.Run(dop);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsFinished());
+    ASSERT_EQ(sink.batches_.size(), dop * 2);
+    std::sort(sink.batches_.begin(), sink.batches_.end(),
+              [](const auto& lhs, const auto& rhs) { return lhs.size() < rhs.size(); });
+    for (size_t i = 0; i < dop; ++i) {
+      ASSERT_EQ(sink.batches_[i], (Batch{1, 1}));
+    }
+    for (size_t i = dop; i < dop * 2; ++i) {
+      ASSERT_EQ(sink.batches_[i], (Batch{1, 1, 1}));
+    }
   }
 }
