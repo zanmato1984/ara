@@ -273,7 +273,7 @@ class Driver {
     for (const auto& pipeline : pipelines_) {
       ARRA_ASSIGN_OR_RAISE(
           auto result, RunPipeline(dop, pipeline.source, pipeline.pipes, pipeline.sink));
-      ARRA_DCHECK(result->IsFinished());
+      ARRA_DCHECK(result.IsFinished());
     }
     return TaskStatus::Finished();
   }
@@ -297,16 +297,16 @@ class Driver {
     for (const auto& [source, pipe_start] : sources) {
       ARRA_ASSIGN_OR_RAISE(auto result,
                            RunPipeline(dop, source, pipes, pipe_start, sink));
-      ARRA_DCHECK(result->IsFinished());
+      ARRA_DCHECK(result.IsFinished());
     }
 
     auto sink_fe = sink->Frontend();
     auto sink_fe_handle = scheduler_->ScheduleTaskGroups(sink_fe);
     ARRA_ASSIGN_OR_RAISE(auto result, scheduler_->WaitTaskGroups(sink_fe_handle));
-    ARRA_DCHECK(result->IsFinished());
+    ARRA_DCHECK(result.IsFinished());
 
     ARRA_ASSIGN_OR_RAISE(result, scheduler_->WaitTaskGroups(sink_be_handle));
-    ARRA_DCHECK(result->IsFinished());
+    ARRA_DCHECK(result.IsFinished());
 
     return TaskStatus::Finished();
   }
@@ -320,7 +320,7 @@ class Driver {
     auto source_fe = source->Frontend();
     auto source_fe_handle = scheduler_->ScheduleTaskGroups(source_fe);
     ARRA_ASSIGN_OR_RAISE(auto result, scheduler_->WaitTaskGroups(source_fe_handle));
-    ARRA_DCHECK(result->IsFinished());
+    ARRA_DCHECK(result.IsFinished());
 
     auto source_source = source->Source();
     std::vector<std::pair<PipelineTaskPipe, std::optional<PipelineTaskDrain>>>
@@ -336,10 +336,12 @@ class Driver {
                        dop, std::nullopt};
     auto pipeline_handle = scheduler_->ScheduleTaskGroup(pipeline);
     ARRA_ASSIGN_OR_RAISE(result, scheduler_->WaitTaskGroup(pipeline_handle));
-    ARRA_DCHECK(result->IsFinished());
+    ARRA_DCHECK(result.IsFinished());
 
     ARRA_ASSIGN_OR_RAISE(result, scheduler_->WaitTaskGroups(source_be_handle));
-    ARRA_DCHECK(result->IsFinished());
+    ARRA_DCHECK(result.IsFinished());
+
+    return TaskStatus::Finished();
   }
 
  private:
@@ -364,26 +366,30 @@ class FollyFutureScheduler {
     auto num_tasks = std::get<1>(group);
     auto& task_cont = std::get<2>(group);
 
-    TaskGroupPayload payloads(num_tasks);
+    TaskGroupHandle handle{folly::makeFuture(TaskStatus::Finished()),
+                           TaskGroupPayload(num_tasks)};
     std::vector<ConcreteTask> tasks;
-    for (size_t i = 0; i < payloads.size(); ++i) {
-      payloads[i] = TaskStatus::Continue();
-      tasks.push_back(MakeTask(task, i, payloads[i]));
+    for (size_t i = 0; i < num_tasks; ++i) {
+      handle.second[i] = TaskStatus::Continue();
+      tasks.push_back(MakeTask(task, i, handle.second[i]));
     }
-    return {folly::via(&executor_)
-                .thenValue([&](auto&&) { return folly::collectAll(tasks); })
-                .thenValue([&](auto&& try_results) -> arrow::Result<TaskStatus> {
-                  for (auto&& try_result : try_results) {
-                    ARRA_DCHECK(try_result.hasValue());
-                    auto result = try_result.value();
-                    ARRA_RETURN_NOT_OK(result);
-                  }
-                  if (task_cont.has_value()) {
-                    return task_cont.value()();
-                  }
-                  return TaskStatus::Finished();
-                }),
-            std::move(payloads)};
+    handle.first =
+        folly::via(&executor_)
+            .thenValue([tasks = std::move(tasks)](auto&&) mutable {
+              return folly::collectAll(tasks);
+            })
+            .thenValue([&task_cont](auto&& try_results) -> arrow::Result<TaskStatus> {
+              for (auto&& try_result : try_results) {
+                ARRA_DCHECK(try_result.hasValue());
+                auto result = try_result.value();
+                ARRA_RETURN_NOT_OK(result);
+              }
+              if (task_cont.has_value()) {
+                return task_cont.value()();
+              }
+              return TaskStatus::Finished();
+            });
+    return std::move(handle);
   }
 
   TaskGroupsHandle ScheduleTaskGroups(const TaskGroups& groups) {
@@ -411,7 +417,7 @@ class FollyFutureScheduler {
     auto pred = [&]() {
       return result.ok() && (result->IsContinue() || result->IsYield());
     };
-    auto thunk = [&]() {
+    auto thunk = [&, task_id]() {
       return folly::makeSemiFuture().defer(
           [&, task_id](auto&&) { result = task(task_id); });
     };
@@ -425,3 +431,75 @@ class FollyFutureScheduler {
 };
 
 }  // namespace arra::sketch
+
+using namespace arra::sketch;
+
+class OneSource : public SourceOp {
+ public:
+  PipelineTaskSource Source() override {
+    return [&](ThreadId) -> arrow::Result<OperatorResult> {
+      if (!done.exchange(true)) {
+        return OperatorResult::HasMore({1});
+      }
+      return OperatorResult::Finished(std::nullopt);
+    };
+  }
+
+  TaskGroups Frontend() override { return {}; }
+
+  TaskGroups Backend() override { return {}; }
+
+ private:
+  std::atomic<bool> done = false;
+};
+
+class IdentityPipe : public PipeOp {
+ public:
+  PipelineTaskPipe Pipe() override {
+    return [&](ThreadId, std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+      if (input.has_value()) {
+        return OperatorResult::HasMore(std::move(input.value()));
+      }
+      return OperatorResult::NeedsMore();
+    };
+  }
+
+  std::optional<PipelineTaskDrain> Drain() override { return std::nullopt; }
+
+  std::unique_ptr<SourceOp> Source() override { return nullptr; }
+};
+
+class MemorySink : public SinkOp {
+ public:
+  PipelineTaskSink Sink() override {
+    return [&](ThreadId, std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+      if (input.has_value()) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        batches_.push_back(std::move(input.value()));
+      }
+      return OperatorResult::NeedsMore();
+    };
+  }
+
+  TaskGroups Frontend() override { return {}; }
+
+  TaskGroups Backend() override { return {}; }
+
+ public:
+  std::mutex mutex_;
+  std::vector<Batch> batches_;
+};
+
+TEST(SketchTest, OneToOne) {
+  OneSource source;
+  IdentityPipe pipe;
+  MemorySink sink;
+  Pipeline pipeline{&source, {&pipe}, &sink};
+  FollyFutureScheduler scheduler(4);
+  Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
+  auto result = driver.Run(8);
+  ASSERT_OK(result);
+  ASSERT_TRUE(result->IsFinished());
+  ASSERT_EQ(sink.batches_.size(), 1);
+  ASSERT_EQ(sink.batches_[0], Batch{1});
+}
