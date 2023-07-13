@@ -54,6 +54,7 @@ struct OperatorResult {
  private:
   enum class OperatorStatus {
     NEEDS_MORE,
+    EVEN,
     HAS_MORE,
     BACKPRESSURE,
     YIELD,
@@ -67,6 +68,7 @@ struct OperatorResult {
 
  public:
   bool IsNeedsMore() { return status_ == OperatorStatus::NEEDS_MORE; }
+  bool IsEven() { return status_ == OperatorStatus::EVEN; }
   bool IsHasMore() { return status_ == OperatorStatus::HAS_MORE; }
   bool IsBackpressure() { return status_ == OperatorStatus::BACKPRESSURE; }
   bool IsYield() { return status_ == OperatorStatus::YIELD; }
@@ -74,12 +76,15 @@ struct OperatorResult {
   bool IsCancelled() { return status_ == OperatorStatus::CANCELLED; }
 
   std::optional<Batch>& GetOutput() {
-    ARRA_DCHECK(IsHasMore() || IsFinished());
+    ARRA_DCHECK(IsEven() || IsHasMore() || IsFinished());
     return output_;
   }
 
  public:
   static OperatorResult NeedsMore() { return OperatorResult(OperatorStatus::NEEDS_MORE); }
+  static OperatorResult Even(Batch output) {
+    return OperatorResult(OperatorStatus::EVEN, std::move(output));
+  }
   static OperatorResult HasMore(Batch output) {
     return OperatorResult{OperatorStatus::HAS_MORE, std::move(output)};
   }
@@ -222,9 +227,11 @@ class PipelineTask {
         cancelled = true;
         return result.status();
       }
-      ARRA_DCHECK(result->IsHasMore() || result->IsNeedsMore());
-      if (result->IsHasMore()) {
-        local_states_[thread_id].pipe_stack.push(i);
+      ARRA_DCHECK(result->IsNeedsMore() || result->IsEven() || result->IsHasMore());
+      if (result->IsEven() || result->IsHasMore()) {
+        if (result->IsHasMore()) {
+          local_states_[thread_id].pipe_stack.push(i);
+        }
         ARRA_DCHECK(result->GetOutput().has_value());
         input = std::move(result->GetOutput());
       } else {
@@ -458,7 +465,7 @@ class IdentityPipe : public PipeOp {
   PipelineTaskPipe Pipe() override {
     return [&](ThreadId, std::optional<Batch> input) -> arrow::Result<OperatorResult> {
       if (input.has_value()) {
-        return OperatorResult::HasMore(std::move(input.value()));
+        return OperatorResult::Even(std::move(input.value()));
       }
       return OperatorResult::NeedsMore();
     };
@@ -467,6 +474,27 @@ class IdentityPipe : public PipeOp {
   std::optional<PipelineTaskDrain> Drain() override { return std::nullopt; }
 
   std::unique_ptr<SourceOp> Source() override { return nullptr; }
+};
+
+class TimesNPipe : public PipeOp {
+ public:
+  TimesNPipe(size_t n) : n_(n) {}
+
+  PipelineTaskPipe Pipe() override {
+    return [&](ThreadId, std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+      if (input.has_value()) {
+        return OperatorResult::Even(std::move(input.value()));
+      }
+      return OperatorResult::NeedsMore();
+    };
+  }
+
+  std::optional<PipelineTaskDrain> Drain() override { return std::nullopt; }
+
+  std::unique_ptr<SourceOp> Source() override { return nullptr; }
+
+ private:
+  size_t n_;
 };
 
 class MemorySink : public SinkOp {
