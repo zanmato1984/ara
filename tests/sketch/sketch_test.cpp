@@ -1224,14 +1224,44 @@ TEST(SketchTest, BasicYield) {
     std::unordered_set<QueueObserver*>& observers_;
   };
 
+  class CPUThreadPoolExecutor : public folly::CPUThreadPoolExecutor {
+   public:
+    CPUThreadPoolExecutor(size_t num_threads)
+        : folly::CPUThreadPoolExecutor(num_threads) {}
+
+    void add(folly::Func func) override {
+      enqueued++;
+      folly::CPUThreadPoolExecutor::add(std::move(func));
+    }
+
+   public:
+    std::atomic<size_t> enqueued{0};
+  };
+
   {
-    std::unordered_set<QueueObserver*> cpu_observers, io_observers;
-    folly::CPUThreadPoolExecutor::Options cpu_opts, io_opts;
-    cpu_opts.setQueueObserverFactory(
-        std::make_unique<QueueObserverFactory>(cpu_observers));
-    io_opts.setQueueObserverFactory(std::make_unique<QueueObserverFactory>(io_observers));
-    folly::CPUThreadPoolExecutor cpu_executor(2);
-    folly::CPUThreadPoolExecutor io_executor(2);
+    // std::unordered_set<QueueObserver*> cpu_observers, io_observers;
+    // folly::CPUThreadPoolExecutor::Options cpu_opts, io_opts;
+    // cpu_opts.setQueueObserverFactory(
+    //     std::make_unique<QueueObserverFactory>(cpu_observers));
+    // io_opts.setQueueObserverFactory(std::make_unique<QueueObserverFactory>(io_observers));
+
+    size_t dop = 8;
+    MemorySource source({{1}, {1}, {1}});
+    SpillThruPipe pipe(dop);
+    MemorySink sink;
+    Pipeline pipeline{&source, {&pipe}, &sink};
+
+    CPUThreadPoolExecutor cpu_executor(2);
+    CPUThreadPoolExecutor io_executor(2);
+    FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+
+    Driver<FollyFutureDoublePoolScheduler> driver({pipeline}, &scheduler);
+    auto result = driver.Run(dop);
+    ASSERT_OK(result);
+    ASSERT_EQ(sink.batches_.size(), 3);
+    for (size_t i = 0; i < 3; ++i) {
+      ASSERT_EQ(sink.batches_[i], (Batch{1}));
+    }
   }
 }
 
