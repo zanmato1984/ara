@@ -209,6 +209,15 @@ class PipelineTask {
         cancelled = true;
         return result.status();
       }
+      if (local_states_[thread_id].yield) {
+        ARRA_DCHECK(result->IsNeedsMore());
+        local_states_[thread_id].yield = false;
+        return TaskStatus::Continue();
+      }
+      if (result->IsYield()) {
+        local_states_[thread_id].yield = true;
+        return TaskStatus::Yield();
+      }
       ARRA_DCHECK(result->IsHasMore() || result->IsFinished());
       if (result->GetOutput().has_value()) {
         return Pipe(thread_id, drain_id + 1, std::move(result->GetOutput()));
@@ -226,6 +235,17 @@ class PipelineTask {
       if (!result.ok()) {
         cancelled = true;
         return result.status();
+      }
+      if (local_states_[thread_id].yield) {
+        ARRA_DCHECK(result->IsNeedsMore());
+        local_states_[thread_id].pipe_stack.push(i);
+        local_states_[thread_id].yield = false;
+        return TaskStatus::Continue();
+      }
+      if (result->IsYield()) {
+        local_states_[thread_id].pipe_stack.push(i);
+        local_states_[thread_id].yield = true;
+        return TaskStatus::Yield();
       }
       ARRA_DCHECK(result->IsNeedsMore() || result->IsEven() || result->IsHasMore());
       if (result->IsEven() || result->IsHasMore()) {
@@ -264,10 +284,10 @@ class PipelineTask {
     bool source_done = false;
     std::vector<size_t> drains;
     size_t draining = 0;
-    bool backpressure = false;
+    bool backpressure = false, yield = false;
   };
   std::vector<ThreadLocalState> local_states_;
-  std::atomic_bool cancelled = false, yield = false;
+  std::atomic_bool cancelled = false;
 };
 
 template <typename Scheduler>
@@ -436,6 +456,90 @@ class FollyFutureScheduler {
 
  private:
   folly::CPUThreadPoolExecutor executor_;
+};
+
+class FollyFutureDoublePoolScheduler {
+ private:
+  using ConcreteTask = folly::Future<arrow::Result<TaskStatus>>;
+  using TaskGroupPayload = std::vector<arrow::Result<TaskStatus>>;
+
+ public:
+  using TaskGroupHandle =
+      std::pair<folly::Future<arrow::Result<TaskStatus>>, TaskGroupPayload>;
+  using TaskGroupsHandle = std::vector<TaskGroupHandle>;
+
+  FollyFutureDoublePoolScheduler(folly::Executor* cpu_executor,
+                                 folly::Executor* io_executor)
+      : cpu_executor_(cpu_executor), io_executor_(io_executor) {}
+
+  TaskGroupHandle ScheduleTaskGroup(const TaskGroup& group) {
+    auto& task = std::get<0>(group);
+    auto num_tasks = std::get<1>(group);
+    auto& task_cont = std::get<2>(group);
+
+    TaskGroupHandle handle{folly::makeFuture(TaskStatus::Finished()),
+                           TaskGroupPayload(num_tasks)};
+    std::vector<ConcreteTask> tasks;
+    for (size_t i = 0; i < num_tasks; ++i) {
+      handle.second[i] = TaskStatus::Continue();
+      tasks.push_back(MakeTask(task, i, handle.second[i]));
+    }
+    handle.first =
+        folly::via(cpu_executor_)
+            .thenValue([tasks = std::move(tasks)](auto&&) mutable {
+              return folly::collectAll(tasks);
+            })
+            .thenValue([&task_cont](auto&& try_results) -> arrow::Result<TaskStatus> {
+              for (auto&& try_result : try_results) {
+                ARRA_DCHECK(try_result.hasValue());
+                auto result = try_result.value();
+                ARRA_RETURN_NOT_OK(result);
+              }
+              if (task_cont.has_value()) {
+                return task_cont.value()();
+              }
+              return TaskStatus::Finished();
+            });
+    return std::move(handle);
+  }
+
+  TaskGroupsHandle ScheduleTaskGroups(const TaskGroups& groups) {
+    TaskGroupsHandle handles;
+    for (const auto& group : groups) {
+      handles.push_back(ScheduleTaskGroup(group));
+    }
+    return handles;
+  }
+
+  arrow::Result<TaskStatus> WaitTaskGroup(TaskGroupHandle& group) {
+    return group.first.wait().value();
+  }
+
+  arrow::Result<TaskStatus> WaitTaskGroups(TaskGroupsHandle& groups) {
+    for (auto& group : groups) {
+      ARRA_RETURN_NOT_OK(WaitTaskGroup(group));
+    }
+    return TaskStatus::Finished();
+  }
+
+ private:
+  ConcreteTask MakeTask(const Task& task, TaskId task_id,
+                        arrow::Result<TaskStatus>& result) {
+    auto pred = [&]() {
+      return result.ok() && !result->IsFinished() && !result->IsCancelled();
+    };
+    auto thunk = [&, task_id]() {
+      auto* executor = result->IsYield() ? io_executor_ : cpu_executor_;
+      return folly::via(executor).then([&, task_id](auto&&) { result = task(task_id); });
+    };
+    return folly::whileDo(pred, thunk).thenValue([&](auto&&) {
+      return std::move(result);
+    });
+  }
+
+ private:
+  folly::Executor* cpu_executor_;
+  folly::Executor* io_executor_;
 };
 
 }  // namespace arra::sketch
@@ -1020,3 +1124,115 @@ TEST(SketchTest, BasicError) {
     ASSERT_EQ(result.status().message(), "42");
   }
 }
+
+TEST(SketchTest, BasicYield) {
+  class SpillThruPipe : public PipeOp {
+   public:
+    SpillThruPipe(size_t dop) : thread_locals_(dop) {}
+
+    PipelineTaskPipe Pipe() override {
+      return [&](ThreadId thread_id,
+                 std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+        if (thread_locals_[thread_id].spilling) {
+          ARRA_DCHECK(!input.has_value());
+          ARRA_DCHECK(thread_locals_[thread_id].batch.has_value());
+          thread_locals_[thread_id].spilling = false;
+          return OperatorResult::NeedsMore();
+        }
+        if (thread_locals_[thread_id].batch.has_value()) {
+          ARRA_DCHECK(!input.has_value());
+          auto output = std::move(thread_locals_[thread_id].batch.value());
+          thread_locals_[thread_id].batch = std::nullopt;
+          return OperatorResult::Even(std::move(output));
+        }
+        ARRA_DCHECK(input.has_value());
+        thread_locals_[thread_id].batch = std::move(input.value());
+        thread_locals_[thread_id].spilling = true;
+        return OperatorResult::Yield();
+      };
+    }
+
+    std::optional<PipelineTaskDrain> Drain() override { return std::nullopt; }
+
+    std::unique_ptr<SourceOp> Source() override { return nullptr; }
+
+   private:
+    struct ThreadLocal {
+      std::optional<Batch> batch = std::nullopt;
+      bool spilling = false;
+    };
+    std::vector<ThreadLocal> thread_locals_;
+  };
+
+  {
+    size_t dop = 8;
+    MemorySource source({{1}, {1}, {1}});
+    SpillThruPipe pipe(dop);
+    MemorySink sink;
+    Pipeline pipeline{&source, {&pipe}, &sink};
+    FollyFutureScheduler scheduler(4);
+    Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
+    auto result = driver.Run(dop);
+    ASSERT_OK(result);
+    ASSERT_EQ(sink.batches_.size(), 3);
+    for (size_t i = 0; i < 3; ++i) {
+      ASSERT_EQ(sink.batches_[i], (Batch{1}));
+    }
+  }
+
+  {
+    size_t dop = 2;
+    MemorySource source({{1}, {1}, {1}});
+    SpillThruPipe pipe(dop);
+    MemorySink sink;
+    Pipeline pipeline{&source, {&pipe}, &sink};
+    FollyFutureScheduler scheduler(4);
+    Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
+    auto result = driver.Run(dop);
+    ASSERT_OK(result);
+    ASSERT_EQ(sink.batches_.size(), 3);
+    for (size_t i = 0; i < 3; ++i) {
+      ASSERT_EQ(sink.batches_[i], (Batch{1}));
+    }
+  }
+
+  class QueueObserver : public folly::QueueObserver {
+   public:
+    intptr_t onEnqueued(const folly::RequestContext*) override {
+      enqueued++;
+      return 0;
+    }
+
+    void onDequeued(intptr_t) override {}
+
+   public:
+    std::atomic<size_t> enqueued{0};
+  };
+
+  class QueueObserverFactory : folly::QueueObserverFactory {
+   public:
+    QueueObserverFactory(std::unordered_set<QueueObserver*>& observers)
+        : observers_(observers) {}
+
+    std::unique_ptr<folly::QueueObserver> create(int8_t) override {
+      auto observer = std::make_unique<QueueObserver>();
+      observers_.insert(observer.get());
+      return observer;
+    }
+
+   public:
+    std::unordered_set<QueueObserver*>& observers_;
+  };
+
+  {
+    std::unordered_set<QueueObserver*> cpu_observers, io_observers;
+    folly::CPUThreadPoolExecutor::Options cpu_opts, io_opts;
+    cpu_opts.setQueueObserverFactory(
+        std::make_unique<QueueObserverFactory>(cpu_observers));
+    io_opts.setQueueObserverFactory(std::make_unique<QueueObserverFactory>(io_observers));
+    folly::CPUThreadPoolExecutor cpu_executor(2);
+    folly::CPUThreadPoolExecutor io_executor(2);
+  }
+}
+
+// TODO: Everthing about drain is untested.
