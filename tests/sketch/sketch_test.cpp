@@ -3,6 +3,7 @@
 #include <arrow/testing/gtest_util.h>
 #include <arrow/util/logging.h>
 #include <folly/executors/CPUThreadPoolExecutor.h>
+#include <folly/executors/IOThreadPoolExecutor.h>
 #include <folly/futures/Future.h>
 #include <gtest/gtest.h>
 #include <stack>
@@ -20,6 +21,8 @@ struct TaskStatus {
     BACKPRESSURE,
     YIELD,
     FINISHED,
+    // TODO: May need a "REPEAT" status to support join spill, i.e., restore
+    // sub-hashtables probe side batch partitions, and redo join for this partition.
     CANCELLED,
   } code_;
 
@@ -32,6 +35,23 @@ struct TaskStatus {
   bool IsFinished() { return code_ == Code::FINISHED; }
   bool IsCancelled() { return code_ == Code::CANCELLED; }
 
+  std::string ToString() {
+    switch (code_) {
+      case Code::CONTINUE:
+        return "CONTINUE";
+      case Code::BACKPRESSURE:
+        return "BACKPRESSURE";
+      case Code::YIELD:
+        return "YIELD";
+      case Code::FINISHED:
+        return "FINISHED";
+      case Code::CANCELLED:
+        return "CANCELLED";
+      default:
+        return "UNKNOWN";
+    }
+  }
+
  public:
   static TaskStatus Continue() { return TaskStatus(Code::CONTINUE); }
   static TaskStatus Backpressure() { return TaskStatus{Code::BACKPRESSURE}; }
@@ -43,8 +63,9 @@ struct TaskStatus {
 using TaskId = size_t;
 using ThreadId = size_t;
 
-using Task = std::function<arrow::Result<TaskStatus>(TaskId)>;
-using TaskCont = std::function<arrow::Result<TaskStatus>()>;
+using TaskResult = arrow::Result<TaskStatus>;
+using Task = std::function<TaskResult(TaskId)>;
+using TaskCont = std::function<TaskResult()>;
 using TaskGroup = std::tuple<Task, size_t, std::optional<TaskCont>>;
 using TaskGroups = std::vector<TaskGroup>;
 
@@ -154,7 +175,7 @@ class PipelineTask {
     }
   }
 
-  arrow::Result<TaskStatus> Run(ThreadId thread_id) {
+  TaskResult Run(ThreadId thread_id) {
     if (cancelled) {
       return TaskStatus::Cancelled();
     }
@@ -215,6 +236,7 @@ class PipelineTask {
         return TaskStatus::Continue();
       }
       if (result->IsYield()) {
+        ARRA_DCHECK(!local_states_[thread_id].yield);
         local_states_[thread_id].yield = true;
         return TaskStatus::Yield();
       }
@@ -228,8 +250,7 @@ class PipelineTask {
   }
 
  private:
-  arrow::Result<TaskStatus> Pipe(ThreadId thread_id, size_t pipe_id,
-                                 std::optional<Batch> input) {
+  TaskResult Pipe(ThreadId thread_id, size_t pipe_id, std::optional<Batch> input) {
     for (size_t i = pipe_id; i < pipes_.size(); i++) {
       auto result = pipes_[i].first(thread_id, std::move(input));
       if (!result.ok()) {
@@ -243,6 +264,7 @@ class PipelineTask {
         return TaskStatus::Continue();
       }
       if (result->IsYield()) {
+        ARRA_DCHECK(!local_states_[thread_id].yield);
         local_states_[thread_id].pipe_stack.push(i);
         local_states_[thread_id].yield = true;
         return TaskStatus::Yield();
@@ -296,7 +318,7 @@ class Driver {
   Driver(std::vector<Pipeline> pipelines, Scheduler* scheduler)
       : pipelines_(std::move(pipelines)), scheduler_(scheduler) {}
 
-  arrow::Result<TaskStatus> Run(size_t dop) {
+  TaskResult Run(size_t dop) {
     for (const auto& pipeline : pipelines_) {
       ARRA_ASSIGN_OR_RAISE(
           auto result, RunPipeline(dop, pipeline.source, pipeline.pipes, pipeline.sink));
@@ -306,8 +328,8 @@ class Driver {
   }
 
  private:
-  arrow::Result<TaskStatus> RunPipeline(size_t dop, SourceOp* source,
-                                        const std::vector<PipeOp*>& pipes, SinkOp* sink) {
+  TaskResult RunPipeline(size_t dop, SourceOp* source, const std::vector<PipeOp*>& pipes,
+                         SinkOp* sink) {
     auto sink_be = sink->Backend();
     auto sink_be_handle = scheduler_->ScheduleTaskGroups(sink_be);
 
@@ -338,9 +360,8 @@ class Driver {
     return TaskStatus::Finished();
   }
 
-  arrow::Result<TaskStatus> RunPipeline(size_t dop, SourceOp* source,
-                                        const std::vector<PipeOp*>& pipes,
-                                        size_t pipe_start, SinkOp* sink) {
+  TaskResult RunPipeline(size_t dop, SourceOp* source, const std::vector<PipeOp*>& pipes,
+                         size_t pipe_start, SinkOp* sink) {
     auto source_be = source->Backend();
     auto source_be_handle = scheduler_->ScheduleTaskGroups(source_be);
 
@@ -378,12 +399,11 @@ class Driver {
 
 class FollyFutureScheduler {
  private:
-  using ConcreteTask = folly::SemiFuture<arrow::Result<TaskStatus>>;
-  using TaskGroupPayload = std::vector<arrow::Result<TaskStatus>>;
+  using ConcreteTask = folly::SemiFuture<TaskResult>;
+  using TaskGroupPayload = std::vector<TaskResult>;
 
  public:
-  using TaskGroupHandle =
-      std::pair<folly::Future<arrow::Result<TaskStatus>>, TaskGroupPayload>;
+  using TaskGroupHandle = std::pair<folly::Future<TaskResult>, TaskGroupPayload>;
   using TaskGroupsHandle = std::vector<TaskGroupHandle>;
 
   FollyFutureScheduler(size_t num_threads) : executor_(num_threads) {}
@@ -400,22 +420,21 @@ class FollyFutureScheduler {
       handle.second[i] = TaskStatus::Continue();
       tasks.push_back(MakeTask(task, i, handle.second[i]));
     }
-    handle.first =
-        folly::via(&executor_)
-            .thenValue([tasks = std::move(tasks)](auto&&) mutable {
-              return folly::collectAll(tasks);
-            })
-            .thenValue([&task_cont](auto&& try_results) -> arrow::Result<TaskStatus> {
-              for (auto&& try_result : try_results) {
-                ARRA_DCHECK(try_result.hasValue());
-                auto result = try_result.value();
-                ARRA_RETURN_NOT_OK(result);
-              }
-              if (task_cont.has_value()) {
-                return task_cont.value()();
-              }
-              return TaskStatus::Finished();
-            });
+    handle.first = folly::via(&executor_)
+                       .thenValue([tasks = std::move(tasks)](auto&&) mutable {
+                         return folly::collectAll(tasks);
+                       })
+                       .thenValue([&task_cont](auto&& try_results) -> TaskResult {
+                         for (auto&& try_result : try_results) {
+                           ARRA_DCHECK(try_result.hasValue());
+                           auto result = try_result.value();
+                           ARRA_RETURN_NOT_OK(result);
+                         }
+                         if (task_cont.has_value()) {
+                           return task_cont.value()();
+                         }
+                         return TaskStatus::Finished();
+                       });
     return std::move(handle);
   }
 
@@ -427,11 +446,9 @@ class FollyFutureScheduler {
     return handles;
   }
 
-  arrow::Result<TaskStatus> WaitTaskGroup(TaskGroupHandle& group) {
-    return group.first.wait().value();
-  }
+  TaskResult WaitTaskGroup(TaskGroupHandle& group) { return group.first.wait().value(); }
 
-  arrow::Result<TaskStatus> WaitTaskGroups(TaskGroupsHandle& groups) {
+  TaskResult WaitTaskGroups(TaskGroupsHandle& groups) {
     for (auto& group : groups) {
       ARRA_RETURN_NOT_OK(WaitTaskGroup(group));
     }
@@ -439,8 +456,7 @@ class FollyFutureScheduler {
   }
 
  private:
-  static ConcreteTask MakeTask(const Task& task, TaskId task_id,
-                               arrow::Result<TaskStatus>& result) {
+  static ConcreteTask MakeTask(const Task& task, TaskId task_id, TaskResult& result) {
     auto pred = [&]() {
       return result.ok() &&
              (result->IsContinue() || result->IsBackpressure() || result->IsYield());
@@ -460,17 +476,26 @@ class FollyFutureScheduler {
 
 class FollyFutureDoublePoolScheduler {
  private:
-  using ConcreteTask = folly::Future<arrow::Result<TaskStatus>>;
-  using TaskGroupPayload = std::vector<arrow::Result<TaskStatus>>;
+  using ConcreteTask = folly::Future<TaskResult>;
+  using TaskGroupPayload = std::vector<TaskResult>;
 
  public:
-  using TaskGroupHandle =
-      std::pair<folly::Future<arrow::Result<TaskStatus>>, TaskGroupPayload>;
+  using TaskGroupHandle = std::pair<folly::Future<TaskResult>, TaskGroupPayload>;
   using TaskGroupsHandle = std::vector<TaskGroupHandle>;
 
+  class TaskObserver {
+   public:
+    virtual ~TaskObserver() = default;
+
+    virtual void BeforeTaskRun(const Task& task, TaskId task_id) = 0;
+    virtual void AfterTaskRun(const Task& task, TaskId task_id,
+                              const TaskResult& result) = 0;
+  };
+
   FollyFutureDoublePoolScheduler(folly::Executor* cpu_executor,
-                                 folly::Executor* io_executor)
-      : cpu_executor_(cpu_executor), io_executor_(io_executor) {}
+                                 folly::Executor* io_executor,
+                                 TaskObserver* observer = nullptr)
+      : cpu_executor_(cpu_executor), io_executor_(io_executor), observer_(observer) {}
 
   TaskGroupHandle ScheduleTaskGroup(const TaskGroup& group) {
     auto& task = std::get<0>(group);
@@ -484,22 +509,21 @@ class FollyFutureDoublePoolScheduler {
       handle.second[i] = TaskStatus::Continue();
       tasks.push_back(MakeTask(task, i, handle.second[i]));
     }
-    handle.first =
-        folly::via(cpu_executor_)
-            .thenValue([tasks = std::move(tasks)](auto&&) mutable {
-              return folly::collectAll(tasks);
-            })
-            .thenValue([&task_cont](auto&& try_results) -> arrow::Result<TaskStatus> {
-              for (auto&& try_result : try_results) {
-                ARRA_DCHECK(try_result.hasValue());
-                auto result = try_result.value();
-                ARRA_RETURN_NOT_OK(result);
-              }
-              if (task_cont.has_value()) {
-                return task_cont.value()();
-              }
-              return TaskStatus::Finished();
-            });
+    handle.first = folly::via(cpu_executor_)
+                       .thenValue([tasks = std::move(tasks)](auto&&) mutable {
+                         return folly::collectAll(tasks);
+                       })
+                       .thenValue([&task_cont](auto&& try_results) -> TaskResult {
+                         for (auto&& try_result : try_results) {
+                           ARRA_DCHECK(try_result.hasValue());
+                           auto result = try_result.value();
+                           ARRA_RETURN_NOT_OK(result);
+                         }
+                         if (task_cont.has_value()) {
+                           return task_cont.value()();
+                         }
+                         return TaskStatus::Finished();
+                       });
     return std::move(handle);
   }
 
@@ -511,11 +535,9 @@ class FollyFutureDoublePoolScheduler {
     return handles;
   }
 
-  arrow::Result<TaskStatus> WaitTaskGroup(TaskGroupHandle& group) {
-    return group.first.wait().value();
-  }
+  TaskResult WaitTaskGroup(TaskGroupHandle& group) { return group.first.wait().value(); }
 
-  arrow::Result<TaskStatus> WaitTaskGroups(TaskGroupsHandle& groups) {
+  TaskResult WaitTaskGroups(TaskGroupsHandle& groups) {
     for (auto& group : groups) {
       ARRA_RETURN_NOT_OK(WaitTaskGroup(group));
     }
@@ -523,14 +545,21 @@ class FollyFutureDoublePoolScheduler {
   }
 
  private:
-  ConcreteTask MakeTask(const Task& task, TaskId task_id,
-                        arrow::Result<TaskStatus>& result) {
+  ConcreteTask MakeTask(const Task& task, TaskId task_id, TaskResult& result) {
     auto pred = [&]() {
       return result.ok() && !result->IsFinished() && !result->IsCancelled();
     };
     auto thunk = [&, task_id]() {
       auto* executor = result->IsYield() ? io_executor_ : cpu_executor_;
-      return folly::via(executor).then([&, task_id](auto&&) { result = task(task_id); });
+      return folly::via(executor).then([&, task_id](auto&&) {
+        if (observer_) {
+          observer_->BeforeTaskRun(task, task_id);
+        }
+        result = task(task_id);
+        if (observer_) {
+          observer_->AfterTaskRun(task, task_id, result);
+        }
+      });
     };
     return folly::whileDo(pred, thunk).thenValue([&](auto&&) {
       return std::move(result);
@@ -540,6 +569,7 @@ class FollyFutureDoublePoolScheduler {
  private:
   folly::Executor* cpu_executor_;
   folly::Executor* io_executor_;
+  TaskObserver* observer_;
 };
 
 }  // namespace arra::sketch
@@ -1196,72 +1226,55 @@ TEST(SketchTest, BasicYield) {
     }
   }
 
-  class QueueObserver : public folly::QueueObserver {
+  class TaskObserver : public FollyFutureDoublePoolScheduler::TaskObserver {
    public:
-    intptr_t onEnqueued(const folly::RequestContext*) override {
-      enqueued++;
-      return 0;
-    }
+    TaskObserver(size_t dop)
+        : last_results_(dop, TaskStatus::Continue()), io_thread_infos_(dop) {}
 
-    void onDequeued(intptr_t) override {}
+    void BeforeTaskRun(const Task& task, TaskId task_id) override {}
 
-   public:
-    std::atomic<size_t> enqueued{0};
-  };
-
-  class QueueObserverFactory : folly::QueueObserverFactory {
-   public:
-    QueueObserverFactory(std::unordered_set<QueueObserver*>& observers)
-        : observers_(observers) {}
-
-    std::unique_ptr<folly::QueueObserver> create(int8_t) override {
-      auto observer = std::make_unique<QueueObserver>();
-      observers_.insert(observer.get());
-      return observer;
+    void AfterTaskRun(const Task& task, TaskId task_id,
+                      const TaskResult& result) override {
+      if (last_results_[task_id].ok() && last_results_[task_id]->IsYield()) {
+        io_thread_infos_[task_id].insert(std::make_pair(
+            folly::getCurrentThreadID(), folly::getCurrentThreadName().value()));
+      }
+      last_results_[task_id] = result;
     }
 
    public:
-    std::unordered_set<QueueObserver*>& observers_;
-  };
-
-  class CPUThreadPoolExecutor : public folly::CPUThreadPoolExecutor {
-   public:
-    CPUThreadPoolExecutor(size_t num_threads)
-        : folly::CPUThreadPoolExecutor(num_threads) {}
-
-    void add(folly::Func func) override {
-      enqueued++;
-      folly::CPUThreadPoolExecutor::add(std::move(func));
-    }
-
-   public:
-    std::atomic<size_t> enqueued{0};
+    std::vector<TaskResult> last_results_;
+    std::vector<std::unordered_set<std::pair<ThreadId, std::string>>> io_thread_infos_;
   };
 
   {
-    // std::unordered_set<QueueObserver*> cpu_observers, io_observers;
-    // folly::CPUThreadPoolExecutor::Options cpu_opts, io_opts;
-    // cpu_opts.setQueueObserverFactory(
-    //     std::make_unique<QueueObserverFactory>(cpu_observers));
-    // io_opts.setQueueObserverFactory(std::make_unique<QueueObserverFactory>(io_observers));
-
     size_t dop = 8;
-    MemorySource source({{1}, {1}, {1}});
+    MemorySource source({{1}, {1}, {1}, {1}});
     SpillThruPipe pipe(dop);
     MemorySink sink;
     Pipeline pipeline{&source, {&pipe}, &sink};
 
-    CPUThreadPoolExecutor cpu_executor(2);
-    CPUThreadPoolExecutor io_executor(2);
-    FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+    folly::CPUThreadPoolExecutor cpu_executor(4);
+    size_t num_io_threads = 1;
+    folly::IOThreadPoolExecutor io_executor(num_io_threads);
+    TaskObserver observer(dop);
+    FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor, &observer);
 
     Driver<FollyFutureDoublePoolScheduler> driver({pipeline}, &scheduler);
     auto result = driver.Run(dop);
     ASSERT_OK(result);
-    ASSERT_EQ(sink.batches_.size(), 3);
-    for (size_t i = 0; i < 3; ++i) {
+    ASSERT_EQ(sink.batches_.size(), 4);
+    for (size_t i = 0; i < 4; ++i) {
       ASSERT_EQ(sink.batches_[i], (Batch{1}));
     }
+
+    std::unordered_set<std::pair<ThreadId, std::string>> io_thread_info;
+    for (size_t i = 0; i < dop; ++i) {
+      std::copy(observer.io_thread_infos_[i].begin(), observer.io_thread_infos_[i].end(),
+                std::inserter(io_thread_info, io_thread_info.end()));
+    }
+    ASSERT_EQ(io_thread_info.size(), num_io_threads);
+    ASSERT_EQ(io_thread_info.begin()->second.substr(0, 12), "IOThreadPool");
   }
 }
 
