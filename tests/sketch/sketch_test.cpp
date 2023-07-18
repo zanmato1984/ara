@@ -332,6 +332,7 @@ class Driver {
  private:
   TaskResult RunPipeline(size_t dop, SourceOp* source, const std::vector<PipeOp*>& pipes,
                          SinkOp* sink) {
+    // TODO: Backend should be waited even error happens.
     auto sink_be = sink->Backend();
     auto sink_be_handle = scheduler_->ScheduleTaskGroups(sink_be);
 
@@ -364,6 +365,7 @@ class Driver {
 
   TaskResult RunPipeline(size_t dop, SourceOp* source, const std::vector<PipeOp*>& pipes,
                          size_t pipe_start, SinkOp* sink) {
+    // TODO: Backend should be waited even error happens.
     auto source_be = source->Backend();
     auto source_be_handle = scheduler_->ScheduleTaskGroups(source_be);
 
@@ -1321,8 +1323,29 @@ TEST(SketchTest, Drain) {
   Pipeline pipeline{&source, {&pipe}, &sink};
 
   folly::CPUThreadPoolExecutor cpu_executor(4);
-  size_t num_io_threads = 1;
-  folly::IOThreadPoolExecutor io_executor(num_io_threads);
+  folly::IOThreadPoolExecutor io_executor(1);
+  FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+
+  Driver<FollyFutureDoublePoolScheduler> driver({pipeline}, &scheduler);
+  auto result = driver.Run(dop);
+  ASSERT_OK(result);
+  ASSERT_EQ(sink.batches_.size(), 4);
+  for (size_t i = 0; i < 4; ++i) {
+    ASSERT_EQ(sink.batches_[i], (Batch{1}));
+  }
+}
+
+TEST(SketchTest, MultiDrain) {
+  size_t dop = 2;
+  MemorySource source({{1}, {1}, {1}, {1}});
+  DrainOnlyPipe pipe_1(dop);
+  DrainOnlyPipe pipe_2(dop);
+  DrainOnlyPipe pipe_3(dop);
+  MemorySink sink;
+  Pipeline pipeline{&source, {&pipe_1, &pipe_2, &pipe_3}, &sink};
+
+  folly::CPUThreadPoolExecutor cpu_executor(4);
+  folly::IOThreadPoolExecutor io_executor(1);
   FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
 
   Driver<FollyFutureDoublePoolScheduler> driver({pipeline}, &scheduler);
