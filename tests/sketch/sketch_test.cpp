@@ -1030,9 +1030,10 @@ class ErrorGenerator {
  public:
   ErrorGenerator(size_t trigger) : trigger_(trigger) {}
 
-  arrow::Result<OperatorResult> operator()(OperatorResult non_error) {
+  template <typename T>
+  arrow::Result<T> operator()(T non_error) {
     if (counter_++ == trigger_) {
-      return arrow::Status::Invalid("42");
+      return arrow::Status::Invalid(std::to_string(trigger_));
     }
     return non_error;
   }
@@ -1043,17 +1044,135 @@ class ErrorGenerator {
   std::atomic<size_t> counter_ = 0;
 };
 
-class ErrorSource : public SourceOp {
+class ErrorOpWrapper {
  public:
-  ErrorSource(std::unique_ptr<ErrorGenerator> err_gen = nullptr)
-      : err_gen_(std::move(err_gen)) {}
+  ErrorOpWrapper(ErrorGenerator* err_gen) : err_gen_(err_gen) {}
+
+ protected:
+  template <typename TTask, typename... TArgs>
+  auto WrapError(TTask&& task, TArgs&&... args) {
+    auto result = task(std::forward<TArgs>(args)...);
+    if (err_gen_ == nullptr || !result.ok()) {
+      return result;
+    }
+    return (*err_gen_)(std::move(*result));
+  }
+
+  auto WrapTaskGroup(const TaskGroup& task_group) {
+    auto task = [this, task = std::get<0>(task_group)](ThreadId thread_id) -> TaskResult {
+      return WrapError(task, thread_id);
+    };
+    auto size = std::get<1>(task_group);
+    std::optional<TaskCont> task_cont = std::nullopt;
+    if (std::get<2>(task_group).has_value()) {
+      task_cont = [this, task_cont = std::get<2>(task_group).value()]() -> TaskResult {
+        return WrapError(task_cont);
+      };
+    }
+    return TaskGroup{std::move(task), size, std::move(task_cont)};
+  }
+
+  auto WrapTaskGroups(const TaskGroups& task_groups) {
+    TaskGroups transformed(task_groups.size());
+    std::transform(task_groups.begin(), task_groups.end(), transformed.begin(),
+                   [&](const auto& task_group) { return WrapTaskGroup(task_group); });
+    return transformed;
+  }
+
+ protected:
+  ErrorGenerator* err_gen_;
+};
+
+class ErrorSource : virtual public SourceOp, public ErrorOpWrapper {
+ public:
+  ErrorSource(ErrorGenerator* err_gen, SourceOp* source)
+      : ErrorOpWrapper(err_gen), source_(source) {}
+
+  PipelineTaskSource Source() override {
+    return [&](ThreadId thread_id) -> arrow::Result<OperatorResult> {
+      return WrapError(source_->Source(), thread_id);
+    };
+  }
+
+  TaskGroups Frontend() override {
+    auto parent_groups = source_->Frontend();
+    return WrapTaskGroups(parent_groups);
+  }
+
+  TaskGroups Backend() override {
+    auto parent_groups = source_->Backend();
+    return WrapTaskGroups(parent_groups);
+  }
+
+ private:
+  SourceOp* source_;
+};
+
+class ErrorPipe : virtual public PipeOp, public ErrorOpWrapper {
+ public:
+  ErrorPipe(ErrorGenerator* err_gen, PipeOp* pipe)
+      : ErrorOpWrapper(err_gen), pipe_(pipe) {}
+
+  PipelineTaskPipe Pipe() override {
+    return [&](ThreadId thread_id,
+               std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+      return WrapError(pipe_->Pipe(), thread_id, std::move(input));
+    };
+  }
+
+  std::optional<PipelineTaskDrain> Drain() override {
+    auto drain = pipe_->Drain();
+    if (!drain.has_value()) {
+      return std::nullopt;
+    }
+    return [&, drain](ThreadId thread_id) -> arrow::Result<OperatorResult> {
+      return WrapError(drain.value(), thread_id);
+    };
+  }
+
+  std::unique_ptr<SourceOp> Source() override {
+    pipe_source_ = pipe_->Source();
+    return std::make_unique<ErrorSource>(err_gen_, pipe_source_.get());
+  }
+
+ private:
+  PipeOp* pipe_;
+  std::unique_ptr<SourceOp> pipe_source_;
+};
+
+class ErrorSink : virtual public SinkOp, public ErrorOpWrapper {
+ public:
+  ErrorSink(ErrorGenerator* err_gen, SinkOp* sink)
+      : ErrorOpWrapper(err_gen), sink_(sink) {}
+
+  PipelineTaskSink Sink() override {
+    return [&](ThreadId thread_id,
+               std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+      return WrapError(sink_->Sink(), thread_id, std::move(input));
+    };
+  }
+
+  TaskGroups Frontend() override {
+    auto parent_groups = sink_->Frontend();
+    return WrapTaskGroups(parent_groups);
+  }
+
+  TaskGroups Backend() override {
+    auto parent_groups = sink_->Backend();
+    return WrapTaskGroups(parent_groups);
+  }
+
+ private:
+  SinkOp* sink_;
+};
+
+class InfiniteSource : public SourceOp {
+ public:
+  InfiniteSource(Batch batch) : batch_(std::move(batch)) {}
 
   PipelineTaskSource Source() override {
     return [&](ThreadId) -> arrow::Result<OperatorResult> {
-      if (err_gen_ != nullptr) {
-        return (*err_gen_)(OperatorResult::HasMore({}));
-      }
-      return OperatorResult::HasMore({});
+      return OperatorResult::HasMore(batch_);
     };
   }
 
@@ -1062,41 +1181,13 @@ class ErrorSource : public SourceOp {
   TaskGroups Backend() override { return {}; }
 
  private:
-  std::unique_ptr<ErrorGenerator> err_gen_;
+  Batch batch_;
 };
 
-class ErrorPipe : public PipeOp {
+class BlackHoleSink : public SinkOp {
  public:
-  ErrorPipe(std::unique_ptr<ErrorGenerator> err_gen = nullptr)
-      : err_gen_(std::move(err_gen)) {}
-
-  PipelineTaskPipe Pipe() override {
-    return [&](ThreadId, std::optional<Batch> input) -> arrow::Result<OperatorResult> {
-      if (err_gen_ != nullptr) {
-        return (*err_gen_)(OperatorResult::Even(std::move(input.value())));
-      }
-      return OperatorResult::Even(std::move(input.value()));
-    };
-  }
-
-  std::optional<PipelineTaskDrain> Drain() override { return std::nullopt; }
-
-  std::unique_ptr<SourceOp> Source() override { return nullptr; }
-
- private:
-  std::unique_ptr<ErrorGenerator> err_gen_;
-};
-
-class ErrorSink : public SinkOp {
- public:
-  ErrorSink(std::unique_ptr<ErrorGenerator> err_gen = nullptr)
-      : err_gen_(std::move(err_gen)) {}
-
   PipelineTaskSink Sink() override {
     return [&](ThreadId, std::optional<Batch>) -> arrow::Result<OperatorResult> {
-      if (err_gen_ != nullptr) {
-        return (*err_gen_)(OperatorResult::NeedsMore());
-      }
       return OperatorResult::NeedsMore();
     };
   }
@@ -1104,19 +1195,17 @@ class ErrorSink : public SinkOp {
   TaskGroups Frontend() override { return {}; }
 
   TaskGroups Backend() override { return {}; }
-
- private:
-  std::unique_ptr<ErrorGenerator> err_gen_;
 };
 
 TEST(SketchTest, BasicError) {
   {
     size_t dop = 8;
-    auto err_gen = std::make_unique<ErrorGenerator>(42);
-    ErrorSource source(std::move(err_gen));
-    ErrorPipe pipe;
-    ErrorSink sink;
-    Pipeline pipeline{&source, {&pipe}, &sink};
+    InfiniteSource source(Batch{});
+    IdentityPipe pipe;
+    BlackHoleSink sink;
+    ErrorGenerator err_gen(42);
+    ErrorSource err_source(&err_gen, &source);
+    Pipeline pipeline{&err_source, {&pipe}, &sink};
     FollyFutureScheduler scheduler(4);
     Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
     auto result = driver.Run(dop);
@@ -1127,11 +1216,12 @@ TEST(SketchTest, BasicError) {
 
   {
     size_t dop = 8;
-    auto err_gen = std::make_unique<ErrorGenerator>(42);
-    ErrorSource source;
-    ErrorPipe pipe(std::move(err_gen));
-    ErrorSink sink;
-    Pipeline pipeline{&source, {&pipe}, &sink};
+    InfiniteSource source(Batch{});
+    IdentityPipe pipe;
+    BlackHoleSink sink;
+    ErrorGenerator err_gen(42);
+    ErrorPipe err_pipe(&err_gen, &pipe);
+    Pipeline pipeline{&source, {&err_pipe}, &sink};
     FollyFutureScheduler scheduler(4);
     Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
     auto result = driver.Run(dop);
@@ -1142,11 +1232,12 @@ TEST(SketchTest, BasicError) {
 
   {
     size_t dop = 8;
-    auto err_gen = std::make_unique<ErrorGenerator>(42);
-    ErrorSource source;
-    ErrorPipe pipe;
-    ErrorSink sink(std::move(err_gen));
-    Pipeline pipeline{&source, {&pipe}, &sink};
+    InfiniteSource source(Batch{});
+    IdentityPipe pipe;
+    BlackHoleSink sink;
+    ErrorGenerator err_gen(42);
+    ErrorSink err_sink(&err_gen, &sink);
+    Pipeline pipeline{&source, {&pipe}, &err_sink};
     FollyFutureScheduler scheduler(4);
     Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
     auto result = driver.Run(dop);
@@ -1356,3 +1447,39 @@ TEST(SketchTest, MultiDrain) {
     ASSERT_EQ(sink.batches_[i], (Batch{1}));
   }
 }
+
+TEST(SketchTest, DrainBackpressure) {}
+
+class DrainErrorPipe : public ErrorPipe, public DrainOnlyPipe {
+ public:
+  DrainErrorPipe(ErrorGenerator* err_gen, size_t dop)
+      : ErrorPipe(err_gen, static_cast<DrainOnlyPipe*>(this)), DrainOnlyPipe(dop) {}
+
+  PipelineTaskPipe Pipe() override { return DrainOnlyPipe::Pipe(); }
+
+ private:
+  std::unique_ptr<ErrorGenerator> err_gen_;
+};
+
+TEST(SketchTest, DrainError) {
+  size_t dop = 2;
+  MemorySource source({{1}, {1}, {1}, {1}, {1}, {1}, {1}, {1}});
+  ErrorGenerator err_gen(7);
+  DrainErrorPipe pipe(&err_gen, dop);
+  BlackHoleSink sink;
+  Pipeline pipeline{&source, {static_cast<ErrorPipe*>(&pipe)}, &sink};
+
+  folly::CPUThreadPoolExecutor cpu_executor(4);
+  folly::IOThreadPoolExecutor io_executor(1);
+  FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+
+  Driver<FollyFutureDoublePoolScheduler> driver({pipeline}, &scheduler);
+  auto result = driver.Run(dop);
+  ASSERT_NOT_OK(result);
+  ASSERT_TRUE(result.status().IsInvalid());
+  ASSERT_EQ(result.status().message(), "7");
+}
+
+TEST(SketchTest, ErrorAfterBackpressure) {}
+
+TEST(SketchTest, ErrorAfterBackpressure) {}
