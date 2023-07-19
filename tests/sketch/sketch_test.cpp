@@ -73,50 +73,57 @@ using Batch = std::vector<int>;
 
 struct OperatorResult {
  private:
-  enum class OperatorStatus {
-    NEEDS_MORE,
-    EVEN,
-    HAS_MORE,
-    BACKPRESSURE,
-    YIELD,
+  enum class Code {
+    SOURCE_NOT_READY,
+    PIPE_SINK_NEEDS_MORE,
+    PIPE_EVEN,
+    SOURCE_PIPE_HAS_MORE,
+    SINK_BACKPRESSURE,
+    PIPE_YIELD,
     FINISHED,
     CANCELLED,
-  } status_;
+  } code_;
   std::optional<Batch> output_;
 
-  OperatorResult(OperatorStatus status, std::optional<Batch> output = std::nullopt)
-      : status_(status), output_(std::move(output)) {}
+  OperatorResult(Code code, std::optional<Batch> output = std::nullopt)
+      : code_(code), output_(std::move(output)) {}
 
  public:
-  bool IsNeedsMore() { return status_ == OperatorStatus::NEEDS_MORE; }
-  bool IsEven() { return status_ == OperatorStatus::EVEN; }
-  bool IsHasMore() { return status_ == OperatorStatus::HAS_MORE; }
-  bool IsBackpressure() { return status_ == OperatorStatus::BACKPRESSURE; }
-  bool IsYield() { return status_ == OperatorStatus::YIELD; }
-  bool IsFinished() { return status_ == OperatorStatus::FINISHED; }
-  bool IsCancelled() { return status_ == OperatorStatus::CANCELLED; }
+  bool IsSourceNotReady() { return code_ == Code::SOURCE_NOT_READY; }
+  bool IsPipeSinkNeedsMore() { return code_ == Code::PIPE_SINK_NEEDS_MORE; }
+  bool IsPipeEven() { return code_ == Code::PIPE_EVEN; }
+  bool IsSourcePipeHasMore() { return code_ == Code::SOURCE_PIPE_HAS_MORE; }
+  bool IsSinkBackpressure() { return code_ == Code::SINK_BACKPRESSURE; }
+  bool IsPipeYield() { return code_ == Code::PIPE_YIELD; }
+  bool IsFinished() { return code_ == Code::FINISHED; }
+  bool IsCancelled() { return code_ == Code::CANCELLED; }
 
   std::optional<Batch>& GetOutput() {
-    ARRA_DCHECK(IsEven() || IsHasMore() || IsFinished());
+    ARRA_DCHECK(IsPipeEven() || IsSourcePipeHasMore() || IsFinished());
     return output_;
   }
 
  public:
-  static OperatorResult NeedsMore() { return OperatorResult(OperatorStatus::NEEDS_MORE); }
-  static OperatorResult Even(Batch output) {
-    return OperatorResult(OperatorStatus::EVEN, std::move(output));
+  static OperatorResult SourceNotReady() {
+    return OperatorResult(Code::SOURCE_NOT_READY);
   }
-  static OperatorResult HasMore(Batch output) {
-    return OperatorResult{OperatorStatus::HAS_MORE, std::move(output)};
+  static OperatorResult PipeSinkNeedsMore() {
+    return OperatorResult(Code::PIPE_SINK_NEEDS_MORE);
   }
-  static OperatorResult Backpressure() {
-    return OperatorResult{OperatorStatus::BACKPRESSURE};
+  static OperatorResult PipeEven(Batch output) {
+    return OperatorResult(Code::PIPE_EVEN, std::move(output));
   }
-  static OperatorResult Yield() { return OperatorResult{OperatorStatus::YIELD}; }
+  static OperatorResult SourcePipeHasMore(Batch output) {
+    return OperatorResult{Code::SOURCE_PIPE_HAS_MORE, std::move(output)};
+  }
+  static OperatorResult SinkBackpressure() {
+    return OperatorResult{Code::SINK_BACKPRESSURE};
+  }
+  static OperatorResult PipeYield() { return OperatorResult{Code::PIPE_YIELD}; }
   static OperatorResult Finished(std::optional<Batch> output) {
-    return OperatorResult{OperatorStatus::FINISHED, std::move(output)};
+    return OperatorResult{Code::FINISHED, std::move(output)};
   }
-  static OperatorResult Cancelled() { return OperatorResult{OperatorStatus::CANCELLED}; }
+  static OperatorResult Cancelled() { return OperatorResult{Code::CANCELLED}; }
 };
 
 using PipelineTaskSource = std::function<arrow::Result<OperatorResult>(ThreadId)>;
@@ -152,15 +159,17 @@ class SinkOp {
   virtual TaskGroups Backend() = 0;
 };
 
-struct Pipeline {
+struct SubPipeline {
   SourceOp* source;
   std::vector<PipeOp*> pipes;
   SinkOp* sink;
 };
 
-class PipelineTask {
+using Pipeline = std::vector<SubPipeline>;
+
+class SubPipelineTask {
  public:
-  PipelineTask(
+  SubPipelineTask(
       size_t dop, const PipelineTaskSource& source,
       const std::vector<std::pair<PipelineTaskPipe, std::optional<PipelineTaskDrain>>>&
           pipes,
@@ -177,9 +186,9 @@ class PipelineTask {
     }
   }
 
-  TaskResult Run(ThreadId thread_id) {
+  arrow::Result<OperatorResult> Run(ThreadId thread_id) {
     if (cancelled) {
-      return TaskStatus::Cancelled();
+      return OperatorResult::Cancelled();
     }
 
     if (local_states_[thread_id].backpressure) {
@@ -188,12 +197,12 @@ class PipelineTask {
         cancelled = true;
         return result.status();
       }
-      ARRA_DCHECK(result->IsNeedsMore() || result->IsBackpressure());
-      if (!result->IsBackpressure()) {
+      ARRA_DCHECK(result->IsPipeSinkNeedsMore() || result->IsSinkBackpressure());
+      if (!result->IsSinkBackpressure()) {
         local_states_[thread_id].backpressure = false;
-        return TaskStatus::Continue();
+        return OperatorResult::PipeSinkNeedsMore();
       }
-      return TaskStatus::Backpressure();
+      return OperatorResult::SinkBackpressure();
     }
 
     if (!local_states_[thread_id].pipe_stack.empty()) {
@@ -208,20 +217,22 @@ class PipelineTask {
         cancelled = true;
         return result.status();
       }
-      if (result->IsFinished()) {
+      if (result->IsSourceNotReady()) {
+        return OperatorResult::SourceNotReady();
+      } else if (result->IsFinished()) {
         local_states_[thread_id].source_done = true;
         if (result->GetOutput().has_value()) {
           return Pipe(thread_id, 0, std::move(result->GetOutput()));
         }
       } else {
-        ARRA_DCHECK(result->IsHasMore());
+        ARRA_DCHECK(result->IsSourcePipeHasMore());
         ARRA_DCHECK(result->GetOutput().has_value());
         return Pipe(thread_id, 0, std::move(result->GetOutput()));
       }
     }
 
     if (local_states_[thread_id].draining >= local_states_[thread_id].drains.size()) {
-      return TaskStatus::Finished();
+      return OperatorResult::Finished(std::nullopt);
     }
 
     for (; local_states_[thread_id].draining < local_states_[thread_id].drains.size();
@@ -233,26 +244,27 @@ class PipelineTask {
         return result.status();
       }
       if (local_states_[thread_id].yield) {
-        ARRA_DCHECK(result->IsNeedsMore());
+        ARRA_DCHECK(result->IsPipeSinkNeedsMore());
         local_states_[thread_id].yield = false;
-        return TaskStatus::Continue();
+        return OperatorResult::PipeSinkNeedsMore();
       }
-      if (result->IsYield()) {
+      if (result->IsPipeYield()) {
         ARRA_DCHECK(!local_states_[thread_id].yield);
         local_states_[thread_id].yield = true;
-        return TaskStatus::Yield();
+        return OperatorResult::PipeYield();
       }
-      ARRA_DCHECK(result->IsHasMore() || result->IsFinished());
+      ARRA_DCHECK(result->IsSourcePipeHasMore() || result->IsFinished());
       if (result->GetOutput().has_value()) {
         return Pipe(thread_id, drain_id + 1, std::move(result->GetOutput()));
       }
     }
 
-    return TaskStatus::Finished();
+    return OperatorResult::Finished(std::nullopt);
   }
 
  private:
-  TaskResult Pipe(ThreadId thread_id, size_t pipe_id, std::optional<Batch> input) {
+  arrow::Result<OperatorResult> Pipe(ThreadId thread_id, size_t pipe_id,
+                                     std::optional<Batch> input) {
     for (size_t i = pipe_id; i < pipes_.size(); i++) {
       auto result = pipes_[i].first(thread_id, std::move(input));
       if (!result.ok()) {
@@ -260,26 +272,27 @@ class PipelineTask {
         return result.status();
       }
       if (local_states_[thread_id].yield) {
-        ARRA_DCHECK(result->IsNeedsMore());
+        ARRA_DCHECK(result->IsPipeSinkNeedsMore());
         local_states_[thread_id].pipe_stack.push(i);
         local_states_[thread_id].yield = false;
-        return TaskStatus::Continue();
+        return OperatorResult::PipeSinkNeedsMore();
       }
-      if (result->IsYield()) {
+      if (result->IsPipeYield()) {
         ARRA_DCHECK(!local_states_[thread_id].yield);
         local_states_[thread_id].pipe_stack.push(i);
         local_states_[thread_id].yield = true;
-        return TaskStatus::Yield();
+        return OperatorResult::PipeYield();
       }
-      ARRA_DCHECK(result->IsNeedsMore() || result->IsEven() || result->IsHasMore());
-      if (result->IsEven() || result->IsHasMore()) {
-        if (result->IsHasMore()) {
+      ARRA_DCHECK(result->IsPipeSinkNeedsMore() || result->IsPipeEven() ||
+                  result->IsSourcePipeHasMore());
+      if (result->IsPipeEven() || result->IsSourcePipeHasMore()) {
+        if (result->IsSourcePipeHasMore()) {
           local_states_[thread_id].pipe_stack.push(i);
         }
         ARRA_DCHECK(result->GetOutput().has_value());
         input = std::move(result->GetOutput());
       } else {
-        return TaskStatus::Continue();
+        return OperatorResult::PipeSinkNeedsMore();
       }
     }
 
@@ -288,12 +301,12 @@ class PipelineTask {
       cancelled = true;
       return result.status();
     }
-    ARRA_DCHECK(result->IsNeedsMore() || result->IsBackpressure());
-    if (result->IsBackpressure()) {
+    ARRA_DCHECK(result->IsPipeSinkNeedsMore() || result->IsSinkBackpressure());
+    if (result->IsSinkBackpressure()) {
       local_states_[thread_id].backpressure = true;
-      return TaskStatus::Backpressure();
+      return OperatorResult::SinkBackpressure();
     }
-    return TaskStatus::Continue();
+    return OperatorResult::PipeSinkNeedsMore();
   }
 
  private:
@@ -312,6 +325,38 @@ class PipelineTask {
   };
   std::vector<ThreadLocalState> local_states_;
   std::atomic_bool cancelled = false;
+};
+
+class PipelineTask {
+ public:
+  PipelineTask(std::vector<SubPipelineTask> sub_tasks)
+      : sub_tasks_(std::move(sub_tasks)) {}
+
+  TaskResult Run(ThreadId thread_id) {
+    for (auto& sub_task : sub_tasks_) {
+      auto result = sub_task.Run(thread_id);
+      if (!result.ok()) {
+        return result.status();
+      }
+      if (result->IsSourceNotReady() || result->IsFinished()) {
+        continue;
+      }
+      if (result->IsSinkBackpressure()) {
+        return TaskStatus::Backpressure();
+      }
+      if (result->IsPipeYield()) {
+        return TaskStatus::Yield();
+      }
+      if (result->IsCancelled()) {
+        return TaskStatus::Cancelled();
+      }
+      return TaskStatus::Continue();
+    }
+    return TaskStatus::Finished();
+  }
+
+ private:
+  std::vector<SubPipelineTask> sub_tasks_;
 };
 
 template <typename Scheduler>
