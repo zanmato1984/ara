@@ -413,16 +413,18 @@ class PipelineExecBuilder {
       for (size_t i = 0; i < sub_pipeline.pipes.size(); ++i) {
         auto pipe = sub_pipeline.pipes[i];
         if (pipe_nodes.count(pipe) == 0) {
+          std::optional<SourceOp*> pipe_source_opt = std::nullopt;
           if (auto pipe_source = pipe->Source(); pipe_source != nullptr) {
-            pipe_sources_keepalive_.push_back(std::move(pipe_source));
+            pipe_source_opt.emplace(pipe_source.get());
             sub_pipelines_.emplace(
-                pipe_sources_keepalive_.back().get(),
-                SubPipeline{pipe_sources_keepalive_.back().get(),
+                pipe_source.get(),
+                SubPipeline{pipe_source.get(),
                             std::vector<PipeOp*>(sub_pipeline.pipes.begin() + i + 1,
                                                  sub_pipeline.pipes.end())});
+            pipe_sources_keepalive_.push_back(std::move(pipe_source));
           }
-          auto pipe_node = std::make_unique<OpTree>(
-              OpTree{pipe, pipe_sources_keepalive_.back().get(), {}});
+          auto pipe_node =
+              std::make_unique<OpTree>(OpTree{pipe, std::move(pipe_source_opt), {}});
           pipe_nodes[pipe] = pipe_node.get();
           pipe_node->children.push_back(std::move(sub_root));
           std::swap(sub_root, pipe_node);
