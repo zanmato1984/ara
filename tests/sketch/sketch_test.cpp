@@ -1324,6 +1324,59 @@ class DrainErrorPipe : public ErrorPipe, public DrainOnlyPipe {
   std::unique_ptr<ErrorGenerator> err_gen_;
 };
 
+class SpillThruDrainOnlyPipe : public PipeOp {
+ public:
+  SpillThruDrainOnlyPipe(size_t dop) : thread_locals_(dop) {}
+
+  PipelineTaskPipe Pipe() override {
+    return [&](ThreadId thread_id,
+               std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+      ARRA_DCHECK(input.has_value());
+      thread_locals_[thread_id].batches.push_back(std::move(input.value()));
+      return OperatorResult::PipeSinkNeedsMore();
+    };
+  }
+
+  std::optional<PipelineTaskDrain> Drain() override {
+    return [&](ThreadId thread_id) -> arrow::Result<OperatorResult> {
+      if (thread_locals_[thread_id].spilling) {
+        ARRA_DCHECK(!thread_locals_[thread_id].batches.empty());
+        ARRA_DCHECK(!thread_locals_[thread_id].spilled.has_value());
+        thread_locals_[thread_id].spilled.emplace(
+            std::move(thread_locals_[thread_id].batches.front()));
+        thread_locals_[thread_id].batches.pop_front();
+        thread_locals_[thread_id].spilling = false;
+        return OperatorResult::PipeSinkNeedsMore();
+      }
+      if (thread_locals_[thread_id].spilled.has_value()) {
+        ARRA_DCHECK(!thread_locals_[thread_id].spilling);
+        if (thread_locals_[thread_id].batches.empty()) {
+          return OperatorResult::Finished(std::move(thread_locals_[thread_id].spilled));
+        } else {
+          auto output = std::move(thread_locals_[thread_id].spilled.value());
+          thread_locals_[thread_id].spilled = std::nullopt;
+          return OperatorResult::SourcePipeHasMore(std::move(output));
+        }
+      }
+      if (thread_locals_[thread_id].batches.empty()) {
+        return OperatorResult::Finished(std::nullopt);
+      }
+      thread_locals_[thread_id].spilling = true;
+      return OperatorResult::PipeYield();
+    };
+  }
+
+  std::unique_ptr<SourceOp> Source() override { return nullptr; }
+
+ private:
+  struct ThreadLocal {
+    std::list<Batch> batches;
+    std::optional<Batch> spilled = std::nullopt;
+    bool spilling = false;
+  };
+  std::vector<ThreadLocal> thread_locals_;
+};
+
 }  // namespace arra::sketch
 
 using namespace arra::sketch;
@@ -1813,7 +1866,36 @@ TEST(ControlFlowTest, DrainError) {
   ASSERT_EQ(result.status().message(), "7");
 }
 
-TEST(ControlFlowTest, DrainYield) {}
+TEST(ControlFlowTest, DrainYield) {
+  size_t dop = 8;
+  MemorySource source({{1}, {1}, {1}, {1}});
+  SpillThruDrainOnlyPipe pipe(dop);
+  MemorySink sink;
+  Pipeline pipeline{{{&source, {&pipe}}}, &sink};
+
+  folly::CPUThreadPoolExecutor cpu_executor(4);
+  size_t num_io_threads = 1;
+  folly::IOThreadPoolExecutor io_executor(num_io_threads);
+  TaskObserver observer(dop);
+  FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor, &observer);
+
+  Driver<FollyFutureDoublePoolScheduler> driver(&scheduler);
+  auto result = driver.Run(dop, {pipeline});
+  ASSERT_OK(result);
+  ASSERT_EQ(sink.batches_.size(), 4);
+  for (size_t i = 0; i < 4; ++i) {
+    ASSERT_EQ(sink.batches_[i], (Batch{1}));
+  }
+
+  std::unordered_set<std::pair<ThreadId, std::string>> io_thread_info;
+  for (size_t i = 0; i < dop; ++i) {
+    std::copy(observer.io_thread_infos_[i].begin(), observer.io_thread_infos_[i].end(),
+              std::inserter(io_thread_info, io_thread_info.end()));
+  }
+  ASSERT_EQ(io_thread_info.size(), num_io_threads);
+  ASSERT_EQ(io_thread_info.begin()->second.substr(0, 12), "IOThreadPool");
+}
+
 TEST(ControlFlowTest, ErrorAfterBackpressure) {}
 TEST(ControlFlowTest, ErrorAfterDrainBackpressure) {}
 TEST(ControlFlowTest, ErrorAfterYield) {}
