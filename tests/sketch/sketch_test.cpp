@@ -334,14 +334,11 @@ struct PipelineMultiplexTask {
 
   arrow::Result<OperatorResult> Run(ThreadId thread_id) {
     for (auto& task : tasks_) {
-      auto result = task->Run(thread_id);
-      if (!result.ok()) {
-        return result.status();
+      ARRA_ASSIGN_OR_RAISE(auto result, task->Run(thread_id));
+      if (result.IsFinished()) {
+        ARRA_DCHECK(!result.GetOutput().has_value());
       }
-      if (result->IsFinished()) {
-        ARRA_DCHECK(!result->GetOutput().has_value());
-      }
-      if (!result->IsFinished() && !result->IsSourceNotReady()) {
+      if (!result.IsFinished() && !result.IsSourceNotReady()) {
         return result;
       }
     }
@@ -351,22 +348,19 @@ struct PipelineMultiplexTask {
   std::vector<std::unique_ptr<PipelinePlexTask>> tasks_;
 };
 
-using PipelineTaskStage = std::pair<std::vector<std::unique_ptr<SourceOp>>,
-                                    std::unique_ptr<PipelineMultiplexTask>>;
-using PipelineTaskStages = std::vector<PipelineTaskStage>;
+using PipelineStage = std::pair<std::vector<std::unique_ptr<SourceOp>>,
+                                std::unique_ptr<PipelineMultiplexTask>>;
+using PipelineStages = std::vector<PipelineStage>;
 
-class PipelineTaskBuilder {
+class PipelineStagesBuilder {
  public:
-  PipelineTaskBuilder(const Pipeline& pipeline, size_t dop)
-      : pipeline_(pipeline), dop_(dop) {}
+  PipelineStagesBuilder(size_t dop, const Pipeline& pipeline)
+      : dop_(dop), pipeline_(pipeline) {}
 
-  PipelineTaskStages Build() && {
-    // auto op_tree = RecoverOpTree();
-    // return {VisitOpTree(op_tree.get())->Build(dop_),
-    // std::move(pipe_sources_keepalive_)};
+  PipelineStages Build() && {
     BuildTopology();
     SortTopology();
-    return BuildTaskStages();
+    return BuildStages();
   }
 
  private:
@@ -409,8 +403,8 @@ class PipelineTaskBuilder {
     }
   }
 
-  PipelineTaskStages BuildTaskStages() {
-    PipelineTaskStages task_stages;
+  PipelineStages BuildStages() {
+    PipelineStages task_stages;
     for (auto& [stage, stage_info] : stages_) {
       auto sources_keepalive = std::move(stage_info.first);
       std::vector<std::unique_ptr<PipelinePlexTask>> plex_tasks;
@@ -430,432 +424,280 @@ class PipelineTaskBuilder {
     return task_stages;
   }
 
-  // struct OpTree {
-  //     std::variant<SourceOp*, PipeOp*, SinkOp*> op;
-  //     std::optional<SourceOp*> pipe_source;
-  //     std::vector<std::unique_ptr<OpTree>> children;
-  // };
-
-  // std::unique_ptr<OpTree> RecoverOpTree() {
-  //   std::unordered_map<PipeOp*, OpTree*> pipe_nodes;
-  //   auto root = std::make_unique<OpTree>(OpTree{pipeline_.second, std::nullopt, {}});
-  //   for (auto& sub_pipeline : pipeline_.first) {
-  //     sub_pipelines_.emplace(sub_pipeline.source, sub_pipeline);
-  //     auto sub_root =
-  //         std::make_unique<OpTree>(OpTree{sub_pipeline.source, std::nullopt, {}});
-  //     for (size_t i = 0; i < sub_pipeline.pipes.size(); ++i) {
-  //       auto pipe = sub_pipeline.pipes[i];
-  //       if (pipe_nodes.count(pipe) == 0) {
-  //         std::optional<SourceOp*> pipe_source_opt = std::nullopt;
-  //         if (auto pipe_source = pipe->Source(); pipe_source != nullptr) {
-  //           pipe_source_opt.emplace(pipe_source.get());
-  //           sub_pipelines_.emplace(
-  //               pipe_source.get(),
-  //               SubPipeline{pipe_source.get(),
-  //                           std::vector<PipeOp*>(sub_pipeline.pipes.begin() + i + 1,
-  //                                                sub_pipeline.pipes.end())});
-  //           pipe_sources_keepalive_.push_back(std::move(pipe_source));
-  //         }
-  //         auto pipe_node =
-  //             std::make_unique<OpTree>(OpTree{pipe, std::move(pipe_source_opt), {}});
-  //         pipe_nodes[pipe] = pipe_node.get();
-  //         pipe_node->children.push_back(std::move(sub_root));
-  //         std::swap(sub_root, pipe_node);
-  //       } else {
-  //         pipe_nodes[pipe]->children.push_back(std::move(sub_root));
-  //         break;
-  //       }
-  //     }
-  //     if (sub_root != nullptr) {
-  //       root->children.push_back(std::move(sub_root));
-  //     }
-  //   }
-  //   return root;
-  // }
-
-  // template <typename>
-  // inline static constexpr bool always_false_v = false;
-
-  // struct Builder {
-  //   virtual ~Builder() = default;
-  //   virtual std::unique_ptr<PipelineExec> Build(size_t dop) = 0;
-  // };
-
-  // struct ConcreteBuilder : public Builder {
-  //   SubPipeline pipeline;
-  //   SinkOp* sink;
-
-  //   ConcreteBuilder(SubPipeline pipeline, SinkOp* sink)
-  //       : pipeline(std::move(pipeline)), sink(sink) {}
-
-  //   std::unique_ptr<PipelineExec> Build(size_t dop) override {
-  //     std::vector<std::pair<PipelineTaskPipe, std::optional<PipelineTaskDrain>>> pipes(
-  //         pipeline.pipes.size());
-  //     std::transform(
-  //         pipeline.pipes.begin(), pipeline.pipes.end(), pipes.begin(),
-  //         [&](auto* pipe) { return std::make_pair(pipe->Pipe(), pipe->Drain()); });
-  //     return std::make_unique<ConcretePipelineExec>(dop, pipeline.source->Source(),
-  //                                                   std::move(pipes), sink->Sink());
-  //   }
-  // };
-
-  // struct SerialBuilder : public Builder {
-  //   std::vector<std::unique_ptr<Builder>> children;
-
-  //   SerialBuilder(std::vector<std::unique_ptr<Builder>> children)
-  //       : children(std::move(children)) {}
-
-  //   std::unique_ptr<PipelineExec> Build(size_t dop) override {
-  //     std::vector<std::unique_ptr<PipelineExec>> pipelines(children.size());
-  //     std::transform(children.begin(), children.end(), pipelines.begin(),
-  //                    [&](auto& child) { return child->Build(dop); });
-  //     return std::make_unique<SerialPipelineExec>(std::move(pipelines));
-  //   }
-  // };
-
-  // struct HyperBuilder : public Builder {
-  //   std::vector<std::unique_ptr<Builder>> children;
-
-  //   HyperBuilder(std::vector<std::unique_ptr<Builder>> children)
-  //       : children(std::move(children)) {}
-
-  //   std::unique_ptr<PipelineExec> Build(size_t dop) override {
-  //     std::vector<std::unique_ptr<PipelineExec>> pipelines(children.size());
-  //     std::transform(children.begin(), children.end(), pipelines.begin(),
-  //                    [&](auto& child) { return child->Build(dop); });
-  //     return std::make_unique<HyperPipelineExec>(std::move(pipelines));
-  //   }
-  // };
-
-  // std::unique_ptr<Builder> VisitOpTree(OpTree* op_tree) {
-  //   std::vector<std::unique_ptr<Builder>> children(op_tree->children.size());
-  //   std::transform(op_tree->children.begin(), op_tree->children.end(),
-  //   children.begin(),
-  //                  [&](auto& child) { return VisitOpTree(child.get()); });
-  //   return std::visit(
-  //       [&](auto&& op) -> std::unique_ptr<Builder> {
-  //         using T = std::decay_t<decltype(op)>;
-  //         if constexpr (std::is_same_v<T, SourceOp*>) {
-  //           ARRA_DCHECK(children.empty());
-  //           auto pipeline = sub_pipelines_[op];
-  //           return std::make_unique<ConcreteBuilder>(std::move(pipeline),
-  //                                                    pipeline_.second);
-  //         } else if constexpr (std::is_same_v<T, PipeOp*>) {
-  //           ARRA_DCHECK(!children.empty());
-  //           std::unique_ptr<Builder> child;
-  //           if (children.size() == 1) {
-  //             child = std::move(children[0]);
-  //           } else {
-  //             child = std::make_unique<HyperBuilder>(std::move(children));
-  //           }
-  //           if (!op_tree->pipe_source.has_value()) {
-  //             return child;
-  //           } else {
-  //             if (auto serial_builder = dynamic_cast<SerialBuilder*>(child.get());
-  //                 serial_builder != nullptr) {
-  //               serial_builder->children.push_back(std::make_unique<ConcreteBuilder>(
-  //                   sub_pipelines_[op_tree->pipe_source.value()], pipeline_.second));
-  //               return child;
-  //             } else {
-  //               std::vector<std::unique_ptr<Builder>> children;
-  //               children.push_back(std::move(child));
-  //               children.push_back(std::make_unique<ConcreteBuilder>(
-  //                   sub_pipelines_[op_tree->pipe_source.value()], pipeline_.second));
-  //               return std::make_unique<SerialBuilder>(std::move(children));
-  //             }
-  //           }
-  //         } else if constexpr (std::is_same_v<T, SinkOp*>) {
-  //           if (children.size() == 1) {
-  //             return std::move(children[0]);
-  //           } else {
-  //             return std::make_unique<HyperBuilder>(std::move(children));
-  //           }
-  //         } else {
-  //           static_assert(always_false_v<T>, "Unknown type in OpTree");
-  //         }
-  //       },
-  //       op_tree->op);
-  // }
-
-  const Pipeline& pipeline_;
   size_t dop_;
+  const Pipeline& pipeline_;
 
   std::unordered_map<SourceOp*, std::pair<size_t, PipelinePlex>> topology_;
   std::unordered_map<SourceOp*, std::unique_ptr<SourceOp>> pipe_sources_keepalive_;
   std::map<size_t,
            std::pair<std::vector<std::unique_ptr<SourceOp>>, std::vector<PipelinePlex>>>
       stages_;
-  // std::vector<std::unique_ptr<SourceOp>> pipe_sources_keepalive_;
-  // std::map<SourceOp*, SubPipeline> sub_pipelines_;
 };
 
-// template <typename Scheduler>
-// class Driver {
-//  public:
-//   Driver(std::vector<Pipeline> pipelines, Scheduler* scheduler)
-//       : pipelines_(std::move(pipelines)), scheduler_(scheduler) {}
+template <typename Scheduler>
+class Driver {
+ public:
+  Driver(std::vector<Pipeline> pipelines, Scheduler* scheduler)
+      : pipelines_(std::move(pipelines)), scheduler_(scheduler) {}
 
-//   TaskResult Run(size_t dop) {
-//     for (const auto& pipeline : pipelines_) {
-//       ARRA_ASSIGN_OR_RAISE(
-//           auto result, RunPipeline(dop, pipeline.source, pipeline.pipes,
-//           pipeline.sink));
-//       ARRA_DCHECK(result.IsFinished());
-//     }
-//     return TaskStatus::Finished();
-//   }
+  TaskResult Run(size_t dop) {
+    for (const auto& pipeline : pipelines_) {
+      ARRA_ASSIGN_OR_RAISE(auto result, RunPipeline(dop, pipeline));
+      ARRA_DCHECK(result.IsFinished());
+    }
+    return TaskStatus::Finished();
+  }
 
-//  private:
-//   TaskResult RunPipeline(size_t dop, SourceOp* source, const std::vector<PipeOp*>&
-//   pipes,
-//                          SinkOp* sink) {
-//     // TODO: Backend should be waited even error happens.
-//     auto sink_be = sink->Backend();
-//     auto sink_be_handle = scheduler_->ScheduleTaskGroups(sink_be);
+ private:
+  TaskResult RunPipeline(size_t dop, const Pipeline& pipeline) {
+    auto stages = PipelineStagesBuilder(dop, pipeline).Build();
+    auto sink = pipeline.second;
 
-//     std::vector<std::unique_ptr<SourceOp>> sources_keepalive;
-//     std::vector<std::pair<SourceOp*, size_t>> sources;
-//     sources.emplace_back(source, 0);
-//     for (size_t i = 0; i < pipes.size(); i++) {
-//       if (auto pipe_source = pipes[i]->Source(); pipe_source != nullptr) {
-//         sources.emplace_back(pipe_source.get(), i + 1);
-//         sources_keepalive.emplace_back(std::move(pipe_source));
-//       }
-//     }
+    // TODO: Backend should be waited even error happens.
+    auto sink_be = sink->Backend();
+    auto sink_be_handle = scheduler_->ScheduleTaskGroups(sink_be);
 
-//     for (const auto& [source, pipe_start] : sources) {
-//       ARRA_ASSIGN_OR_RAISE(auto result,
-//                            RunPipeline(dop, source, pipes, pipe_start, sink));
-//       ARRA_DCHECK(result.IsFinished());
-//     }
+    for (auto& stage : stages) {
+      ARRA_ASSIGN_OR_RAISE(auto result, RunStage(dop, stage));
+      ARRA_DCHECK(result.IsFinished());
+    }
 
-//     auto sink_fe = sink->Frontend();
-//     auto sink_fe_handle = scheduler_->ScheduleTaskGroups(sink_fe);
-//     ARRA_ASSIGN_OR_RAISE(auto result, scheduler_->WaitTaskGroups(sink_fe_handle));
-//     ARRA_DCHECK(result.IsFinished());
+    auto sink_fe = sink->Frontend();
+    auto sink_fe_handle = scheduler_->ScheduleTaskGroups(sink_fe);
+    ARRA_ASSIGN_OR_RAISE(auto result, scheduler_->WaitTaskGroups(sink_fe_handle));
+    ARRA_DCHECK(result.IsFinished());
 
-//     ARRA_ASSIGN_OR_RAISE(result, scheduler_->WaitTaskGroups(sink_be_handle));
-//     ARRA_DCHECK(result.IsFinished());
+    ARRA_ASSIGN_OR_RAISE(result, scheduler_->WaitTaskGroups(sink_be_handle));
+    ARRA_DCHECK(result.IsFinished());
 
-//     return TaskStatus::Finished();
-//   }
+    return TaskStatus::Finished();
+  }
 
-//   TaskResult RunPipeline(size_t dop, SourceOp* source, const std::vector<PipeOp*>&
-//   pipes,
-//                          size_t pipe_start, SinkOp* sink) {
-//     // TODO: Backend should be waited even error happens.
-//     auto source_be = source->Backend();
-//     auto source_be_handle = scheduler_->ScheduleTaskGroups(source_be);
+  TaskResult RunStage(size_t dop, PipelineStage& stage) {
+    // TODO: Backend should be waited even error happens.
+    std::vector<typename Scheduler::TaskGroupsHandle> source_be_handles;
+    for (auto& source : stage.first) {
+      auto source_be = source->Backend();
+      source_be_handles.push_back(scheduler_->ScheduleTaskGroups(source_be));
+    }
 
-//     auto source_fe = source->Frontend();
-//     auto source_fe_handle = scheduler_->ScheduleTaskGroups(source_fe);
-//     ARRA_ASSIGN_OR_RAISE(auto result, scheduler_->WaitTaskGroups(source_fe_handle));
-//     ARRA_DCHECK(result.IsFinished());
+    for (auto& source : stage.first) {
+      auto source_fe = source->Frontend();
+      auto source_fe_handle = scheduler_->ScheduleTaskGroups(source_fe);
+      ARRA_ASSIGN_OR_RAISE(auto result, scheduler_->WaitTaskGroups(source_fe_handle));
+      ARRA_DCHECK(result.IsFinished());
+    }
 
-//     auto source_source = source->Source();
-//     std::vector<std::pair<PipelineTaskPipe, std::optional<PipelineTaskDrain>>>
-//         pipe_and_drains;
-//     for (size_t i = pipe_start; i < pipes.size(); ++i) {
-//       auto pipe_pipe = pipes[i]->Pipe();
-//       auto pipe_drain = pipes[i]->Drain();
-//       pipe_and_drains.emplace_back(std::move(pipe_pipe), std::move(pipe_drain));
-//     }
-//     auto sink_sink = sink->Sink();
-//     PipelineTask pipeline_task(dop, source_source, pipe_and_drains, sink_sink);
-//     TaskGroup pipeline{[&](ThreadId thread_id) { return pipeline_task.Run(thread_id);
-//     },
-//                        dop, std::nullopt};
-//     auto pipeline_handle = scheduler_->ScheduleTaskGroup(pipeline);
-//     ARRA_ASSIGN_OR_RAISE(result, scheduler_->WaitTaskGroup(pipeline_handle));
-//     ARRA_DCHECK(result.IsFinished());
+    TaskGroup pipeline_task_group{[&](ThreadId thread_id) -> TaskResult {
+                                    ARRA_ASSIGN_OR_RAISE(auto result,
+                                                         stage.second->Run(thread_id));
+                                    if (result.IsSinkBackpressure()) {
+                                      return TaskStatus::Backpressure();
+                                    }
+                                    if (result.IsPipeYield()) {
+                                      return TaskStatus::Yield();
+                                    }
+                                    if (result.IsFinished()) {
+                                      return TaskStatus::Finished();
+                                    }
+                                    if (result.IsCancelled()) {
+                                      return TaskStatus::Cancelled();
+                                    }
+                                    return TaskStatus::Continue();
+                                  },
+                                  dop, std::nullopt};
+    auto pipeline_task_group_handle = scheduler_->ScheduleTaskGroup(pipeline_task_group);
+    ARRA_ASSIGN_OR_RAISE(auto result,
+                         scheduler_->WaitTaskGroup(pipeline_task_group_handle));
+    ARRA_DCHECK(result.IsFinished());
 
-//     ARRA_ASSIGN_OR_RAISE(result, scheduler_->WaitTaskGroups(source_be_handle));
-//     ARRA_DCHECK(result.IsFinished());
+    for (auto& source_be_handle : source_be_handles) {
+      ARRA_ASSIGN_OR_RAISE(auto result, scheduler_->WaitTaskGroups(source_be_handle));
+      ARRA_DCHECK(result.IsFinished());
+    }
 
-//     return TaskStatus::Finished();
-//   }
+    return TaskStatus::Finished();
+  }
 
-//  private:
-//   std::vector<Pipeline> pipelines_;
-//   Scheduler* scheduler_;
-// };
+ private:
+  std::vector<Pipeline> pipelines_;
+  Scheduler* scheduler_;
+};
 
-// class FollyFutureScheduler {
-//  private:
-//   using ConcreteTask = folly::SemiFuture<TaskResult>;
-//   using TaskGroupPayload = std::vector<TaskResult>;
+class FollyFutureScheduler {
+ private:
+  using ConcreteTask = folly::SemiFuture<TaskResult>;
+  using TaskGroupPayload = std::vector<TaskResult>;
 
-//  public:
-//   using TaskGroupHandle = std::pair<folly::Future<TaskResult>, TaskGroupPayload>;
-//   using TaskGroupsHandle = std::vector<TaskGroupHandle>;
+ public:
+  using TaskGroupHandle = std::pair<folly::Future<TaskResult>, TaskGroupPayload>;
+  using TaskGroupsHandle = std::vector<TaskGroupHandle>;
 
-//   FollyFutureScheduler(size_t num_threads) : executor_(num_threads) {}
+  FollyFutureScheduler(size_t num_threads) : executor_(num_threads) {}
 
-//   TaskGroupHandle ScheduleTaskGroup(const TaskGroup& group) {
-//     auto& task = std::get<0>(group);
-//     auto num_tasks = std::get<1>(group);
-//     auto& task_cont = std::get<2>(group);
+  TaskGroupHandle ScheduleTaskGroup(const TaskGroup& group) {
+    auto& task = std::get<0>(group);
+    auto num_tasks = std::get<1>(group);
+    auto& task_cont = std::get<2>(group);
 
-//     TaskGroupHandle handle{folly::makeFuture(TaskStatus::Finished()),
-//                            TaskGroupPayload(num_tasks)};
-//     std::vector<ConcreteTask> tasks;
-//     for (size_t i = 0; i < num_tasks; ++i) {
-//       handle.second[i] = TaskStatus::Continue();
-//       tasks.push_back(MakeTask(task, i, handle.second[i]));
-//     }
-//     handle.first = folly::via(&executor_)
-//                        .thenValue([tasks = std::move(tasks)](auto&&) mutable {
-//                          return folly::collectAll(tasks);
-//                        })
-//                        .thenValue([&task_cont](auto&& try_results) -> TaskResult {
-//                          for (auto&& try_result : try_results) {
-//                            ARRA_DCHECK(try_result.hasValue());
-//                            auto result = try_result.value();
-//                            ARRA_RETURN_NOT_OK(result);
-//                          }
-//                          if (task_cont.has_value()) {
-//                            return task_cont.value()();
-//                          }
-//                          return TaskStatus::Finished();
-//                        });
-//     return std::move(handle);
-//   }
+    TaskGroupHandle handle{folly::makeFuture(TaskStatus::Finished()),
+                           TaskGroupPayload(num_tasks)};
+    std::vector<ConcreteTask> tasks;
+    for (size_t i = 0; i < num_tasks; ++i) {
+      handle.second[i] = TaskStatus::Continue();
+      tasks.push_back(MakeTask(task, i, handle.second[i]));
+    }
+    handle.first = folly::via(&executor_)
+                       .thenValue([tasks = std::move(tasks)](auto&&) mutable {
+                         return folly::collectAll(tasks);
+                       })
+                       .thenValue([&task_cont](auto&& try_results) -> TaskResult {
+                         for (auto&& try_result : try_results) {
+                           ARRA_DCHECK(try_result.hasValue());
+                           auto result = try_result.value();
+                           ARRA_RETURN_NOT_OK(result);
+                         }
+                         if (task_cont.has_value()) {
+                           return task_cont.value()();
+                         }
+                         return TaskStatus::Finished();
+                       });
+    return std::move(handle);
+  }
 
-//   TaskGroupsHandle ScheduleTaskGroups(const TaskGroups& groups) {
-//     TaskGroupsHandle handles;
-//     for (const auto& group : groups) {
-//       handles.push_back(ScheduleTaskGroup(group));
-//     }
-//     return handles;
-//   }
+  TaskGroupsHandle ScheduleTaskGroups(const TaskGroups& groups) {
+    TaskGroupsHandle handles;
+    for (const auto& group : groups) {
+      handles.push_back(ScheduleTaskGroup(group));
+    }
+    return handles;
+  }
 
-//   TaskResult WaitTaskGroup(TaskGroupHandle& group) { return group.first.wait().value();
-//   }
+  TaskResult WaitTaskGroup(TaskGroupHandle& group) { return group.first.wait().value(); }
 
-//   TaskResult WaitTaskGroups(TaskGroupsHandle& groups) {
-//     for (auto& group : groups) {
-//       ARRA_RETURN_NOT_OK(WaitTaskGroup(group));
-//     }
-//     return TaskStatus::Finished();
-//   }
+  TaskResult WaitTaskGroups(TaskGroupsHandle& groups) {
+    for (auto& group : groups) {
+      ARRA_RETURN_NOT_OK(WaitTaskGroup(group));
+    }
+    return TaskStatus::Finished();
+  }
 
-//  private:
-//   static ConcreteTask MakeTask(const Task& task, TaskId task_id, TaskResult& result) {
-//     auto pred = [&]() {
-//       return result.ok() &&
-//              (result->IsContinue() || result->IsBackpressure() || result->IsYield());
-//     };
-//     auto thunk = [&, task_id]() {
-//       return folly::makeSemiFuture().defer(
-//           [&, task_id](auto&&) { result = task(task_id); });
-//     };
-//     return folly::whileDo(pred, thunk).deferValue([&](auto&&) {
-//       return std::move(result);
-//     });
-//   }
+ private:
+  static ConcreteTask MakeTask(const Task& task, TaskId task_id, TaskResult& result) {
+    auto pred = [&]() {
+      return result.ok() &&
+             (result->IsContinue() || result->IsBackpressure() || result->IsYield());
+    };
+    auto thunk = [&, task_id]() {
+      return folly::makeSemiFuture().defer(
+          [&, task_id](auto&&) { result = task(task_id); });
+    };
+    return folly::whileDo(pred, thunk).deferValue([&](auto&&) {
+      return std::move(result);
+    });
+  }
 
-//  private:
-//   folly::CPUThreadPoolExecutor executor_;
-// };
+ private:
+  folly::CPUThreadPoolExecutor executor_;
+};
 
-// class FollyFutureDoublePoolScheduler {
-//  private:
-//   using ConcreteTask = folly::Future<TaskResult>;
-//   using TaskGroupPayload = std::vector<TaskResult>;
+class FollyFutureDoublePoolScheduler {
+ private:
+  using ConcreteTask = folly::Future<TaskResult>;
+  using TaskGroupPayload = std::vector<TaskResult>;
 
-//  public:
-//   using TaskGroupHandle = std::pair<folly::Future<TaskResult>, TaskGroupPayload>;
-//   using TaskGroupsHandle = std::vector<TaskGroupHandle>;
+ public:
+  using TaskGroupHandle = std::pair<folly::Future<TaskResult>, TaskGroupPayload>;
+  using TaskGroupsHandle = std::vector<TaskGroupHandle>;
 
-//   class TaskObserver {
-//    public:
-//     virtual ~TaskObserver() = default;
+  class TaskObserver {
+   public:
+    virtual ~TaskObserver() = default;
 
-//     virtual void BeforeTaskRun(const Task& task, TaskId task_id) = 0;
-//     virtual void AfterTaskRun(const Task& task, TaskId task_id,
-//                               const TaskResult& result) = 0;
-//   };
+    virtual void BeforeTaskRun(const Task& task, TaskId task_id) = 0;
+    virtual void AfterTaskRun(const Task& task, TaskId task_id,
+                              const TaskResult& result) = 0;
+  };
 
-//   FollyFutureDoublePoolScheduler(folly::Executor* cpu_executor,
-//                                  folly::Executor* io_executor,
-//                                  TaskObserver* observer = nullptr)
-//       : cpu_executor_(cpu_executor), io_executor_(io_executor), observer_(observer) {}
+  FollyFutureDoublePoolScheduler(folly::Executor* cpu_executor,
+                                 folly::Executor* io_executor,
+                                 TaskObserver* observer = nullptr)
+      : cpu_executor_(cpu_executor), io_executor_(io_executor), observer_(observer) {}
 
-//   TaskGroupHandle ScheduleTaskGroup(const TaskGroup& group) {
-//     auto& task = std::get<0>(group);
-//     auto num_tasks = std::get<1>(group);
-//     auto& task_cont = std::get<2>(group);
+  TaskGroupHandle ScheduleTaskGroup(const TaskGroup& group) {
+    auto& task = std::get<0>(group);
+    auto num_tasks = std::get<1>(group);
+    auto& task_cont = std::get<2>(group);
 
-//     TaskGroupHandle handle{folly::makeFuture(TaskStatus::Finished()),
-//                            TaskGroupPayload(num_tasks)};
-//     std::vector<ConcreteTask> tasks;
-//     for (size_t i = 0; i < num_tasks; ++i) {
-//       handle.second[i] = TaskStatus::Continue();
-//       tasks.push_back(MakeTask(task, i, handle.second[i]));
-//     }
-//     handle.first = folly::via(cpu_executor_)
-//                        .thenValue([tasks = std::move(tasks)](auto&&) mutable {
-//                          return folly::collectAll(tasks);
-//                        })
-//                        .thenValue([&task_cont](auto&& try_results) -> TaskResult {
-//                          for (auto&& try_result : try_results) {
-//                            ARRA_DCHECK(try_result.hasValue());
-//                            auto result = try_result.value();
-//                            ARRA_RETURN_NOT_OK(result);
-//                          }
-//                          if (task_cont.has_value()) {
-//                            return task_cont.value()();
-//                          }
-//                          return TaskStatus::Finished();
-//                        });
-//     return std::move(handle);
-//   }
+    TaskGroupHandle handle{folly::makeFuture(TaskStatus::Finished()),
+                           TaskGroupPayload(num_tasks)};
+    std::vector<ConcreteTask> tasks;
+    for (size_t i = 0; i < num_tasks; ++i) {
+      handle.second[i] = TaskStatus::Continue();
+      tasks.push_back(MakeTask(task, i, handle.second[i]));
+    }
+    handle.first = folly::via(cpu_executor_)
+                       .thenValue([tasks = std::move(tasks)](auto&&) mutable {
+                         return folly::collectAll(tasks);
+                       })
+                       .thenValue([&task_cont](auto&& try_results) -> TaskResult {
+                         for (auto&& try_result : try_results) {
+                           ARRA_DCHECK(try_result.hasValue());
+                           auto result = try_result.value();
+                           ARRA_RETURN_NOT_OK(result);
+                         }
+                         if (task_cont.has_value()) {
+                           return task_cont.value()();
+                         }
+                         return TaskStatus::Finished();
+                       });
+    return std::move(handle);
+  }
 
-//   TaskGroupsHandle ScheduleTaskGroups(const TaskGroups& groups) {
-//     TaskGroupsHandle handles;
-//     for (const auto& group : groups) {
-//       handles.push_back(ScheduleTaskGroup(group));
-//     }
-//     return handles;
-//   }
+  TaskGroupsHandle ScheduleTaskGroups(const TaskGroups& groups) {
+    TaskGroupsHandle handles;
+    for (const auto& group : groups) {
+      handles.push_back(ScheduleTaskGroup(group));
+    }
+    return handles;
+  }
 
-//   TaskResult WaitTaskGroup(TaskGroupHandle& group) { return group.first.wait().value();
-//   }
+  TaskResult WaitTaskGroup(TaskGroupHandle& group) { return group.first.wait().value(); }
 
-//   TaskResult WaitTaskGroups(TaskGroupsHandle& groups) {
-//     for (auto& group : groups) {
-//       ARRA_RETURN_NOT_OK(WaitTaskGroup(group));
-//     }
-//     return TaskStatus::Finished();
-//   }
+  TaskResult WaitTaskGroups(TaskGroupsHandle& groups) {
+    for (auto& group : groups) {
+      ARRA_RETURN_NOT_OK(WaitTaskGroup(group));
+    }
+    return TaskStatus::Finished();
+  }
 
-//  private:
-//   ConcreteTask MakeTask(const Task& task, TaskId task_id, TaskResult& result) {
-//     auto pred = [&]() {
-//       return result.ok() && !result->IsFinished() && !result->IsCancelled();
-//     };
-//     auto thunk = [&, task_id]() {
-//       auto* executor = result->IsYield() ? io_executor_ : cpu_executor_;
-//       return folly::via(executor).then([&, task_id](auto&&) {
-//         if (observer_) {
-//           observer_->BeforeTaskRun(task, task_id);
-//         }
-//         result = task(task_id);
-//         if (observer_) {
-//           observer_->AfterTaskRun(task, task_id, result);
-//         }
-//       });
-//     };
-//     return folly::whileDo(pred, thunk).thenValue([&](auto&&) {
-//       return std::move(result);
-//     });
-//   }
+ private:
+  ConcreteTask MakeTask(const Task& task, TaskId task_id, TaskResult& result) {
+    auto pred = [&]() {
+      return result.ok() && !result->IsFinished() && !result->IsCancelled();
+    };
+    auto thunk = [&, task_id]() {
+      auto* executor = result->IsYield() ? io_executor_ : cpu_executor_;
+      return folly::via(executor).then([&, task_id](auto&&) {
+        if (observer_) {
+          observer_->BeforeTaskRun(task, task_id);
+        }
+        result = task(task_id);
+        if (observer_) {
+          observer_->AfterTaskRun(task, task_id, result);
+        }
+      });
+    };
+    return folly::whileDo(pred, thunk).thenValue([&](auto&&) {
+      return std::move(result);
+    });
+  }
 
-//  private:
-//   folly::Executor* cpu_executor_;
-//   folly::Executor* io_executor_;
-//   TaskObserver* observer_;
-// };
+ private:
+  folly::Executor* cpu_executor_;
+  folly::Executor* io_executor_;
+  TaskObserver* observer_;
+};
 
 class InfiniteSource : public SourceOp {
  public:
@@ -1071,34 +913,35 @@ class AccumulatePipe : public PipeOp {
  public:
   AccumulatePipe(size_t dop, size_t n) : dop_(dop), n_(n) { thread_locals_.resize(dop_); }
 
-  PipelineTaskPipe Pipe() override {
-    PipelineTaskPipe f =
-        [&](ThreadId thread_id,
-            std::optional<Batch> input) -> arrow::Result<OperatorResult> {
-      if (thread_locals_[thread_id].batch.size() >= n_) {
-        ARRA_DCHECK(!input.has_value());
-        Batch output(thread_locals_[thread_id].batch.begin(),
-                     thread_locals_[thread_id].batch.begin() + n_);
-        thread_locals_[thread_id].batch =
-            Batch(thread_locals_[thread_id].batch.begin() + n_,
-                  thread_locals_[thread_id].batch.end());
-        if (thread_locals_[thread_id].batch.size() > n_) {
-          return OperatorResult::SourcePipeHasMore(std::move(output));
-        } else {
-          return OperatorResult::PipeEven(std::move(output));
-        }
-      }
-      ARRA_DCHECK(input.has_value());
-      thread_locals_[thread_id].batch.insert(thread_locals_[thread_id].batch.end(),
-                                             input.value().begin(), input.value().end());
-      if (thread_locals_[thread_id].batch.size() >= n_) {
-        return f(thread_id, std::nullopt);
+  arrow::Result<OperatorResult> Pipe(ThreadId thread_id, std::optional<Batch> input) {
+    if (thread_locals_[thread_id].batch.size() >= n_) {
+      ARRA_DCHECK(!input.has_value());
+      Batch output(thread_locals_[thread_id].batch.begin(),
+                   thread_locals_[thread_id].batch.begin() + n_);
+      thread_locals_[thread_id].batch =
+          Batch(thread_locals_[thread_id].batch.begin() + n_,
+                thread_locals_[thread_id].batch.end());
+      if (thread_locals_[thread_id].batch.size() > n_) {
+        return OperatorResult::SourcePipeHasMore(std::move(output));
       } else {
-        return OperatorResult::PipeSinkNeedsMore();
+        return OperatorResult::PipeEven(std::move(output));
       }
-    };
+    }
+    ARRA_DCHECK(input.has_value());
+    thread_locals_[thread_id].batch.insert(thread_locals_[thread_id].batch.end(),
+                                           input.value().begin(), input.value().end());
+    if (thread_locals_[thread_id].batch.size() >= n_) {
+      return Pipe(thread_id, std::nullopt);
+    } else {
+      return OperatorResult::PipeSinkNeedsMore();
+    }
+  }
 
-    return f;
+  PipelineTaskPipe Pipe() override {
+    return [&](ThreadId thread_id,
+               std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+      return Pipe(thread_id, std::move(input));
+    };
   }
 
   std::optional<PipelineTaskDrain> Drain() override {
@@ -1460,72 +1303,51 @@ class DrainErrorPipe : public ErrorPipe, public DrainOnlyPipe {
   std::unique_ptr<ErrorGenerator> err_gen_;
 };
 
-// class TaskObserver : public FollyFutureDoublePoolScheduler::TaskObserver {
-//  public:
-//   TaskObserver(size_t dop)
-//       : last_results_(dop, TaskStatus::Continue()), io_thread_infos_(dop) {}
-
-//   void BeforeTaskRun(const Task& task, TaskId task_id) override {}
-
-//   void AfterTaskRun(const Task& task, TaskId task_id, const TaskResult& result)
-//   override {
-//     if (last_results_[task_id].ok() && last_results_[task_id]->IsYield()) {
-//       io_thread_infos_[task_id].insert(std::make_pair(
-//           folly::getCurrentThreadID(), folly::getCurrentThreadName().value()));
-//     }
-//     last_results_[task_id] = result;
-//   }
-
-//  public:
-//   std::vector<TaskResult> last_results_;
-//   std::vector<std::unordered_set<std::pair<ThreadId, std::string>>> io_thread_infos_;
-// };
-
 }  // namespace arra::sketch
 
 using namespace arra::sketch;
 
-TEST(PipelineTaskBuildTest, EmptyPipeline) {
+TEST(PipelineTest, EmptyPipeline) {
   size_t dop = 8;
   BlackHoleSink sink;
   Pipeline pipeline{{}, &sink};
-  auto stages = PipelineTaskBuilder(pipeline, dop).Build();
+  auto stages = PipelineStagesBuilder(dop, pipeline).Build();
   ASSERT_EQ(stages.size(), 0);
 }
 
-TEST(PipelineTaskBuildTest, SinglePlexPipeline) {
+TEST(PipelineTest, SinglePlexPipeline) {
   size_t dop = 8;
   InfiniteSource source({});
   IdentityPipe pipe;
   BlackHoleSink sink;
   Pipeline pipeline{{{&source, {&pipe}}}, &sink};
-  auto stages = PipelineTaskBuilder(pipeline, dop).Build();
+  auto stages = PipelineStagesBuilder(dop, pipeline).Build();
   ASSERT_EQ(stages.size(), 1);
   ASSERT_TRUE(stages[0].first.empty());
   ASSERT_NE(stages[0].second, nullptr);
   ASSERT_EQ(stages[0].second->tasks_.size(), 1);
 }
 
-TEST(PipelineTaskBuildTest, DoublePlexPipeline) {
+TEST(PipelineTest, DoublePlexPipeline) {
   size_t dop = 8;
   InfiniteSource source_1({}), source_2({});
   IdentityPipe pipe;
   BlackHoleSink sink;
   Pipeline pipeline{{{&source_1, {&pipe}}, {&source_2, {&pipe}}}, &sink};
-  auto stages = PipelineTaskBuilder(pipeline, dop).Build();
+  auto stages = PipelineStagesBuilder(dop, pipeline).Build();
   ASSERT_EQ(stages.size(), 1);
   ASSERT_TRUE(stages[0].first.empty());
   ASSERT_NE(stages[0].second, nullptr);
   ASSERT_EQ(stages[0].second->tasks_.size(), 2);
 }
 
-TEST(PipelineTaskBuildTest, DoubleStagePipeline) {
+TEST(PipelineTest, DoubleStagePipeline) {
   size_t dop = 8;
   InfiniteSource source({});
   IdentityWithAnotherSourcePipe pipe(std::make_unique<InfiniteSource>(Batch{}));
   BlackHoleSink sink;
   Pipeline pipeline{{{&source, {&pipe}}}, &sink};
-  auto stages = PipelineTaskBuilder(pipeline, dop).Build();
+  auto stages = PipelineStagesBuilder(dop, pipeline).Build();
   ASSERT_EQ(stages.size(), 2);
   ASSERT_TRUE(stages[0].first.empty());
   ASSERT_EQ(stages[1].first.size(), 1);
@@ -1536,7 +1358,7 @@ TEST(PipelineTaskBuildTest, DoubleStagePipeline) {
   ASSERT_EQ(stages[1].second->tasks_.size(), 1);
 }
 
-TEST(PipelineTaskBuildTest, DoubleStageDoublePlexPipeline) {
+TEST(PipelineTest, DoubleStageDoublePlexPipeline) {
   size_t dop = 8;
   InfiniteSource source_1({}), source_2({});
   IdentityWithAnotherSourcePipe pipe_1(std::make_unique<InfiniteSource>(Batch{})),
@@ -1544,7 +1366,7 @@ TEST(PipelineTaskBuildTest, DoubleStageDoublePlexPipeline) {
   auto pipe_source_1 = pipe_1.source_.get(), pipe_source_2 = pipe_2.source_.get();
   BlackHoleSink sink;
   Pipeline pipeline{{{&source_1, {&pipe_1}}, {&source_2, {&pipe_2}}}, &sink};
-  auto stages = PipelineTaskBuilder(pipeline, dop).Build();
+  auto stages = PipelineStagesBuilder(dop, pipeline).Build();
   ASSERT_EQ(stages.size(), 2);
   ASSERT_TRUE(stages[0].first.empty());
   ASSERT_EQ(stages[1].first.size(), 2);
@@ -1564,7 +1386,7 @@ TEST(PipelineTaskBuildTest, DoubleStageDoublePlexPipeline) {
   ASSERT_EQ(stages[1].second->tasks_.size(), 2);
 }
 
-TEST(PipelineTaskBuildTest, TrippleStagePipeline) {
+TEST(PipelineTest, TrippleStagePipeline) {
   size_t dop = 8;
   InfiniteSource source_1({}), source_2({});
   IdentityWithAnotherSourcePipe pipe_1(std::make_unique<InfiniteSource>(Batch{})),
@@ -1575,7 +1397,7 @@ TEST(PipelineTaskBuildTest, TrippleStagePipeline) {
   BlackHoleSink sink;
   Pipeline pipeline{{{&source_1, {&pipe_1, &pipe_3}}, {&source_2, {&pipe_2, &pipe_3}}},
                     &sink};
-  auto stages = PipelineTaskBuilder(pipeline, dop).Build();
+  auto stages = PipelineStagesBuilder(dop, pipeline).Build();
   ASSERT_EQ(stages.size(), 3);
   ASSERT_TRUE(stages[0].first.empty());
   ASSERT_EQ(stages[1].first.size(), 2);
@@ -1600,7 +1422,7 @@ TEST(PipelineTaskBuildTest, TrippleStagePipeline) {
   ASSERT_EQ(stages[2].second->tasks_.size(), 1);
 }
 
-TEST(PipelineTaskBuildTest, OddQuadroStagePipeline) {
+TEST(PipelineTest, OddQuadroStagePipeline) {
   size_t dop = 8;
   InfiniteSource source_1({}), source_2({}), source_3({}), source_4({});
   IdentityWithAnotherSourcePipe pipe_1_1(std::make_unique<InfiniteSource>(Batch{})),
@@ -1615,7 +1437,7 @@ TEST(PipelineTaskBuildTest, OddQuadroStagePipeline) {
                      {&source_3, {&pipe_1_2, &pipe_3_1}},
                      {&source_4, {&pipe_3_1}}},
                     &sink};
-  auto stages = PipelineTaskBuilder(pipeline, dop).Build();
+  auto stages = PipelineStagesBuilder(dop, pipeline).Build();
 
   ASSERT_EQ(stages.size(), 4);
   ASSERT_TRUE(stages[0].first.empty());
@@ -1638,295 +1460,311 @@ TEST(PipelineTaskBuildTest, OddQuadroStagePipeline) {
   ASSERT_EQ(stages[3].second->tasks_.size(), 1);
 }
 
-// TEST(SketchTest, OneToOne) {
-//   size_t dop = 8;
-//   MemorySource source({{1}});
-//   IdentityPipe pipe;
-//   MemorySink sink;
-//   Pipeline pipeline{&source, {&pipe}, &sink};
-//   FollyFutureScheduler scheduler(4);
-//   Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
-//   auto result = driver.Run(dop);
-//   ASSERT_OK(result);
-//   ASSERT_TRUE(result->IsFinished());
-//   ASSERT_EQ(sink.batches_.size(), 1);
-//   ASSERT_EQ(sink.batches_[0], (Batch{1}));
-// }
+TEST(DriverTest, OneToOne) {
+  size_t dop = 8;
+  MemorySource source({{1}});
+  IdentityPipe pipe;
+  MemorySink sink;
+  Pipeline pipeline{{{&source, {&pipe}}}, &sink};
+  FollyFutureScheduler scheduler(4);
+  Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
+  auto result = driver.Run(dop);
+  ASSERT_OK(result);
+  ASSERT_TRUE(result->IsFinished());
+  ASSERT_EQ(sink.batches_.size(), 1);
+  ASSERT_EQ(sink.batches_[0], (Batch{1}));
+}
 
-// TEST(SketchTest, OneToThreeFlat) {
-//   size_t dop = 8;
-//   MemorySource source({{1}});
-//   TimesNFlatPipe pipe(3);
-//   MemorySink sink;
-//   Pipeline pipeline{&source, {&pipe}, &sink};
-//   FollyFutureScheduler scheduler(4);
-//   Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
-//   auto result = driver.Run(dop);
-//   ASSERT_OK(result);
-//   ASSERT_TRUE(result->IsFinished());
-//   ASSERT_EQ(sink.batches_.size(), 1);
-//   ASSERT_EQ(sink.batches_[0], (Batch{1, 1, 1}));
-// }
+TEST(DriverTest, OneToThreeFlat) {
+  size_t dop = 8;
+  MemorySource source({{1}});
+  TimesNFlatPipe pipe(3);
+  MemorySink sink;
+  Pipeline pipeline{{{&source, {&pipe}}}, &sink};
+  FollyFutureScheduler scheduler(4);
+  Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
+  auto result = driver.Run(dop);
+  ASSERT_OK(result);
+  ASSERT_TRUE(result->IsFinished());
+  ASSERT_EQ(sink.batches_.size(), 1);
+  ASSERT_EQ(sink.batches_[0], (Batch{1, 1, 1}));
+}
 
-// TEST(SketchTest, OneToThreeSliced) {
-//   size_t dop = 8;
-//   MemorySource source({{1}});
-//   TimesNSlicedPipe pipe(dop, 3);
-//   MemorySink sink;
-//   Pipeline pipeline{&source, {&pipe}, &sink};
-//   FollyFutureScheduler scheduler(4);
-//   Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
-//   auto result = driver.Run(dop);
-//   ASSERT_OK(result);
-//   ASSERT_TRUE(result->IsFinished());
-//   ASSERT_EQ(sink.batches_.size(), 3);
-//   for (size_t i = 0; i < 3; ++i) {
-//     ASSERT_EQ(sink.batches_[i], (Batch{1}));
-//   }
-// }
+TEST(DriverTest, OneToThreeSliced) {
+  size_t dop = 8;
+  MemorySource source({{1}});
+  TimesNSlicedPipe pipe(dop, 3);
+  MemorySink sink;
+  Pipeline pipeline{{{&source, {&pipe}}}, &sink};
+  FollyFutureScheduler scheduler(4);
+  Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
+  auto result = driver.Run(dop);
+  ASSERT_OK(result);
+  ASSERT_TRUE(result->IsFinished());
+  ASSERT_EQ(sink.batches_.size(), 3);
+  for (size_t i = 0; i < 3; ++i) {
+    ASSERT_EQ(sink.batches_[i], (Batch{1}));
+  }
+}
 
-// TEST(SketchTest, AccumulateThree) {
-//   {
-//     size_t dop = 8;
-//     DistributedMemorySource source(dop, {{1}, {1}, {1}});
-//     AccumulatePipe pipe(dop, 3);
-//     MemorySink sink;
-//     Pipeline pipeline{&source, {&pipe}, &sink};
-//     FollyFutureScheduler scheduler(4);
-//     Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
-//     auto result = driver.Run(dop);
-//     ASSERT_OK(result);
-//     ASSERT_TRUE(result->IsFinished());
-//     ASSERT_EQ(sink.batches_.size(), dop);
-//     for (size_t i = 0; i < dop; ++i) {
-//       ASSERT_EQ(sink.batches_[i], (Batch{1, 1, 1}));
-//     }
-//   }
+TEST(DriverTest, AccumulateThree) {
+  {
+    size_t dop = 1;
+    DistributedMemorySource source(dop, {{1}, {1}, {1}});
+    AccumulatePipe pipe(dop, 3);
+    MemorySink sink;
+    Pipeline pipeline{{{&source, {&pipe}}}, &sink};
+    FollyFutureScheduler scheduler(4);
+    Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
+    auto result = driver.Run(dop);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsFinished());
+    ASSERT_EQ(sink.batches_.size(), dop);
+    for (size_t i = 0; i < dop; ++i) {
+      ASSERT_EQ(sink.batches_[i], (Batch{1, 1, 1}));
+    }
+  }
 
-//   {
-//     size_t dop = 8;
-//     DistributedMemorySource source(dop, {{1}, {1}, {1}, {1}, {1}});
-//     AccumulatePipe pipe(dop, 3);
-//     MemorySink sink;
-//     Pipeline pipeline{&source, {&pipe}, &sink};
-//     FollyFutureScheduler scheduler(4);
-//     Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
-//     auto result = driver.Run(dop);
-//     ASSERT_OK(result);
-//     ASSERT_TRUE(result->IsFinished());
-//     ASSERT_EQ(sink.batches_.size(), dop * 2);
-//     std::sort(sink.batches_.begin(), sink.batches_.end(),
-//               [](const auto& lhs, const auto& rhs) { return lhs.size() < rhs.size();
-//               });
-//     for (size_t i = 0; i < dop; ++i) {
-//       ASSERT_EQ(sink.batches_[i], (Batch{1, 1}));
-//     }
-//     for (size_t i = dop; i < dop * 2; ++i) {
-//       ASSERT_EQ(sink.batches_[i], (Batch{1, 1, 1}));
-//     }
-//   }
-// }
+  {
+    size_t dop = 8;
+    DistributedMemorySource source(dop, {{1}, {1}, {1}, {1}, {1}});
+    AccumulatePipe pipe(dop, 3);
+    MemorySink sink;
+    Pipeline pipeline{{{&source, {&pipe}}}, &sink};
+    FollyFutureScheduler scheduler(4);
+    Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
+    auto result = driver.Run(dop);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsFinished());
+    ASSERT_EQ(sink.batches_.size(), dop * 2);
+    std::sort(sink.batches_.begin(), sink.batches_.end(),
+              [](const auto& lhs, const auto& rhs) { return lhs.size() < rhs.size(); });
+    for (size_t i = 0; i < dop; ++i) {
+      ASSERT_EQ(sink.batches_[i], (Batch{1, 1}));
+    }
+    for (size_t i = dop; i < dop * 2; ++i) {
+      ASSERT_EQ(sink.batches_[i], (Batch{1, 1, 1}));
+    }
+  }
+}
 
-// TEST(SketchTest, BasicBackpressure) {
-//   size_t dop = 8;
-//   BackpressureContexts ctx(dop);
-//   BackpressureSource source(ctx);
-//   BackpressurePipe pipe(ctx);
-//   BackpressureSink sink(dop, ctx, 100, 200, 300);
-//   Pipeline pipeline{&source, {&pipe}, &sink};
-//   FollyFutureScheduler scheduler(4);
-//   Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
-//   auto result = driver.Run(dop);
-//   ASSERT_OK(result);
-//   ASSERT_TRUE(result->IsFinished());
-//   for (const auto& c : ctx) {
-//     ASSERT_EQ(c.backpressure, false);
-//     ASSERT_EQ(c.exit, true);
-//     ASSERT_EQ(c.source_backpressure, 0);
-//     ASSERT_EQ(c.source_non_backpressure, 201);
-//     ASSERT_EQ(c.pipe_backpressure, 0);
-//     ASSERT_EQ(c.pipe_non_backpressure, 200);
-//   }
-// }
+TEST(DriverTest, BasicBackpressure) {
+  size_t dop = 8;
+  BackpressureContexts ctx(dop);
+  BackpressureSource source(ctx);
+  BackpressurePipe pipe(ctx);
+  BackpressureSink sink(dop, ctx, 100, 200, 300);
+  Pipeline pipeline{{{&source, {&pipe}}}, &sink};
+  FollyFutureScheduler scheduler(4);
+  Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
+  auto result = driver.Run(dop);
+  ASSERT_OK(result);
+  ASSERT_TRUE(result->IsFinished());
+  for (const auto& c : ctx) {
+    ASSERT_EQ(c.backpressure, false);
+    ASSERT_EQ(c.exit, true);
+    ASSERT_EQ(c.source_backpressure, 0);
+    ASSERT_EQ(c.source_non_backpressure, 201);
+    ASSERT_EQ(c.pipe_backpressure, 0);
+    ASSERT_EQ(c.pipe_non_backpressure, 200);
+  }
+}
 
-// TEST(SketchTest, BasicError) {
-//   {
-//     size_t dop = 8;
-//     InfiniteSource source(Batch{});
-//     IdentityPipe pipe;
-//     BlackHoleSink sink;
-//     ErrorGenerator err_gen(42);
-//     ErrorSource err_source(&err_gen, &source);
-//     Pipeline pipeline{&err_source, {&pipe}, &sink};
-//     FollyFutureScheduler scheduler(4);
-//     Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
-//     auto result = driver.Run(dop);
-//     ASSERT_NOT_OK(result);
-//     ASSERT_TRUE(result.status().IsInvalid());
-//     ASSERT_EQ(result.status().message(), "42");
-//   }
+TEST(DriverTest, BasicError) {
+  {
+    size_t dop = 8;
+    InfiniteSource source(Batch{});
+    IdentityPipe pipe;
+    BlackHoleSink sink;
+    ErrorGenerator err_gen(42);
+    ErrorSource err_source(&err_gen, &source);
+    Pipeline pipeline{{{&err_source, {&pipe}}}, &sink};
+    FollyFutureScheduler scheduler(4);
+    Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
+    auto result = driver.Run(dop);
+    ASSERT_NOT_OK(result);
+    ASSERT_TRUE(result.status().IsInvalid());
+    ASSERT_EQ(result.status().message(), "42");
+  }
 
-//   {
-//     size_t dop = 8;
-//     InfiniteSource source(Batch{});
-//     IdentityPipe pipe;
-//     BlackHoleSink sink;
-//     ErrorGenerator err_gen(42);
-//     ErrorPipe err_pipe(&err_gen, &pipe);
-//     Pipeline pipeline{&source, {&err_pipe}, &sink};
-//     FollyFutureScheduler scheduler(4);
-//     Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
-//     auto result = driver.Run(dop);
-//     ASSERT_NOT_OK(result);
-//     ASSERT_TRUE(result.status().IsInvalid());
-//     ASSERT_EQ(result.status().message(), "42");
-//   }
+  {
+    size_t dop = 8;
+    InfiniteSource source(Batch{});
+    IdentityPipe pipe;
+    BlackHoleSink sink;
+    ErrorGenerator err_gen(42);
+    ErrorPipe err_pipe(&err_gen, &pipe);
+    Pipeline pipeline{{{&source, {&err_pipe}}}, &sink};
+    FollyFutureScheduler scheduler(4);
+    Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
+    auto result = driver.Run(dop);
+    ASSERT_NOT_OK(result);
+    ASSERT_TRUE(result.status().IsInvalid());
+    ASSERT_EQ(result.status().message(), "42");
+  }
 
-//   {
-//     size_t dop = 8;
-//     InfiniteSource source(Batch{});
-//     IdentityPipe pipe;
-//     BlackHoleSink sink;
-//     ErrorGenerator err_gen(42);
-//     ErrorSink err_sink(&err_gen, &sink);
-//     Pipeline pipeline{&source, {&pipe}, &err_sink};
-//     FollyFutureScheduler scheduler(4);
-//     Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
-//     auto result = driver.Run(dop);
-//     ASSERT_NOT_OK(result);
-//     ASSERT_TRUE(result.status().IsInvalid());
-//     ASSERT_EQ(result.status().message(), "42");
-//   }
-// }
+  {
+    size_t dop = 8;
+    InfiniteSource source(Batch{});
+    IdentityPipe pipe;
+    BlackHoleSink sink;
+    ErrorGenerator err_gen(42);
+    ErrorSink err_sink(&err_gen, &sink);
+    Pipeline pipeline{{{&source, {&pipe}}}, &err_sink};
+    FollyFutureScheduler scheduler(4);
+    Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
+    auto result = driver.Run(dop);
+    ASSERT_NOT_OK(result);
+    ASSERT_TRUE(result.status().IsInvalid());
+    ASSERT_EQ(result.status().message(), "42");
+  }
+}
 
-// TEST(SketchTest, BasicYield) {
-//   {
-//     size_t dop = 8;
-//     MemorySource source({{1}, {1}, {1}});
-//     SpillThruPipe pipe(dop);
-//     MemorySink sink;
-//     Pipeline pipeline{&source, {&pipe}, &sink};
-//     FollyFutureScheduler scheduler(4);
-//     Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
-//     auto result = driver.Run(dop);
-//     ASSERT_OK(result);
-//     ASSERT_EQ(sink.batches_.size(), 3);
-//     for (size_t i = 0; i < 3; ++i) {
-//       ASSERT_EQ(sink.batches_[i], (Batch{1}));
-//     }
-//   }
+class TaskObserver : public FollyFutureDoublePoolScheduler::TaskObserver {
+ public:
+  TaskObserver(size_t dop)
+      : last_results_(dop, TaskStatus::Continue()), io_thread_infos_(dop) {}
 
-//   {
-//     size_t dop = 2;
-//     MemorySource source({{1}, {1}, {1}});
-//     SpillThruPipe pipe(dop);
-//     MemorySink sink;
-//     Pipeline pipeline{&source, {&pipe}, &sink};
-//     FollyFutureScheduler scheduler(4);
-//     Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
-//     auto result = driver.Run(dop);
-//     ASSERT_OK(result);
-//     ASSERT_EQ(sink.batches_.size(), 3);
-//     for (size_t i = 0; i < 3; ++i) {
-//       ASSERT_EQ(sink.batches_[i], (Batch{1}));
-//     }
-//   }
+  void BeforeTaskRun(const Task& task, TaskId task_id) override {}
 
-//   {
-//     size_t dop = 8;
-//     MemorySource source({{1}, {1}, {1}, {1}});
-//     SpillThruPipe pipe(dop);
-//     MemorySink sink;
-//     Pipeline pipeline{&source, {&pipe}, &sink};
+  void AfterTaskRun(const Task& task, TaskId task_id, const TaskResult& result) override {
+    if (last_results_[task_id].ok() && last_results_[task_id]->IsYield()) {
+      io_thread_infos_[task_id].insert(std::make_pair(
+          folly::getCurrentThreadID(), folly::getCurrentThreadName().value()));
+    }
+    last_results_[task_id] = result;
+  }
 
-//     folly::CPUThreadPoolExecutor cpu_executor(4);
-//     size_t num_io_threads = 1;
-//     folly::IOThreadPoolExecutor io_executor(num_io_threads);
-//     TaskObserver observer(dop);
-//     FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor, &observer);
+ public:
+  std::vector<TaskResult> last_results_;
+  std::vector<std::unordered_set<std::pair<ThreadId, std::string>>> io_thread_infos_;
+};
 
-//     Driver<FollyFutureDoublePoolScheduler> driver({pipeline}, &scheduler);
-//     auto result = driver.Run(dop);
-//     ASSERT_OK(result);
-//     ASSERT_EQ(sink.batches_.size(), 4);
-//     for (size_t i = 0; i < 4; ++i) {
-//       ASSERT_EQ(sink.batches_[i], (Batch{1}));
-//     }
+TEST(DriverTest, BasicYield) {
+  {
+    size_t dop = 8;
+    MemorySource source({{1}, {1}, {1}});
+    SpillThruPipe pipe(dop);
+    MemorySink sink;
+    Pipeline pipeline{{{&source, {&pipe}}}, &sink};
+    FollyFutureScheduler scheduler(4);
+    Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
+    auto result = driver.Run(dop);
+    ASSERT_OK(result);
+    ASSERT_EQ(sink.batches_.size(), 3);
+    for (size_t i = 0; i < 3; ++i) {
+      ASSERT_EQ(sink.batches_[i], (Batch{1}));
+    }
+  }
 
-//     std::unordered_set<std::pair<ThreadId, std::string>> io_thread_info;
-//     for (size_t i = 0; i < dop; ++i) {
-//       std::copy(observer.io_thread_infos_[i].begin(),
-//       observer.io_thread_infos_[i].end(),
-//                 std::inserter(io_thread_info, io_thread_info.end()));
-//     }
-//     ASSERT_EQ(io_thread_info.size(), num_io_threads);
-//     ASSERT_EQ(io_thread_info.begin()->second.substr(0, 12), "IOThreadPool");
-//   }
-// }
+  {
+    size_t dop = 2;
+    MemorySource source({{1}, {1}, {1}});
+    SpillThruPipe pipe(dop);
+    MemorySink sink;
+    Pipeline pipeline{{{&source, {&pipe}}}, &sink};
+    FollyFutureScheduler scheduler(4);
+    Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
+    auto result = driver.Run(dop);
+    ASSERT_OK(result);
+    ASSERT_EQ(sink.batches_.size(), 3);
+    for (size_t i = 0; i < 3; ++i) {
+      ASSERT_EQ(sink.batches_[i], (Batch{1}));
+    }
+  }
 
-// TEST(SketchTest, Drain) {
-//   size_t dop = 2;
-//   MemorySource source({{1}, {1}, {1}, {1}});
-//   DrainOnlyPipe pipe(dop);
-//   MemorySink sink;
-//   Pipeline pipeline{&source, {&pipe}, &sink};
+  {
+    size_t dop = 8;
+    MemorySource source({{1}, {1}, {1}, {1}});
+    SpillThruPipe pipe(dop);
+    MemorySink sink;
+    Pipeline pipeline{{{&source, {&pipe}}}, &sink};
 
-//   folly::CPUThreadPoolExecutor cpu_executor(4);
-//   folly::IOThreadPoolExecutor io_executor(1);
-//   FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+    folly::CPUThreadPoolExecutor cpu_executor(4);
+    size_t num_io_threads = 1;
+    folly::IOThreadPoolExecutor io_executor(num_io_threads);
+    TaskObserver observer(dop);
+    FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor, &observer);
 
-//   Driver<FollyFutureDoublePoolScheduler> driver({pipeline}, &scheduler);
-//   auto result = driver.Run(dop);
-//   ASSERT_OK(result);
-//   ASSERT_EQ(sink.batches_.size(), 4);
-//   for (size_t i = 0; i < 4; ++i) {
-//     ASSERT_EQ(sink.batches_[i], (Batch{1}));
-//   }
-// }
+    Driver<FollyFutureDoublePoolScheduler> driver({pipeline}, &scheduler);
+    auto result = driver.Run(dop);
+    ASSERT_OK(result);
+    ASSERT_EQ(sink.batches_.size(), 4);
+    for (size_t i = 0; i < 4; ++i) {
+      ASSERT_EQ(sink.batches_[i], (Batch{1}));
+    }
 
-// TEST(SketchTest, MultiDrain) {
-//   size_t dop = 2;
-//   MemorySource source({{1}, {1}, {1}, {1}});
-//   DrainOnlyPipe pipe_1(dop);
-//   DrainOnlyPipe pipe_2(dop);
-//   DrainOnlyPipe pipe_3(dop);
-//   MemorySink sink;
-//   Pipeline pipeline{&source, {&pipe_1, &pipe_2, &pipe_3}, &sink};
+    std::unordered_set<std::pair<ThreadId, std::string>> io_thread_info;
+    for (size_t i = 0; i < dop; ++i) {
+      std::copy(observer.io_thread_infos_[i].begin(), observer.io_thread_infos_[i].end(),
+                std::inserter(io_thread_info, io_thread_info.end()));
+    }
+    ASSERT_EQ(io_thread_info.size(), num_io_threads);
+    ASSERT_EQ(io_thread_info.begin()->second.substr(0, 12), "IOThreadPool");
+  }
+}
 
-//   folly::CPUThreadPoolExecutor cpu_executor(4);
-//   folly::IOThreadPoolExecutor io_executor(1);
-//   FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+TEST(DriverTest, Drain) {
+  size_t dop = 2;
+  MemorySource source({{1}, {1}, {1}, {1}});
+  DrainOnlyPipe pipe(dop);
+  MemorySink sink;
+  Pipeline pipeline{{{&source, {&pipe}}}, &sink};
 
-//   Driver<FollyFutureDoublePoolScheduler> driver({pipeline}, &scheduler);
-//   auto result = driver.Run(dop);
-//   ASSERT_OK(result);
-//   ASSERT_EQ(sink.batches_.size(), 4);
-//   for (size_t i = 0; i < 4; ++i) {
-//     ASSERT_EQ(sink.batches_[i], (Batch{1}));
-//   }
-// }
+  folly::CPUThreadPoolExecutor cpu_executor(4);
+  folly::IOThreadPoolExecutor io_executor(1);
+  FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
 
-// TEST(SketchTest, DrainBackpressure) {}
+  Driver<FollyFutureDoublePoolScheduler> driver({pipeline}, &scheduler);
+  auto result = driver.Run(dop);
+  ASSERT_OK(result);
+  ASSERT_EQ(sink.batches_.size(), 4);
+  for (size_t i = 0; i < 4; ++i) {
+    ASSERT_EQ(sink.batches_[i], (Batch{1}));
+  }
+}
 
-// TEST(SketchTest, DrainError) {
-//   size_t dop = 2;
-//   MemorySource source({{1}, {1}, {1}, {1}, {1}, {1}, {1}, {1}});
-//   ErrorGenerator err_gen(7);
-//   DrainErrorPipe pipe(&err_gen, dop);
-//   BlackHoleSink sink;
-//   Pipeline pipeline{&source, {static_cast<ErrorPipe*>(&pipe)}, &sink};
+TEST(DriverTest, MultiDrain) {
+  size_t dop = 2;
+  MemorySource source({{1}, {1}, {1}, {1}});
+  DrainOnlyPipe pipe_1(dop);
+  DrainOnlyPipe pipe_2(dop);
+  DrainOnlyPipe pipe_3(dop);
+  MemorySink sink;
+  Pipeline pipeline{{{&source, {&pipe_1, &pipe_2, &pipe_3}}}, &sink};
 
-//   folly::CPUThreadPoolExecutor cpu_executor(4);
-//   folly::IOThreadPoolExecutor io_executor(1);
-//   FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+  folly::CPUThreadPoolExecutor cpu_executor(4);
+  folly::IOThreadPoolExecutor io_executor(1);
+  FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
 
-//   Driver<FollyFutureDoublePoolScheduler> driver({pipeline}, &scheduler);
-//   auto result = driver.Run(dop);
-//   ASSERT_NOT_OK(result);
-//   ASSERT_TRUE(result.status().IsInvalid());
-//   ASSERT_EQ(result.status().message(), "7");
-// }
+  Driver<FollyFutureDoublePoolScheduler> driver({pipeline}, &scheduler);
+  auto result = driver.Run(dop);
+  ASSERT_OK(result);
+  ASSERT_EQ(sink.batches_.size(), 4);
+  for (size_t i = 0; i < 4; ++i) {
+    ASSERT_EQ(sink.batches_[i], (Batch{1}));
+  }
+}
 
-// TEST(SketchTest, ErrorAfterBackpressure) {}
+TEST(DriverTest, DrainBackpressure) {}
 
-// TEST(SketchTest, ErrorAfterBackpressure) {}
+TEST(DriverTest, DrainError) {
+  size_t dop = 2;
+  MemorySource source({{1}, {1}, {1}, {1}, {1}, {1}, {1}, {1}});
+  ErrorGenerator err_gen(7);
+  DrainErrorPipe pipe(&err_gen, dop);
+  BlackHoleSink sink;
+  Pipeline pipeline{{{&source, {static_cast<ErrorPipe*>(&pipe)}}}, &sink};
+
+  folly::CPUThreadPoolExecutor cpu_executor(4);
+  folly::IOThreadPoolExecutor io_executor(1);
+  FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+
+  Driver<FollyFutureDoublePoolScheduler> driver({pipeline}, &scheduler);
+  auto result = driver.Run(dop);
+  ASSERT_NOT_OK(result);
+  ASSERT_TRUE(result.status().IsInvalid());
+  ASSERT_EQ(result.status().message(), "7");
+}
+
+TEST(DriverTest, ErrorAfterBackpressure) {}
