@@ -159,16 +159,16 @@ class SinkOp {
   virtual TaskGroups Backend() = 0;
 };
 
-class PipelineExec {
- public:
-  virtual ~PipelineExec() = default;
-
-  virtual arrow::Result<OperatorResult> Run(ThreadId) = 0;
+struct PipelinePlex {
+  SourceOp* source;
+  std::vector<PipeOp*> pipes;
 };
 
-class ConcretePipelineExec : public PipelineExec {
+using Pipeline = std::pair<std::vector<PipelinePlex>, SinkOp*>;
+
+class PipelinePlexTask {
  public:
-  ConcretePipelineExec(
+  PipelinePlexTask(
       size_t dop, PipelineTaskSource source,
       std::vector<std::pair<PipelineTaskPipe, std::optional<PipelineTaskDrain>>> pipes,
       PipelineTaskSink sink)
@@ -188,7 +188,7 @@ class ConcretePipelineExec : public PipelineExec {
     }
   }
 
-  arrow::Result<OperatorResult> Run(ThreadId thread_id) override {
+  arrow::Result<OperatorResult> Run(ThreadId thread_id) {
     if (cancelled) {
       return OperatorResult::Cancelled();
     }
@@ -328,39 +328,13 @@ class ConcretePipelineExec : public PipelineExec {
   std::atomic_bool cancelled = false;
 };
 
-class SerialPipelineExec : public PipelineExec {
- public:
-  SerialPipelineExec(std::vector<std::unique_ptr<PipelineExec>> pipelines)
-      : pipelines_(std::move(pipelines)) {}
+struct PipelineMultiplexTask {
+  PipelineMultiplexTask(std::vector<std::unique_ptr<PipelinePlexTask>> tasks)
+      : tasks_(std::move(tasks)) {}
 
-  arrow::Result<OperatorResult> Run(ThreadId thread_id) override {
-    for (auto& pipeline : pipelines_) {
-      auto result = pipeline->Run(thread_id);
-      if (!result.ok()) {
-        return result.status();
-      }
-      if (result->IsFinished()) {
-        ARRA_DCHECK(!result->GetOutput().has_value());
-      }
-      if (!result->IsFinished()) {
-        return result.status();
-      }
-    }
-    return OperatorResult::Finished(std::nullopt);
-  }
-
- private:
-  std::vector<std::unique_ptr<PipelineExec>> pipelines_;
-};
-
-class HyperPipelineExec : public PipelineExec {
- public:
-  HyperPipelineExec(std::vector<std::unique_ptr<PipelineExec>> pipelines)
-      : pipelines_(std::move(pipelines)) {}
-
-  arrow::Result<OperatorResult> Run(ThreadId thread_id) override {
-    for (auto& pipeline : pipelines_) {
-      auto result = pipeline->Run(thread_id);
+  arrow::Result<OperatorResult> Run(ThreadId thread_id) {
+    for (auto& task : tasks_) {
+      auto result = task->Run(thread_id);
       if (!result.ok()) {
         return result.status();
       }
@@ -374,180 +348,245 @@ class HyperPipelineExec : public PipelineExec {
     return OperatorResult::Finished(std::nullopt);
   }
 
- private:
-  std::vector<std::unique_ptr<PipelineExec>> pipelines_;
+  std::vector<std::unique_ptr<PipelinePlexTask>> tasks_;
 };
 
-struct SubPipeline {
-  SourceOp* source;
-  std::vector<PipeOp*> pipes;
-};
+using PipelineTaskStage = std::pair<std::vector<std::unique_ptr<SourceOp>>,
+                                    std::unique_ptr<PipelineMultiplexTask>>;
+using PipelineTaskStages = std::vector<PipelineTaskStage>;
 
-using Pipeline = std::pair<std::vector<SubPipeline>, SinkOp*>;
-
-class PipelineExecBuilder {
+class PipelineTaskBuilder {
  public:
-  PipelineExecBuilder(const Pipeline& pipeline, size_t dop)
+  PipelineTaskBuilder(const Pipeline& pipeline, size_t dop)
       : pipeline_(pipeline), dop_(dop) {}
 
-  std::pair<std::unique_ptr<PipelineExec>, std::vector<std::unique_ptr<SourceOp>>>
-  Build() && {
-    auto op_tree = RecoverOpTree();
-    return {VisitOpTree(op_tree.get())->Build(dop_), std::move(pipe_sources_keepalive_)};
+  PipelineTaskStages Build() && {
+    // auto op_tree = RecoverOpTree();
+    // return {VisitOpTree(op_tree.get())->Build(dop_),
+    // std::move(pipe_sources_keepalive_)};
+    BuildTopology();
+    SortTopology();
+    return BuildTaskStages();
   }
 
  private:
-  struct OpTree {
-      std::variant<SourceOp*, PipeOp*, SinkOp*> op;
-      std::optional<SourceOp*> pipe_source;
-      std::vector<std::unique_ptr<OpTree>> children;
-  };
-
-  std::unique_ptr<OpTree> RecoverOpTree() {
-    std::unordered_map<PipeOp*, OpTree*> pipe_nodes;
-    auto root = std::make_unique<OpTree>(OpTree{pipeline_.second, std::nullopt, {}});
-    for (auto& sub_pipeline : pipeline_.first) {
-      sub_pipelines_.emplace(sub_pipeline.source, sub_pipeline);
-      auto sub_root =
-          std::make_unique<OpTree>(OpTree{sub_pipeline.source, std::nullopt, {}});
-      for (size_t i = 0; i < sub_pipeline.pipes.size(); ++i) {
-        auto pipe = sub_pipeline.pipes[i];
-        if (pipe_nodes.count(pipe) == 0) {
-          std::optional<SourceOp*> pipe_source_opt = std::nullopt;
-          if (auto pipe_source = pipe->Source(); pipe_source != nullptr) {
-            pipe_source_opt.emplace(pipe_source.get());
-            sub_pipelines_.emplace(
-                pipe_source.get(),
-                SubPipeline{pipe_source.get(),
-                            std::vector<PipeOp*>(sub_pipeline.pipes.begin() + i + 1,
-                                                 sub_pipeline.pipes.end())});
-            pipe_sources_keepalive_.push_back(std::move(pipe_source));
+  void BuildTopology() {
+    std::unordered_map<PipeOp*, SourceOp*> pipe_source_map;
+    auto sink = pipeline_.second;
+    for (auto& plex : pipeline_.first) {
+      size_t stage = 0;
+      topology_.emplace(plex.source, std::pair<size_t, PipelinePlex>{stage++, plex});
+      for (size_t i = 0; i < plex.pipes.size(); ++i) {
+        auto pipe = plex.pipes[i];
+        if (pipe_source_map.count(pipe) == 0) {
+          if (auto pipe_source_up = pipe->Source(); pipe_source_up != nullptr) {
+            auto pipe_source = pipe_source_up.get();
+            pipe_source_map.emplace(pipe, pipe_source);
+            PipelinePlex new_plex{
+                pipe_source,
+                std::vector<PipeOp*>(plex.pipes.begin() + i + 1, plex.pipes.end())};
+            topology_.emplace(pipe_source, std::pair<size_t, PipelinePlex>{
+                                               stage++, std::move(new_plex)});
+            pipe_sources_keepalive_.emplace(pipe_source, std::move(pipe_source_up));
           }
-          auto pipe_node =
-              std::make_unique<OpTree>(OpTree{pipe, std::move(pipe_source_opt), {}});
-          pipe_nodes[pipe] = pipe_node.get();
-          pipe_node->children.push_back(std::move(sub_root));
-          std::swap(sub_root, pipe_node);
         } else {
-          pipe_nodes[pipe]->children.push_back(std::move(sub_root));
-          break;
+          auto pipe_source = pipe_source_map[pipe];
+          if (topology_[pipe_source].first < stage) {
+            topology_[pipe_source].first = stage++;
+          }
         }
       }
-      if (sub_root != nullptr) {
-        root->children.push_back(std::move(sub_root));
+    }
+  }
+
+  void SortTopology() {
+    for (auto& [source, stage_info] : topology_) {
+      if (pipe_sources_keepalive_.count(source) > 0) {
+        stages_[stage_info.first].first.push_back(
+            std::move(pipe_sources_keepalive_[source]));
       }
+      stages_[stage_info.first].second.push_back(std::move(stage_info.second));
     }
-    return root;
   }
 
-  template <typename>
-  inline static constexpr bool always_false_v = false;
-
-  struct Builder {
-    virtual ~Builder() = default;
-    virtual std::unique_ptr<PipelineExec> Build(size_t dop) = 0;
-  };
-
-  struct ConcreteBuilder : public Builder {
-    SubPipeline pipeline;
-    SinkOp* sink;
-
-    ConcreteBuilder(SubPipeline pipeline, SinkOp* sink)
-        : pipeline(std::move(pipeline)), sink(sink) {}
-
-    std::unique_ptr<PipelineExec> Build(size_t dop) override {
-      std::vector<std::pair<PipelineTaskPipe, std::optional<PipelineTaskDrain>>> pipes(
-          pipeline.pipes.size());
-      std::transform(
-          pipeline.pipes.begin(), pipeline.pipes.end(), pipes.begin(),
-          [&](auto* pipe) { return std::make_pair(pipe->Pipe(), pipe->Drain()); });
-      return std::make_unique<ConcretePipelineExec>(dop, pipeline.source->Source(),
-                                                    std::move(pipes), sink->Sink());
+  PipelineTaskStages BuildTaskStages() {
+    PipelineTaskStages task_stages;
+    for (auto& [stage, stage_info] : stages_) {
+      auto sources_keepalive = std::move(stage_info.first);
+      std::vector<std::unique_ptr<PipelinePlexTask>> plex_tasks;
+      for (auto& plex : stage_info.second) {
+        std::vector<std::pair<PipelineTaskPipe, std::optional<PipelineTaskDrain>>> pipes(
+            plex.pipes.size());
+        std::transform(
+            plex.pipes.begin(), plex.pipes.end(), pipes.begin(),
+            [&](auto* pipe) { return std::make_pair(pipe->Pipe(), pipe->Drain()); });
+        plex_tasks.push_back(std::make_unique<PipelinePlexTask>(
+            dop_, plex.source->Source(), std::move(pipes), pipeline_.second->Sink()));
+      }
+      task_stages.emplace_back(
+          std::move(sources_keepalive),
+          std::make_unique<PipelineMultiplexTask>(std::move(plex_tasks)));
     }
-  };
-
-  struct SerialBuilder : public Builder {
-    std::vector<std::unique_ptr<Builder>> children;
-
-    SerialBuilder(std::vector<std::unique_ptr<Builder>> children)
-        : children(std::move(children)) {}
-
-    std::unique_ptr<PipelineExec> Build(size_t dop) override {
-      std::vector<std::unique_ptr<PipelineExec>> pipelines(children.size());
-      std::transform(children.begin(), children.end(), pipelines.begin(),
-                     [&](auto& child) { return child->Build(dop); });
-      return std::make_unique<SerialPipelineExec>(std::move(pipelines));
-    }
-  };
-
-  struct HyperBuilder : public Builder {
-    std::vector<std::unique_ptr<Builder>> children;
-
-    HyperBuilder(std::vector<std::unique_ptr<Builder>> children)
-        : children(std::move(children)) {}
-
-    std::unique_ptr<PipelineExec> Build(size_t dop) override {
-      std::vector<std::unique_ptr<PipelineExec>> pipelines(children.size());
-      std::transform(children.begin(), children.end(), pipelines.begin(),
-                     [&](auto& child) { return child->Build(dop); });
-      return std::make_unique<HyperPipelineExec>(std::move(pipelines));
-    }
-  };
-
-  std::unique_ptr<Builder> VisitOpTree(OpTree* op_tree) {
-    std::vector<std::unique_ptr<Builder>> children(op_tree->children.size());
-    std::transform(op_tree->children.begin(), op_tree->children.end(), children.begin(),
-                   [&](auto& child) { return VisitOpTree(child.get()); });
-    return std::visit(
-        [&](auto&& op) -> std::unique_ptr<Builder> {
-          using T = std::decay_t<decltype(op)>;
-          if constexpr (std::is_same_v<T, SourceOp*>) {
-            ARRA_DCHECK(children.empty());
-            auto pipeline = sub_pipelines_[op];
-            return std::make_unique<ConcreteBuilder>(std::move(pipeline),
-                                                     pipeline_.second);
-          } else if constexpr (std::is_same_v<T, PipeOp*>) {
-            ARRA_DCHECK(!children.empty());
-            std::unique_ptr<Builder> child;
-            if (children.size() == 1) {
-              child = std::move(children[0]);
-            } else {
-              child = std::make_unique<HyperBuilder>(std::move(children));
-            }
-            if (!op_tree->pipe_source.has_value()) {
-              return child;
-            } else {
-              if (auto serial_builder = dynamic_cast<SerialBuilder*>(child.get());
-                  serial_builder != nullptr) {
-                serial_builder->children.push_back(std::make_unique<ConcreteBuilder>(
-                    sub_pipelines_[op_tree->pipe_source.value()], pipeline_.second));
-                return child;
-              } else {
-                std::vector<std::unique_ptr<Builder>> children;
-                children.push_back(std::move(child));
-                children.push_back(std::make_unique<ConcreteBuilder>(
-                    sub_pipelines_[op_tree->pipe_source.value()], pipeline_.second));
-                return std::make_unique<SerialBuilder>(std::move(children));
-              }
-            }
-          } else if constexpr (std::is_same_v<T, SinkOp*>) {
-            if (children.size() == 1) {
-              return std::move(children[0]);
-            } else {
-              return std::make_unique<HyperBuilder>(std::move(children));
-            }
-          } else {
-            static_assert(always_false_v<T>, "Unknown type in OpTree");
-          }
-        },
-        op_tree->op);
+    return task_stages;
   }
+
+  // struct OpTree {
+  //     std::variant<SourceOp*, PipeOp*, SinkOp*> op;
+  //     std::optional<SourceOp*> pipe_source;
+  //     std::vector<std::unique_ptr<OpTree>> children;
+  // };
+
+  // std::unique_ptr<OpTree> RecoverOpTree() {
+  //   std::unordered_map<PipeOp*, OpTree*> pipe_nodes;
+  //   auto root = std::make_unique<OpTree>(OpTree{pipeline_.second, std::nullopt, {}});
+  //   for (auto& sub_pipeline : pipeline_.first) {
+  //     sub_pipelines_.emplace(sub_pipeline.source, sub_pipeline);
+  //     auto sub_root =
+  //         std::make_unique<OpTree>(OpTree{sub_pipeline.source, std::nullopt, {}});
+  //     for (size_t i = 0; i < sub_pipeline.pipes.size(); ++i) {
+  //       auto pipe = sub_pipeline.pipes[i];
+  //       if (pipe_nodes.count(pipe) == 0) {
+  //         std::optional<SourceOp*> pipe_source_opt = std::nullopt;
+  //         if (auto pipe_source = pipe->Source(); pipe_source != nullptr) {
+  //           pipe_source_opt.emplace(pipe_source.get());
+  //           sub_pipelines_.emplace(
+  //               pipe_source.get(),
+  //               SubPipeline{pipe_source.get(),
+  //                           std::vector<PipeOp*>(sub_pipeline.pipes.begin() + i + 1,
+  //                                                sub_pipeline.pipes.end())});
+  //           pipe_sources_keepalive_.push_back(std::move(pipe_source));
+  //         }
+  //         auto pipe_node =
+  //             std::make_unique<OpTree>(OpTree{pipe, std::move(pipe_source_opt), {}});
+  //         pipe_nodes[pipe] = pipe_node.get();
+  //         pipe_node->children.push_back(std::move(sub_root));
+  //         std::swap(sub_root, pipe_node);
+  //       } else {
+  //         pipe_nodes[pipe]->children.push_back(std::move(sub_root));
+  //         break;
+  //       }
+  //     }
+  //     if (sub_root != nullptr) {
+  //       root->children.push_back(std::move(sub_root));
+  //     }
+  //   }
+  //   return root;
+  // }
+
+  // template <typename>
+  // inline static constexpr bool always_false_v = false;
+
+  // struct Builder {
+  //   virtual ~Builder() = default;
+  //   virtual std::unique_ptr<PipelineExec> Build(size_t dop) = 0;
+  // };
+
+  // struct ConcreteBuilder : public Builder {
+  //   SubPipeline pipeline;
+  //   SinkOp* sink;
+
+  //   ConcreteBuilder(SubPipeline pipeline, SinkOp* sink)
+  //       : pipeline(std::move(pipeline)), sink(sink) {}
+
+  //   std::unique_ptr<PipelineExec> Build(size_t dop) override {
+  //     std::vector<std::pair<PipelineTaskPipe, std::optional<PipelineTaskDrain>>> pipes(
+  //         pipeline.pipes.size());
+  //     std::transform(
+  //         pipeline.pipes.begin(), pipeline.pipes.end(), pipes.begin(),
+  //         [&](auto* pipe) { return std::make_pair(pipe->Pipe(), pipe->Drain()); });
+  //     return std::make_unique<ConcretePipelineExec>(dop, pipeline.source->Source(),
+  //                                                   std::move(pipes), sink->Sink());
+  //   }
+  // };
+
+  // struct SerialBuilder : public Builder {
+  //   std::vector<std::unique_ptr<Builder>> children;
+
+  //   SerialBuilder(std::vector<std::unique_ptr<Builder>> children)
+  //       : children(std::move(children)) {}
+
+  //   std::unique_ptr<PipelineExec> Build(size_t dop) override {
+  //     std::vector<std::unique_ptr<PipelineExec>> pipelines(children.size());
+  //     std::transform(children.begin(), children.end(), pipelines.begin(),
+  //                    [&](auto& child) { return child->Build(dop); });
+  //     return std::make_unique<SerialPipelineExec>(std::move(pipelines));
+  //   }
+  // };
+
+  // struct HyperBuilder : public Builder {
+  //   std::vector<std::unique_ptr<Builder>> children;
+
+  //   HyperBuilder(std::vector<std::unique_ptr<Builder>> children)
+  //       : children(std::move(children)) {}
+
+  //   std::unique_ptr<PipelineExec> Build(size_t dop) override {
+  //     std::vector<std::unique_ptr<PipelineExec>> pipelines(children.size());
+  //     std::transform(children.begin(), children.end(), pipelines.begin(),
+  //                    [&](auto& child) { return child->Build(dop); });
+  //     return std::make_unique<HyperPipelineExec>(std::move(pipelines));
+  //   }
+  // };
+
+  // std::unique_ptr<Builder> VisitOpTree(OpTree* op_tree) {
+  //   std::vector<std::unique_ptr<Builder>> children(op_tree->children.size());
+  //   std::transform(op_tree->children.begin(), op_tree->children.end(),
+  //   children.begin(),
+  //                  [&](auto& child) { return VisitOpTree(child.get()); });
+  //   return std::visit(
+  //       [&](auto&& op) -> std::unique_ptr<Builder> {
+  //         using T = std::decay_t<decltype(op)>;
+  //         if constexpr (std::is_same_v<T, SourceOp*>) {
+  //           ARRA_DCHECK(children.empty());
+  //           auto pipeline = sub_pipelines_[op];
+  //           return std::make_unique<ConcreteBuilder>(std::move(pipeline),
+  //                                                    pipeline_.second);
+  //         } else if constexpr (std::is_same_v<T, PipeOp*>) {
+  //           ARRA_DCHECK(!children.empty());
+  //           std::unique_ptr<Builder> child;
+  //           if (children.size() == 1) {
+  //             child = std::move(children[0]);
+  //           } else {
+  //             child = std::make_unique<HyperBuilder>(std::move(children));
+  //           }
+  //           if (!op_tree->pipe_source.has_value()) {
+  //             return child;
+  //           } else {
+  //             if (auto serial_builder = dynamic_cast<SerialBuilder*>(child.get());
+  //                 serial_builder != nullptr) {
+  //               serial_builder->children.push_back(std::make_unique<ConcreteBuilder>(
+  //                   sub_pipelines_[op_tree->pipe_source.value()], pipeline_.second));
+  //               return child;
+  //             } else {
+  //               std::vector<std::unique_ptr<Builder>> children;
+  //               children.push_back(std::move(child));
+  //               children.push_back(std::make_unique<ConcreteBuilder>(
+  //                   sub_pipelines_[op_tree->pipe_source.value()], pipeline_.second));
+  //               return std::make_unique<SerialBuilder>(std::move(children));
+  //             }
+  //           }
+  //         } else if constexpr (std::is_same_v<T, SinkOp*>) {
+  //           if (children.size() == 1) {
+  //             return std::move(children[0]);
+  //           } else {
+  //             return std::make_unique<HyperBuilder>(std::move(children));
+  //           }
+  //         } else {
+  //           static_assert(always_false_v<T>, "Unknown type in OpTree");
+  //         }
+  //       },
+  //       op_tree->op);
+  // }
 
   const Pipeline& pipeline_;
   size_t dop_;
 
-  std::vector<std::unique_ptr<SourceOp>> pipe_sources_keepalive_;
-  std::map<SourceOp*, SubPipeline> sub_pipelines_;
+  std::unordered_map<SourceOp*, std::pair<size_t, PipelinePlex>> topology_;
+  std::unordered_map<SourceOp*, std::unique_ptr<SourceOp>> pipe_sources_keepalive_;
+  std::map<size_t,
+           std::pair<std::vector<std::unique_ptr<SourceOp>>, std::vector<PipelinePlex>>>
+      stages_;
+  // std::vector<std::unique_ptr<SourceOp>> pipe_sources_keepalive_;
+  // std::map<SourceOp*, SubPipeline> sub_pipelines_;
 };
 
 // template <typename Scheduler>
@@ -818,111 +857,786 @@ class PipelineExecBuilder {
 //   TaskObserver* observer_;
 // };
 
+class InfiniteSource : public SourceOp {
+ public:
+  InfiniteSource(Batch batch) : batch_(std::move(batch)) {}
+
+  PipelineTaskSource Source() override {
+    return [&](ThreadId) -> arrow::Result<OperatorResult> {
+      return OperatorResult::SourcePipeHasMore(batch_);
+    };
+  }
+
+  TaskGroups Frontend() override { return {}; }
+
+  TaskGroups Backend() override { return {}; }
+
+ private:
+  Batch batch_;
+};
+
+class MemorySource : public SourceOp {
+ public:
+  MemorySource(std::list<Batch> batches) : batches_(std::move(batches)) {}
+
+  PipelineTaskSource Source() override {
+    return [&](ThreadId) -> arrow::Result<OperatorResult> {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (batches_.empty()) {
+        return OperatorResult::Finished(std::nullopt);
+      }
+      auto output = std::move(batches_.front());
+      batches_.pop_front();
+      if (batches_.empty()) {
+        return OperatorResult::Finished(std::move(output));
+      } else {
+        return OperatorResult::SourcePipeHasMore(std::move(output));
+      }
+    };
+  }
+
+  TaskGroups Frontend() override { return {}; }
+
+  TaskGroups Backend() override { return {}; }
+
+ public:
+  std::mutex mutex_;
+  std::list<Batch> batches_;
+};
+
+class DistributedMemorySource : public SourceOp {
+ public:
+  DistributedMemorySource(size_t dop, std::list<Batch> batches) : dop_(dop) {
+    thread_locals_.resize(dop_);
+    for (auto& tl : thread_locals_) {
+      tl.batches_ = batches;
+    }
+  }
+
+  PipelineTaskSource Source() override {
+    return [&](ThreadId thread_id) -> arrow::Result<OperatorResult> {
+      if (thread_locals_[thread_id].batches_.empty()) {
+        return OperatorResult::Finished(std::nullopt);
+      }
+      auto output = std::move(thread_locals_[thread_id].batches_.front());
+      thread_locals_[thread_id].batches_.pop_front();
+      if (thread_locals_[thread_id].batches_.empty()) {
+        return OperatorResult::Finished(std::move(output));
+      } else {
+        return OperatorResult::SourcePipeHasMore(std::move(output));
+      }
+    };
+  }
+
+  TaskGroups Frontend() override { return {}; }
+
+  TaskGroups Backend() override { return {}; }
+
+ private:
+  size_t dop_;
+  struct ThreadLocal {
+    std::list<Batch> batches_;
+  };
+  std::vector<ThreadLocal> thread_locals_;
+};
+
+class BlackHoleSink : public SinkOp {
+ public:
+  PipelineTaskSink Sink() override {
+    return [&](ThreadId, std::optional<Batch>) -> arrow::Result<OperatorResult> {
+      return OperatorResult::PipeSinkNeedsMore();
+    };
+  }
+
+  TaskGroups Frontend() override { return {}; }
+
+  TaskGroups Backend() override { return {}; }
+};
+
+class MemorySink : public SinkOp {
+ public:
+  PipelineTaskSink Sink() override {
+    return [&](ThreadId, std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+      if (input.has_value()) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        batches_.push_back(std::move(input.value()));
+      }
+      return OperatorResult::PipeSinkNeedsMore();
+    };
+  }
+
+  TaskGroups Frontend() override { return {}; }
+
+  TaskGroups Backend() override { return {}; }
+
+ public:
+  std::mutex mutex_;
+  std::vector<Batch> batches_;
+};
+
+class IdentityPipe : public PipeOp {
+ public:
+  PipelineTaskPipe Pipe() override {
+    return [&](ThreadId, std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+      if (input.has_value()) {
+        return OperatorResult::PipeEven(std::move(input.value()));
+      }
+      return OperatorResult::PipeSinkNeedsMore();
+    };
+  }
+
+  std::optional<PipelineTaskDrain> Drain() override { return std::nullopt; }
+
+  std::unique_ptr<SourceOp> Source() override { return nullptr; }
+};
+
+class IdentityWithAnotherSourcePipe : public IdentityPipe {
+ public:
+  IdentityWithAnotherSourcePipe(std::unique_ptr<SourceOp> source)
+      : source_(std::move(source)) {}
+
+  std::unique_ptr<SourceOp> Source() override { return std::move(source_); }
+
+  std::unique_ptr<SourceOp> source_;
+};
+
+class TimesNFlatPipe : public PipeOp {
+ public:
+  TimesNFlatPipe(size_t n) : n_(n) {}
+
+  PipelineTaskPipe Pipe() override {
+    return [&](ThreadId, std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+      if (input.has_value()) {
+        auto& batch = input.value();
+        Batch output(batch.size() * n_);
+        for (size_t i = 0; i < n_; ++i) {
+          std::copy(batch.begin(), batch.end(), output.begin() + i * batch.size());
+        }
+        return OperatorResult::PipeEven(std::move(output));
+      }
+      return OperatorResult::PipeSinkNeedsMore();
+    };
+  }
+
+  std::optional<PipelineTaskDrain> Drain() override { return std::nullopt; }
+
+  std::unique_ptr<SourceOp> Source() override { return nullptr; }
+
+ private:
+  size_t n_;
+};
+
+class TimesNSlicedPipe : public PipeOp {
+ public:
+  TimesNSlicedPipe(size_t dop, size_t n) : dop_(dop), n_(n) {
+    thread_locals_.resize(dop_);
+  }
+
+  PipelineTaskPipe Pipe() override {
+    return [&](ThreadId thread_id,
+               std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+      if (thread_locals_[thread_id].batches.empty()) {
+        ARRA_DCHECK(input.has_value());
+        for (size_t i = 0; i < n_; i++) {
+          thread_locals_[thread_id].batches.push_back(input.value());
+        }
+      } else {
+        ARRA_DCHECK(!input.has_value());
+      }
+      auto output = std::move(thread_locals_[thread_id].batches.front());
+      thread_locals_[thread_id].batches.pop_front();
+      if (thread_locals_[thread_id].batches.empty()) {
+        return OperatorResult::PipeEven(std::move(output));
+      } else {
+        return OperatorResult::SourcePipeHasMore(std::move(output));
+      }
+    };
+  }
+
+  std::optional<PipelineTaskDrain> Drain() override { return std::nullopt; }
+
+  std::unique_ptr<SourceOp> Source() override { return nullptr; }
+
+ private:
+  size_t dop_, n_;
+
+ private:
+  struct ThreadLocal {
+    std::list<Batch> batches;
+  };
+  std::vector<ThreadLocal> thread_locals_;
+};
+
+class AccumulatePipe : public PipeOp {
+ public:
+  AccumulatePipe(size_t dop, size_t n) : dop_(dop), n_(n) { thread_locals_.resize(dop_); }
+
+  PipelineTaskPipe Pipe() override {
+    PipelineTaskPipe f =
+        [&](ThreadId thread_id,
+            std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+      if (thread_locals_[thread_id].batch.size() >= n_) {
+        ARRA_DCHECK(!input.has_value());
+        Batch output(thread_locals_[thread_id].batch.begin(),
+                     thread_locals_[thread_id].batch.begin() + n_);
+        thread_locals_[thread_id].batch =
+            Batch(thread_locals_[thread_id].batch.begin() + n_,
+                  thread_locals_[thread_id].batch.end());
+        if (thread_locals_[thread_id].batch.size() > n_) {
+          return OperatorResult::SourcePipeHasMore(std::move(output));
+        } else {
+          return OperatorResult::PipeEven(std::move(output));
+        }
+      }
+      ARRA_DCHECK(input.has_value());
+      thread_locals_[thread_id].batch.insert(thread_locals_[thread_id].batch.end(),
+                                             input.value().begin(), input.value().end());
+      if (thread_locals_[thread_id].batch.size() >= n_) {
+        return f(thread_id, std::nullopt);
+      } else {
+        return OperatorResult::PipeSinkNeedsMore();
+      }
+    };
+
+    return f;
+  }
+
+  std::optional<PipelineTaskDrain> Drain() override {
+    return [&](ThreadId thread_id) -> arrow::Result<OperatorResult> {
+      if (thread_locals_[thread_id].batch.empty()) {
+        return OperatorResult::Finished(std::nullopt);
+      } else {
+        return OperatorResult::Finished(std::move(thread_locals_[thread_id].batch));
+      }
+    };
+  }
+
+  std::unique_ptr<SourceOp> Source() override { return nullptr; }
+
+ private:
+  size_t dop_, n_;
+
+ private:
+  struct ThreadLocal {
+    Batch batch;
+  };
+  std::vector<ThreadLocal> thread_locals_;
+};
+
+struct BackpressureContext {
+  bool backpressure = false;
+  bool exit = false;
+  size_t source_backpressure = 0, source_non_backpressure = 0;
+  size_t pipe_backpressure = 0, pipe_non_backpressure = 0;
+};
+using BackpressureContexts = std::vector<BackpressureContext>;
+
+class BackpressureSource : public SourceOp {
+ public:
+  BackpressureSource(BackpressureContexts& ctx) : ctx_(ctx) {}
+
+  PipelineTaskSource Source() override {
+    return [&](ThreadId thread_id) -> arrow::Result<OperatorResult> {
+      if (ctx_[thread_id].backpressure) {
+        ctx_[thread_id].source_backpressure++;
+      } else {
+        ctx_[thread_id].source_non_backpressure++;
+      }
+
+      if (ctx_[thread_id].exit) {
+        return OperatorResult::Finished(std::nullopt);
+      } else {
+        return OperatorResult::SourcePipeHasMore({});
+      }
+    };
+  }
+
+  TaskGroups Frontend() override { return {}; }
+
+  TaskGroups Backend() override { return {}; }
+
+ private:
+  BackpressureContexts& ctx_;
+};
+
+class BackpressurePipe : public PipeOp {
+ public:
+  BackpressurePipe(BackpressureContexts& ctx) : ctx_(ctx) {}
+
+  PipelineTaskPipe Pipe() override {
+    return [&](ThreadId thread_id,
+               std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+      if (ctx_[thread_id].backpressure) {
+        ctx_[thread_id].pipe_backpressure++;
+      } else {
+        ctx_[thread_id].pipe_non_backpressure++;
+      }
+      return OperatorResult::PipeEven(std::move(input.value()));
+    };
+  }
+
+  std::optional<PipelineTaskDrain> Drain() override { return std::nullopt; }
+
+  std::unique_ptr<SourceOp> Source() override { return nullptr; }
+
+ private:
+  BackpressureContexts& ctx_;
+};
+
+class BackpressureSink : public SinkOp {
+ public:
+  BackpressureSink(size_t dop, BackpressureContexts& ctx, size_t backpressure_start,
+                   size_t backpressure_stop, size_t exit)
+      : ctx_(ctx),
+        backpressure_start_(backpressure_start),
+        backpressure_stop_(backpressure_stop),
+        exit_(exit) {
+    thread_locals_.resize(dop);
+  }
+
+  PipelineTaskSink Sink() override {
+    return [&](ThreadId thread_id,
+               std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+      size_t counter = ++thread_locals_[thread_id].counter;
+      if (counter >= exit_) {
+        ctx_[thread_id].exit = true;
+        return OperatorResult::PipeSinkNeedsMore();
+      }
+      if (counter == backpressure_start_) {
+        ctx_[thread_id].backpressure = true;
+      }
+      if (counter == backpressure_stop_) {
+        ctx_[thread_id].backpressure = false;
+      }
+      if (counter > backpressure_start_ && counter <= backpressure_stop_) {
+        ARRA_DCHECK(!input.has_value());
+      } else {
+        ARRA_DCHECK(input.has_value());
+      }
+      if (counter >= backpressure_start_ && counter < backpressure_stop_) {
+        return OperatorResult::SinkBackpressure();
+      }
+      return OperatorResult::PipeSinkNeedsMore();
+    };
+  }
+
+  TaskGroups Frontend() override { return {}; }
+
+  TaskGroups Backend() override { return {}; }
+
+ private:
+  BackpressureContexts& ctx_;
+  size_t backpressure_start_, backpressure_stop_, exit_;
+
+  struct ThreadLocal {
+    size_t counter = 0;
+  };
+  std::vector<ThreadLocal> thread_locals_;
+};
+
+class ErrorGenerator {
+ public:
+  ErrorGenerator(size_t trigger) : trigger_(trigger) {}
+
+  template <typename T>
+  arrow::Result<T> operator()(T non_error) {
+    if (counter_++ == trigger_) {
+      return arrow::Status::Invalid(std::to_string(trigger_));
+    }
+    return non_error;
+  }
+
+ private:
+  size_t trigger_;
+
+  std::atomic<size_t> counter_ = 0;
+};
+
+class ErrorOpWrapper {
+ public:
+  ErrorOpWrapper(ErrorGenerator* err_gen) : err_gen_(err_gen) {}
+
+ protected:
+  template <typename TTask, typename... TArgs>
+  auto WrapError(TTask&& task, TArgs&&... args) {
+    auto result = task(std::forward<TArgs>(args)...);
+    if (err_gen_ == nullptr || !result.ok()) {
+      return result;
+    }
+    return (*err_gen_)(std::move(*result));
+  }
+
+  auto WrapTaskGroup(const TaskGroup& task_group) {
+    auto task = [this, task = std::get<0>(task_group)](ThreadId thread_id) -> TaskResult {
+      return WrapError(task, thread_id);
+    };
+    auto size = std::get<1>(task_group);
+    std::optional<TaskCont> task_cont = std::nullopt;
+    if (std::get<2>(task_group).has_value()) {
+      task_cont = [this, task_cont = std::get<2>(task_group).value()]() -> TaskResult {
+        return WrapError(task_cont);
+      };
+    }
+    return TaskGroup{std::move(task), size, std::move(task_cont)};
+  }
+
+  auto WrapTaskGroups(const TaskGroups& task_groups) {
+    TaskGroups transformed(task_groups.size());
+    std::transform(task_groups.begin(), task_groups.end(), transformed.begin(),
+                   [&](const auto& task_group) { return WrapTaskGroup(task_group); });
+    return transformed;
+  }
+
+ protected:
+  ErrorGenerator* err_gen_;
+};
+
+class ErrorSource : virtual public SourceOp, public ErrorOpWrapper {
+ public:
+  ErrorSource(ErrorGenerator* err_gen, SourceOp* source)
+      : ErrorOpWrapper(err_gen), source_(source) {}
+
+  PipelineTaskSource Source() override {
+    return [&](ThreadId thread_id) -> arrow::Result<OperatorResult> {
+      return WrapError(source_->Source(), thread_id);
+    };
+  }
+
+  TaskGroups Frontend() override {
+    auto parent_groups = source_->Frontend();
+    return WrapTaskGroups(parent_groups);
+  }
+
+  TaskGroups Backend() override {
+    auto parent_groups = source_->Backend();
+    return WrapTaskGroups(parent_groups);
+  }
+
+ private:
+  SourceOp* source_;
+};
+
+class ErrorPipe : virtual public PipeOp, public ErrorOpWrapper {
+ public:
+  ErrorPipe(ErrorGenerator* err_gen, PipeOp* pipe)
+      : ErrorOpWrapper(err_gen), pipe_(pipe) {}
+
+  PipelineTaskPipe Pipe() override {
+    return [&](ThreadId thread_id,
+               std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+      return WrapError(pipe_->Pipe(), thread_id, std::move(input));
+    };
+  }
+
+  std::optional<PipelineTaskDrain> Drain() override {
+    auto drain = pipe_->Drain();
+    if (!drain.has_value()) {
+      return std::nullopt;
+    }
+    return [&, drain](ThreadId thread_id) -> arrow::Result<OperatorResult> {
+      return WrapError(drain.value(), thread_id);
+    };
+  }
+
+  std::unique_ptr<SourceOp> Source() override {
+    pipe_source_ = pipe_->Source();
+    return std::make_unique<ErrorSource>(err_gen_, pipe_source_.get());
+  }
+
+ private:
+  PipeOp* pipe_;
+  std::unique_ptr<SourceOp> pipe_source_;
+};
+
+class ErrorSink : virtual public SinkOp, public ErrorOpWrapper {
+ public:
+  ErrorSink(ErrorGenerator* err_gen, SinkOp* sink)
+      : ErrorOpWrapper(err_gen), sink_(sink) {}
+
+  PipelineTaskSink Sink() override {
+    return [&](ThreadId thread_id,
+               std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+      return WrapError(sink_->Sink(), thread_id, std::move(input));
+    };
+  }
+
+  TaskGroups Frontend() override {
+    auto parent_groups = sink_->Frontend();
+    return WrapTaskGroups(parent_groups);
+  }
+
+  TaskGroups Backend() override {
+    auto parent_groups = sink_->Backend();
+    return WrapTaskGroups(parent_groups);
+  }
+
+ private:
+  SinkOp* sink_;
+};
+
+class SpillThruPipe : public PipeOp {
+ public:
+  SpillThruPipe(size_t dop) : thread_locals_(dop) {}
+
+  PipelineTaskPipe Pipe() override {
+    return [&](ThreadId thread_id,
+               std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+      if (thread_locals_[thread_id].spilling) {
+        ARRA_DCHECK(!input.has_value());
+        ARRA_DCHECK(thread_locals_[thread_id].batch.has_value());
+        thread_locals_[thread_id].spilling = false;
+        return OperatorResult::PipeSinkNeedsMore();
+      }
+      if (thread_locals_[thread_id].batch.has_value()) {
+        ARRA_DCHECK(!input.has_value());
+        auto output = std::move(thread_locals_[thread_id].batch.value());
+        thread_locals_[thread_id].batch = std::nullopt;
+        return OperatorResult::PipeEven(std::move(output));
+      }
+      ARRA_DCHECK(input.has_value());
+      thread_locals_[thread_id].batch = std::move(input.value());
+      thread_locals_[thread_id].spilling = true;
+      return OperatorResult::PipeYield();
+    };
+  }
+
+  std::optional<PipelineTaskDrain> Drain() override { return std::nullopt; }
+
+  std::unique_ptr<SourceOp> Source() override { return nullptr; }
+
+ private:
+  struct ThreadLocal {
+    std::optional<Batch> batch = std::nullopt;
+    bool spilling = false;
+  };
+  std::vector<ThreadLocal> thread_locals_;
+};
+
+class DrainOnlyPipe : public PipeOp {
+ public:
+  DrainOnlyPipe(size_t dop) : thread_locals_(dop) {}
+
+  PipelineTaskPipe Pipe() override {
+    return [&](ThreadId thread_id,
+               std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+      ARRA_DCHECK(input.has_value());
+      thread_locals_[thread_id].batches.push_back(std::move(input.value()));
+      return OperatorResult::PipeSinkNeedsMore();
+    };
+  }
+
+  std::optional<PipelineTaskDrain> Drain() override {
+    return [&](ThreadId thread_id) -> arrow::Result<OperatorResult> {
+      if (thread_locals_[thread_id].batches.empty()) {
+        return OperatorResult::Finished(std::nullopt);
+      }
+      auto batch = std::move(thread_locals_[thread_id].batches.front());
+      thread_locals_[thread_id].batches.pop_front();
+      if (thread_locals_[thread_id].batches.empty()) {
+        return OperatorResult::Finished(std::move(batch));
+      } else {
+        return OperatorResult::SourcePipeHasMore(std::move(batch));
+      }
+    };
+  }
+
+  std::unique_ptr<SourceOp> Source() override { return nullptr; }
+
+ private:
+  struct ThreadLocal {
+    std::list<Batch> batches;
+  };
+  std::vector<ThreadLocal> thread_locals_;
+};
+
+class DrainErrorPipe : public ErrorPipe, public DrainOnlyPipe {
+ public:
+  DrainErrorPipe(ErrorGenerator* err_gen, size_t dop)
+      : ErrorPipe(err_gen, static_cast<DrainOnlyPipe*>(this)), DrainOnlyPipe(dop) {}
+
+  PipelineTaskPipe Pipe() override { return DrainOnlyPipe::Pipe(); }
+
+ private:
+  std::unique_ptr<ErrorGenerator> err_gen_;
+};
+
+// class TaskObserver : public FollyFutureDoublePoolScheduler::TaskObserver {
+//  public:
+//   TaskObserver(size_t dop)
+//       : last_results_(dop, TaskStatus::Continue()), io_thread_infos_(dop) {}
+
+//   void BeforeTaskRun(const Task& task, TaskId task_id) override {}
+
+//   void AfterTaskRun(const Task& task, TaskId task_id, const TaskResult& result)
+//   override {
+//     if (last_results_[task_id].ok() && last_results_[task_id]->IsYield()) {
+//       io_thread_infos_[task_id].insert(std::make_pair(
+//           folly::getCurrentThreadID(), folly::getCurrentThreadName().value()));
+//     }
+//     last_results_[task_id] = result;
+//   }
+
+//  public:
+//   std::vector<TaskResult> last_results_;
+//   std::vector<std::unordered_set<std::pair<ThreadId, std::string>>> io_thread_infos_;
+// };
+
 }  // namespace arra::sketch
 
 using namespace arra::sketch;
 
-// class MemorySource : public SourceOp {
-//  public:
-//   MemorySource(std::list<Batch> batches) : batches_(std::move(batches)) {}
+TEST(PipelineTaskBuildTest, EmptyPipeline) {
+  size_t dop = 8;
+  BlackHoleSink sink;
+  Pipeline pipeline{{}, &sink};
+  auto stages = PipelineTaskBuilder(pipeline, dop).Build();
+  ASSERT_EQ(stages.size(), 0);
+}
 
-//   PipelineTaskSource Source() override {
-//     return [&](ThreadId) -> arrow::Result<OperatorResult> {
-//       std::lock_guard<std::mutex> lock(mutex_);
-//       if (batches_.empty()) {
-//         return OperatorResult::Finished(std::nullopt);
-//       }
-//       auto output = std::move(batches_.front());
-//       batches_.pop_front();
-//       if (batches_.empty()) {
-//         return OperatorResult::Finished(std::move(output));
-//       } else {
-//         return OperatorResult::HasMore(std::move(output));
-//       }
-//     };
-//   }
+TEST(PipelineTaskBuildTest, SinglePlexPipeline) {
+  size_t dop = 8;
+  InfiniteSource source({});
+  IdentityPipe pipe;
+  BlackHoleSink sink;
+  Pipeline pipeline{{{&source, {&pipe}}}, &sink};
+  auto stages = PipelineTaskBuilder(pipeline, dop).Build();
+  ASSERT_EQ(stages.size(), 1);
+  ASSERT_TRUE(stages[0].first.empty());
+  ASSERT_NE(stages[0].second, nullptr);
+  ASSERT_EQ(stages[0].second->tasks_.size(), 1);
+}
 
-//   TaskGroups Frontend() override { return {}; }
+TEST(PipelineTaskBuildTest, DoublePlexPipeline) {
+  size_t dop = 8;
+  InfiniteSource source_1({}), source_2({});
+  IdentityPipe pipe;
+  BlackHoleSink sink;
+  Pipeline pipeline{{{&source_1, {&pipe}}, {&source_2, {&pipe}}}, &sink};
+  auto stages = PipelineTaskBuilder(pipeline, dop).Build();
+  ASSERT_EQ(stages.size(), 1);
+  ASSERT_TRUE(stages[0].first.empty());
+  ASSERT_NE(stages[0].second, nullptr);
+  ASSERT_EQ(stages[0].second->tasks_.size(), 2);
+}
 
-//   TaskGroups Backend() override { return {}; }
+TEST(PipelineTaskBuildTest, DoubleStagePipeline) {
+  size_t dop = 8;
+  InfiniteSource source({});
+  IdentityWithAnotherSourcePipe pipe(std::make_unique<InfiniteSource>(Batch{}));
+  BlackHoleSink sink;
+  Pipeline pipeline{{{&source, {&pipe}}}, &sink};
+  auto stages = PipelineTaskBuilder(pipeline, dop).Build();
+  ASSERT_EQ(stages.size(), 2);
+  ASSERT_TRUE(stages[0].first.empty());
+  ASSERT_EQ(stages[1].first.size(), 1);
+  ASSERT_NE(dynamic_cast<InfiniteSource*>(stages[1].first[0].get()), nullptr);
+  ASSERT_NE(stages[0].second, nullptr);
+  ASSERT_EQ(stages[0].second->tasks_.size(), 1);
+  ASSERT_NE(stages[1].second, nullptr);
+  ASSERT_EQ(stages[1].second->tasks_.size(), 1);
+}
 
-//  public:
-//   std::mutex mutex_;
-//   std::list<Batch> batches_;
-// };
+TEST(PipelineTaskBuildTest, DoubleStageDoublePlexPipeline) {
+  size_t dop = 8;
+  InfiniteSource source_1({}), source_2({});
+  IdentityWithAnotherSourcePipe pipe_1(std::make_unique<InfiniteSource>(Batch{})),
+      pipe_2(std::make_unique<MemorySource>(std::list<Batch>()));
+  auto pipe_source_1 = pipe_1.source_.get(), pipe_source_2 = pipe_2.source_.get();
+  BlackHoleSink sink;
+  Pipeline pipeline{{{&source_1, {&pipe_1}}, {&source_2, {&pipe_2}}}, &sink};
+  auto stages = PipelineTaskBuilder(pipeline, dop).Build();
+  ASSERT_EQ(stages.size(), 2);
+  ASSERT_TRUE(stages[0].first.empty());
+  ASSERT_EQ(stages[1].first.size(), 2);
+  if (stages[1].first[0].get() == pipe_source_1) {
+    ASSERT_NE(dynamic_cast<InfiniteSource*>(stages[1].first[0].get()), nullptr);
+    ASSERT_NE(dynamic_cast<MemorySource*>(stages[1].first[1].get()), nullptr);
+    ASSERT_EQ(stages[1].first[1].get(), pipe_source_2);
+  } else {
+    ASSERT_NE(dynamic_cast<MemorySource*>(stages[1].first[0].get()), nullptr);
+    ASSERT_EQ(stages[1].first[0].get(), pipe_source_2);
+    ASSERT_NE(dynamic_cast<InfiniteSource*>(stages[1].first[1].get()), nullptr);
+    ASSERT_EQ(stages[1].first[1].get(), pipe_source_1);
+  }
+  ASSERT_NE(stages[0].second, nullptr);
+  ASSERT_EQ(stages[0].second->tasks_.size(), 2);
+  ASSERT_NE(stages[1].second, nullptr);
+  ASSERT_EQ(stages[1].second->tasks_.size(), 2);
+}
 
-// class DistributedMemorySource : public SourceOp {
-//  public:
-//   DistributedMemorySource(size_t dop, std::list<Batch> batches) : dop_(dop) {
-//     thread_locals_.resize(dop_);
-//     for (auto& tl : thread_locals_) {
-//       tl.batches_ = batches;
-//     }
-//   }
+TEST(PipelineTaskBuildTest, TrippleStagePipeline) {
+  size_t dop = 8;
+  InfiniteSource source_1({}), source_2({});
+  IdentityWithAnotherSourcePipe pipe_1(std::make_unique<InfiniteSource>(Batch{})),
+      pipe_2(std::make_unique<MemorySource>(std::list<Batch>())),
+      pipe_3(std::make_unique<DistributedMemorySource>(dop, std::list<Batch>()));
+  auto pipe_source_1 = pipe_1.source_.get(), pipe_source_2 = pipe_2.source_.get(),
+       pipe_source_3 = pipe_3.source_.get();
+  BlackHoleSink sink;
+  Pipeline pipeline{{{&source_1, {&pipe_1, &pipe_3}}, {&source_2, {&pipe_2, &pipe_3}}},
+                    &sink};
+  auto stages = PipelineTaskBuilder(pipeline, dop).Build();
+  ASSERT_EQ(stages.size(), 3);
+  ASSERT_TRUE(stages[0].first.empty());
+  ASSERT_EQ(stages[1].first.size(), 2);
+  ASSERT_EQ(stages[2].first.size(), 1);
+  if (stages[1].first[0].get() == pipe_source_1) {
+    ASSERT_NE(dynamic_cast<InfiniteSource*>(stages[1].first[0].get()), nullptr);
+    ASSERT_NE(dynamic_cast<MemorySource*>(stages[1].first[1].get()), nullptr);
+    ASSERT_EQ(stages[1].first[1].get(), pipe_source_2);
+  } else {
+    ASSERT_NE(dynamic_cast<MemorySource*>(stages[1].first[0].get()), nullptr);
+    ASSERT_EQ(stages[1].first[0].get(), pipe_source_2);
+    ASSERT_NE(dynamic_cast<InfiniteSource*>(stages[1].first[1].get()), nullptr);
+    ASSERT_EQ(stages[1].first[1].get(), pipe_source_1);
+  }
+  ASSERT_NE(dynamic_cast<DistributedMemorySource*>(stages[2].first[0].get()), nullptr);
+  ASSERT_EQ(stages[2].first[0].get(), pipe_source_3);
+  ASSERT_NE(stages[0].second, nullptr);
+  ASSERT_EQ(stages[0].second->tasks_.size(), 2);
+  ASSERT_NE(stages[1].second, nullptr);
+  ASSERT_EQ(stages[1].second->tasks_.size(), 2);
+  ASSERT_NE(stages[2].second, nullptr);
+  ASSERT_EQ(stages[2].second->tasks_.size(), 1);
+}
 
-//   PipelineTaskSource Source() override {
-//     return [&](ThreadId thread_id) -> arrow::Result<OperatorResult> {
-//       if (thread_locals_[thread_id].batches_.empty()) {
-//         return OperatorResult::Finished(std::nullopt);
-//       }
-//       auto output = std::move(thread_locals_[thread_id].batches_.front());
-//       thread_locals_[thread_id].batches_.pop_front();
-//       if (thread_locals_[thread_id].batches_.empty()) {
-//         return OperatorResult::Finished(std::move(output));
-//       } else {
-//         return OperatorResult::HasMore(std::move(output));
-//       }
-//     };
-//   }
+TEST(PipelineTaskBuildTest, OddQuadroStagePipeline) {
+  size_t dop = 8;
+  InfiniteSource source_1({}), source_2({}), source_3({}), source_4({});
+  IdentityWithAnotherSourcePipe pipe_1_1(std::make_unique<InfiniteSource>(Batch{})),
+      pipe_1_2(std::make_unique<InfiniteSource>(Batch{}));
+  IdentityWithAnotherSourcePipe pipe_2_1(
+      std::make_unique<MemorySource>(std::list<Batch>()));
+  IdentityWithAnotherSourcePipe pipe_3_1(
+      std::make_unique<DistributedMemorySource>(dop, std::list<Batch>()));
+  BlackHoleSink sink;
+  Pipeline pipeline{{{&source_1, {&pipe_1_1, &pipe_2_1, &pipe_3_1}},
+                     {&source_2, {&pipe_2_1, &pipe_3_1}},
+                     {&source_3, {&pipe_1_2, &pipe_3_1}},
+                     {&source_4, {&pipe_3_1}}},
+                    &sink};
+  auto stages = PipelineTaskBuilder(pipeline, dop).Build();
 
-//   TaskGroups Frontend() override { return {}; }
+  ASSERT_EQ(stages.size(), 4);
+  ASSERT_TRUE(stages[0].first.empty());
+  ASSERT_EQ(stages[1].first.size(), 2);
+  ASSERT_EQ(stages[2].first.size(), 1);
+  ASSERT_EQ(stages[3].first.size(), 1);
 
-//   TaskGroups Backend() override { return {}; }
+  ASSERT_NE(dynamic_cast<InfiniteSource*>(stages[1].first[0].get()), nullptr);
+  ASSERT_NE(dynamic_cast<InfiniteSource*>(stages[1].first[1].get()), nullptr);
+  ASSERT_NE(dynamic_cast<MemorySource*>(stages[2].first[0].get()), nullptr);
+  ASSERT_NE(dynamic_cast<DistributedMemorySource*>(stages[3].first[0].get()), nullptr);
 
-//  private:
-//   size_t dop_;
-//   struct ThreadLocal {
-//     std::list<Batch> batches_;
-//   };
-//   std::vector<ThreadLocal> thread_locals_;
-// };
-
-// class MemorySink : public SinkOp {
-//  public:
-//   PipelineTaskSink Sink() override {
-//     return [&](ThreadId, std::optional<Batch> input) -> arrow::Result<OperatorResult> {
-//       if (input.has_value()) {
-//         std::lock_guard<std::mutex> lock(mutex_);
-//         batches_.push_back(std::move(input.value()));
-//       }
-//       return OperatorResult::NeedsMore();
-//     };
-//   }
-
-//   TaskGroups Frontend() override { return {}; }
-
-//   TaskGroups Backend() override { return {}; }
-
-//  public:
-//   std::mutex mutex_;
-//   std::vector<Batch> batches_;
-// };
-
-// class IdentityPipe : public PipeOp {
-//  public:
-//   PipelineTaskPipe Pipe() override {
-//     return [&](ThreadId, std::optional<Batch> input) -> arrow::Result<OperatorResult> {
-//       if (input.has_value()) {
-//         return OperatorResult::Even(std::move(input.value()));
-//       }
-//       return OperatorResult::NeedsMore();
-//     };
-//   }
-
-//   std::optional<PipelineTaskDrain> Drain() override { return std::nullopt; }
-
-//   std::unique_ptr<SourceOp> Source() override { return nullptr; }
-// };
+  ASSERT_NE(stages[0].second, nullptr);
+  ASSERT_EQ(stages[0].second->tasks_.size(), 4);
+  ASSERT_NE(stages[1].second, nullptr);
+  ASSERT_EQ(stages[1].second->tasks_.size(), 2);
+  ASSERT_NE(stages[2].second, nullptr);
+  ASSERT_EQ(stages[2].second->tasks_.size(), 1);
+  ASSERT_NE(stages[3].second, nullptr);
+  ASSERT_EQ(stages[3].second->tasks_.size(), 1);
+}
 
 // TEST(SketchTest, OneToOne) {
 //   size_t dop = 8;
@@ -939,32 +1653,6 @@ using namespace arra::sketch;
 //   ASSERT_EQ(sink.batches_[0], (Batch{1}));
 // }
 
-// class TimesNFlatPipe : public PipeOp {
-//  public:
-//   TimesNFlatPipe(size_t n) : n_(n) {}
-
-//   PipelineTaskPipe Pipe() override {
-//     return [&](ThreadId, std::optional<Batch> input) -> arrow::Result<OperatorResult> {
-//       if (input.has_value()) {
-//         auto& batch = input.value();
-//         Batch output(batch.size() * n_);
-//         for (size_t i = 0; i < n_; ++i) {
-//           std::copy(batch.begin(), batch.end(), output.begin() + i * batch.size());
-//         }
-//         return OperatorResult::Even(std::move(output));
-//       }
-//       return OperatorResult::NeedsMore();
-//     };
-//   }
-
-//   std::optional<PipelineTaskDrain> Drain() override { return std::nullopt; }
-
-//   std::unique_ptr<SourceOp> Source() override { return nullptr; }
-
-//  private:
-//   size_t n_;
-// };
-
 // TEST(SketchTest, OneToThreeFlat) {
 //   size_t dop = 8;
 //   MemorySource source({{1}});
@@ -979,47 +1667,6 @@ using namespace arra::sketch;
 //   ASSERT_EQ(sink.batches_.size(), 1);
 //   ASSERT_EQ(sink.batches_[0], (Batch{1, 1, 1}));
 // }
-
-// class TimesNSlicedPipe : public PipeOp {
-//  public:
-//   TimesNSlicedPipe(size_t dop, size_t n) : dop_(dop), n_(n) {
-//     thread_locals_.resize(dop_);
-//   }
-
-//   PipelineTaskPipe Pipe() override {
-//     return [&](ThreadId thread_id,
-//                std::optional<Batch> input) -> arrow::Result<OperatorResult> {
-//       if (thread_locals_[thread_id].batches.empty()) {
-//         ARRA_DCHECK(input.has_value());
-//         for (size_t i = 0; i < n_; i++) {
-//           thread_locals_[thread_id].batches.push_back(input.value());
-//         }
-//       } else {
-//         ARRA_DCHECK(!input.has_value());
-//       }
-//       auto output = std::move(thread_locals_[thread_id].batches.front());
-//       thread_locals_[thread_id].batches.pop_front();
-//       if (thread_locals_[thread_id].batches.empty()) {
-//         return OperatorResult::Even(std::move(output));
-//       } else {
-//         return OperatorResult::HasMore(std::move(output));
-//       }
-//     };
-//   }
-
-//   std::optional<PipelineTaskDrain> Drain() override { return std::nullopt; }
-
-//   std::unique_ptr<SourceOp> Source() override { return nullptr; }
-
-//  private:
-//   size_t dop_, n_;
-
-//  private:
-//   struct ThreadLocal {
-//     std::list<Batch> batches;
-//   };
-//   std::vector<ThreadLocal> thread_locals_;
-// };
 
 // TEST(SketchTest, OneToThreeSliced) {
 //   size_t dop = 8;
@@ -1037,64 +1684,6 @@ using namespace arra::sketch;
 //     ASSERT_EQ(sink.batches_[i], (Batch{1}));
 //   }
 // }
-
-// class AccumulatePipe : public PipeOp {
-//  public:
-//   AccumulatePipe(size_t dop, size_t n) : dop_(dop), n_(n) {
-//   thread_locals_.resize(dop_); }
-
-//   PipelineTaskPipe Pipe() override {
-//     PipelineTaskPipe f =
-//         [&](ThreadId thread_id,
-//             std::optional<Batch> input) -> arrow::Result<OperatorResult> {
-//       if (thread_locals_[thread_id].batch.size() >= n_) {
-//         ARRA_DCHECK(!input.has_value());
-//         Batch output(thread_locals_[thread_id].batch.begin(),
-//                      thread_locals_[thread_id].batch.begin() + n_);
-//         thread_locals_[thread_id].batch =
-//             Batch(thread_locals_[thread_id].batch.begin() + n_,
-//                   thread_locals_[thread_id].batch.end());
-//         if (thread_locals_[thread_id].batch.size() > n_) {
-//           return OperatorResult::HasMore(std::move(output));
-//         } else {
-//           return OperatorResult::Even(std::move(output));
-//         }
-//       }
-//       ARRA_DCHECK(input.has_value());
-//       thread_locals_[thread_id].batch.insert(thread_locals_[thread_id].batch.end(),
-//                                              input.value().begin(),
-//                                              input.value().end());
-//       if (thread_locals_[thread_id].batch.size() >= n_) {
-//         return f(thread_id, std::nullopt);
-//       } else {
-//         return OperatorResult::NeedsMore();
-//       }
-//     };
-
-//     return f;
-//   }
-
-//   std::optional<PipelineTaskDrain> Drain() override {
-//     return [&](ThreadId thread_id) -> arrow::Result<OperatorResult> {
-//       if (thread_locals_[thread_id].batch.empty()) {
-//         return OperatorResult::Finished(std::nullopt);
-//       } else {
-//         return OperatorResult::Finished(std::move(thread_locals_[thread_id].batch));
-//       }
-//     };
-//   }
-
-//   std::unique_ptr<SourceOp> Source() override { return nullptr; }
-
-//  private:
-//   size_t dop_, n_;
-
-//  private:
-//   struct ThreadLocal {
-//     Batch batch;
-//   };
-//   std::vector<ThreadLocal> thread_locals_;
-// };
 
 // TEST(SketchTest, AccumulateThree) {
 //   {
@@ -1138,117 +1727,6 @@ using namespace arra::sketch;
 //   }
 // }
 
-// struct BackpressureContext {
-//   bool backpressure = false;
-//   bool exit = false;
-//   size_t source_backpressure = 0, source_non_backpressure = 0;
-//   size_t pipe_backpressure = 0, pipe_non_backpressure = 0;
-// };
-// using BackpressureContexts = std::vector<BackpressureContext>;
-
-// class BackpressureSource : public SourceOp {
-//  public:
-//   BackpressureSource(BackpressureContexts& ctx) : ctx_(ctx) {}
-
-//   PipelineTaskSource Source() override {
-//     return [&](ThreadId thread_id) -> arrow::Result<OperatorResult> {
-//       if (ctx_[thread_id].backpressure) {
-//         ctx_[thread_id].source_backpressure++;
-//       } else {
-//         ctx_[thread_id].source_non_backpressure++;
-//       }
-
-//       if (ctx_[thread_id].exit) {
-//         return OperatorResult::Finished(std::nullopt);
-//       } else {
-//         return OperatorResult::HasMore({});
-//       }
-//     };
-//   }
-
-//   TaskGroups Frontend() override { return {}; }
-
-//   TaskGroups Backend() override { return {}; }
-
-//  private:
-//   BackpressureContexts& ctx_;
-// };
-
-// class BackpressurePipe : public PipeOp {
-//  public:
-//   BackpressurePipe(BackpressureContexts& ctx) : ctx_(ctx) {}
-
-//   PipelineTaskPipe Pipe() override {
-//     return [&](ThreadId thread_id,
-//                std::optional<Batch> input) -> arrow::Result<OperatorResult> {
-//       if (ctx_[thread_id].backpressure) {
-//         ctx_[thread_id].pipe_backpressure++;
-//       } else {
-//         ctx_[thread_id].pipe_non_backpressure++;
-//       }
-//       return OperatorResult::Even(std::move(input.value()));
-//     };
-//   }
-
-//   std::optional<PipelineTaskDrain> Drain() override { return std::nullopt; }
-
-//   std::unique_ptr<SourceOp> Source() override { return nullptr; }
-
-//  private:
-//   BackpressureContexts& ctx_;
-// };
-
-// class BackpressureSink : public SinkOp {
-//  public:
-//   BackpressureSink(size_t dop, BackpressureContexts& ctx, size_t backpressure_start,
-//                    size_t backpressure_stop, size_t exit)
-//       : ctx_(ctx),
-//         backpressure_start_(backpressure_start),
-//         backpressure_stop_(backpressure_stop),
-//         exit_(exit) {
-//     thread_locals_.resize(dop);
-//   }
-
-//   PipelineTaskSink Sink() override {
-//     return [&](ThreadId thread_id,
-//                std::optional<Batch> input) -> arrow::Result<OperatorResult> {
-//       size_t counter = ++thread_locals_[thread_id].counter;
-//       if (counter >= exit_) {
-//         ctx_[thread_id].exit = true;
-//         return OperatorResult::NeedsMore();
-//       }
-//       if (counter == backpressure_start_) {
-//         ctx_[thread_id].backpressure = true;
-//       }
-//       if (counter == backpressure_stop_) {
-//         ctx_[thread_id].backpressure = false;
-//       }
-//       if (counter > backpressure_start_ && counter <= backpressure_stop_) {
-//         ARRA_DCHECK(!input.has_value());
-//       } else {
-//         ARRA_DCHECK(input.has_value());
-//       }
-//       if (counter >= backpressure_start_ && counter < backpressure_stop_) {
-//         return OperatorResult::Backpressure();
-//       }
-//       return OperatorResult::NeedsMore();
-//     };
-//   }
-
-//   TaskGroups Frontend() override { return {}; }
-
-//   TaskGroups Backend() override { return {}; }
-
-//  private:
-//   BackpressureContexts& ctx_;
-//   size_t backpressure_start_, backpressure_stop_, exit_;
-
-//   struct ThreadLocal {
-//     size_t counter = 0;
-//   };
-//   std::vector<ThreadLocal> thread_locals_;
-// };
-
 // TEST(SketchTest, BasicBackpressure) {
 //   size_t dop = 8;
 //   BackpressureContexts ctx(dop);
@@ -1270,178 +1748,6 @@ using namespace arra::sketch;
 //     ASSERT_EQ(c.pipe_non_backpressure, 200);
 //   }
 // }
-
-// class ErrorGenerator {
-//  public:
-//   ErrorGenerator(size_t trigger) : trigger_(trigger) {}
-
-//   template <typename T>
-//   arrow::Result<T> operator()(T non_error) {
-//     if (counter_++ == trigger_) {
-//       return arrow::Status::Invalid(std::to_string(trigger_));
-//     }
-//     return non_error;
-//   }
-
-//  private:
-//   size_t trigger_;
-
-//   std::atomic<size_t> counter_ = 0;
-// };
-
-// class ErrorOpWrapper {
-//  public:
-//   ErrorOpWrapper(ErrorGenerator* err_gen) : err_gen_(err_gen) {}
-
-//  protected:
-//   template <typename TTask, typename... TArgs>
-//   auto WrapError(TTask&& task, TArgs&&... args) {
-//     auto result = task(std::forward<TArgs>(args)...);
-//     if (err_gen_ == nullptr || !result.ok()) {
-//       return result;
-//     }
-//     return (*err_gen_)(std::move(*result));
-//   }
-
-//   auto WrapTaskGroup(const TaskGroup& task_group) {
-//     auto task = [this, task = std::get<0>(task_group)](ThreadId thread_id) ->
-//     TaskResult {
-//       return WrapError(task, thread_id);
-//     };
-//     auto size = std::get<1>(task_group);
-//     std::optional<TaskCont> task_cont = std::nullopt;
-//     if (std::get<2>(task_group).has_value()) {
-//       task_cont = [this, task_cont = std::get<2>(task_group).value()]() -> TaskResult {
-//         return WrapError(task_cont);
-//       };
-//     }
-//     return TaskGroup{std::move(task), size, std::move(task_cont)};
-//   }
-
-//   auto WrapTaskGroups(const TaskGroups& task_groups) {
-//     TaskGroups transformed(task_groups.size());
-//     std::transform(task_groups.begin(), task_groups.end(), transformed.begin(),
-//                    [&](const auto& task_group) { return WrapTaskGroup(task_group); });
-//     return transformed;
-//   }
-
-//  protected:
-//   ErrorGenerator* err_gen_;
-// };
-
-// class ErrorSource : virtual public SourceOp, public ErrorOpWrapper {
-//  public:
-//   ErrorSource(ErrorGenerator* err_gen, SourceOp* source)
-//       : ErrorOpWrapper(err_gen), source_(source) {}
-
-//   PipelineTaskSource Source() override {
-//     return [&](ThreadId thread_id) -> arrow::Result<OperatorResult> {
-//       return WrapError(source_->Source(), thread_id);
-//     };
-//   }
-
-//   TaskGroups Frontend() override {
-//     auto parent_groups = source_->Frontend();
-//     return WrapTaskGroups(parent_groups);
-//   }
-
-//   TaskGroups Backend() override {
-//     auto parent_groups = source_->Backend();
-//     return WrapTaskGroups(parent_groups);
-//   }
-
-//  private:
-//   SourceOp* source_;
-// };
-
-// class ErrorPipe : virtual public PipeOp, public ErrorOpWrapper {
-//  public:
-//   ErrorPipe(ErrorGenerator* err_gen, PipeOp* pipe)
-//       : ErrorOpWrapper(err_gen), pipe_(pipe) {}
-
-//   PipelineTaskPipe Pipe() override {
-//     return [&](ThreadId thread_id,
-//                std::optional<Batch> input) -> arrow::Result<OperatorResult> {
-//       return WrapError(pipe_->Pipe(), thread_id, std::move(input));
-//     };
-//   }
-
-//   std::optional<PipelineTaskDrain> Drain() override {
-//     auto drain = pipe_->Drain();
-//     if (!drain.has_value()) {
-//       return std::nullopt;
-//     }
-//     return [&, drain](ThreadId thread_id) -> arrow::Result<OperatorResult> {
-//       return WrapError(drain.value(), thread_id);
-//     };
-//   }
-
-//   std::unique_ptr<SourceOp> Source() override {
-//     pipe_source_ = pipe_->Source();
-//     return std::make_unique<ErrorSource>(err_gen_, pipe_source_.get());
-//   }
-
-//  private:
-//   PipeOp* pipe_;
-//   std::unique_ptr<SourceOp> pipe_source_;
-// };
-
-// class ErrorSink : virtual public SinkOp, public ErrorOpWrapper {
-//  public:
-//   ErrorSink(ErrorGenerator* err_gen, SinkOp* sink)
-//       : ErrorOpWrapper(err_gen), sink_(sink) {}
-
-//   PipelineTaskSink Sink() override {
-//     return [&](ThreadId thread_id,
-//                std::optional<Batch> input) -> arrow::Result<OperatorResult> {
-//       return WrapError(sink_->Sink(), thread_id, std::move(input));
-//     };
-//   }
-
-//   TaskGroups Frontend() override {
-//     auto parent_groups = sink_->Frontend();
-//     return WrapTaskGroups(parent_groups);
-//   }
-
-//   TaskGroups Backend() override {
-//     auto parent_groups = sink_->Backend();
-//     return WrapTaskGroups(parent_groups);
-//   }
-
-//  private:
-//   SinkOp* sink_;
-// };
-
-// class InfiniteSource : public SourceOp {
-//  public:
-//   InfiniteSource(Batch batch) : batch_(std::move(batch)) {}
-
-//   PipelineTaskSource Source() override {
-//     return [&](ThreadId) -> arrow::Result<OperatorResult> {
-//       return OperatorResult::HasMore(batch_);
-//     };
-//   }
-
-//   TaskGroups Frontend() override { return {}; }
-
-//   TaskGroups Backend() override { return {}; }
-
-//  private:
-//   Batch batch_;
-// };
-
-// class BlackHoleSink : public SinkOp {
-//  public:
-//   PipelineTaskSink Sink() override {
-//     return [&](ThreadId, std::optional<Batch>) -> arrow::Result<OperatorResult> {
-//       return OperatorResult::NeedsMore();
-//     };
-//   }
-
-//   TaskGroups Frontend() override { return {}; }
-
-//   TaskGroups Backend() override { return {}; }
-// };
 
 // TEST(SketchTest, BasicError) {
 //   {
@@ -1492,65 +1798,6 @@ using namespace arra::sketch;
 //     ASSERT_EQ(result.status().message(), "42");
 //   }
 // }
-
-// class SpillThruPipe : public PipeOp {
-//  public:
-//   SpillThruPipe(size_t dop) : thread_locals_(dop) {}
-
-//   PipelineTaskPipe Pipe() override {
-//     return [&](ThreadId thread_id,
-//                std::optional<Batch> input) -> arrow::Result<OperatorResult> {
-//       if (thread_locals_[thread_id].spilling) {
-//         ARRA_DCHECK(!input.has_value());
-//         ARRA_DCHECK(thread_locals_[thread_id].batch.has_value());
-//         thread_locals_[thread_id].spilling = false;
-//         return OperatorResult::NeedsMore();
-//       }
-//       if (thread_locals_[thread_id].batch.has_value()) {
-//         ARRA_DCHECK(!input.has_value());
-//         auto output = std::move(thread_locals_[thread_id].batch.value());
-//         thread_locals_[thread_id].batch = std::nullopt;
-//         return OperatorResult::Even(std::move(output));
-//       }
-//       ARRA_DCHECK(input.has_value());
-//       thread_locals_[thread_id].batch = std::move(input.value());
-//       thread_locals_[thread_id].spilling = true;
-//       return OperatorResult::Yield();
-//     };
-//   }
-
-//   std::optional<PipelineTaskDrain> Drain() override { return std::nullopt; }
-
-//   std::unique_ptr<SourceOp> Source() override { return nullptr; }
-
-//  private:
-//   struct ThreadLocal {
-//     std::optional<Batch> batch = std::nullopt;
-//     bool spilling = false;
-//   };
-//   std::vector<ThreadLocal> thread_locals_;
-// };
-
-// class TaskObserver : public FollyFutureDoublePoolScheduler::TaskObserver {
-//  public:
-//   TaskObserver(size_t dop)
-//       : last_results_(dop, TaskStatus::Continue()), io_thread_infos_(dop) {}
-
-//   void BeforeTaskRun(const Task& task, TaskId task_id) override {}
-
-//   void AfterTaskRun(const Task& task, TaskId task_id, const TaskResult& result)
-//   override {
-//     if (last_results_[task_id].ok() && last_results_[task_id]->IsYield()) {
-//       io_thread_infos_[task_id].insert(std::make_pair(
-//           folly::getCurrentThreadID(), folly::getCurrentThreadName().value()));
-//     }
-//     last_results_[task_id] = result;
-//   }
-
-//  public:
-//   std::vector<TaskResult> last_results_;
-//   std::vector<std::unordered_set<std::pair<ThreadId, std::string>>> io_thread_infos_;
-// };
 
 // TEST(SketchTest, BasicYield) {
 //   {
@@ -1617,43 +1864,6 @@ using namespace arra::sketch;
 //   }
 // }
 
-// class DrainOnlyPipe : public PipeOp {
-//  public:
-//   DrainOnlyPipe(size_t dop) : thread_locals_(dop) {}
-
-//   PipelineTaskPipe Pipe() override {
-//     return [&](ThreadId thread_id,
-//                std::optional<Batch> input) -> arrow::Result<OperatorResult> {
-//       ARRA_DCHECK(input.has_value());
-//       thread_locals_[thread_id].batches.push_back(std::move(input.value()));
-//       return OperatorResult::NeedsMore();
-//     };
-//   }
-
-//   std::optional<PipelineTaskDrain> Drain() override {
-//     return [&](ThreadId thread_id) -> arrow::Result<OperatorResult> {
-//       if (thread_locals_[thread_id].batches.empty()) {
-//         return OperatorResult::Finished(std::nullopt);
-//       }
-//       auto batch = std::move(thread_locals_[thread_id].batches.front());
-//       thread_locals_[thread_id].batches.pop_front();
-//       if (thread_locals_[thread_id].batches.empty()) {
-//         return OperatorResult::Finished(std::move(batch));
-//       } else {
-//         return OperatorResult::HasMore(std::move(batch));
-//       }
-//     };
-//   }
-
-//   std::unique_ptr<SourceOp> Source() override { return nullptr; }
-
-//  private:
-//   struct ThreadLocal {
-//     std::list<Batch> batches;
-//   };
-//   std::vector<ThreadLocal> thread_locals_;
-// };
-
 // TEST(SketchTest, Drain) {
 //   size_t dop = 2;
 //   MemorySource source({{1}, {1}, {1}, {1}});
@@ -1697,17 +1907,6 @@ using namespace arra::sketch;
 // }
 
 // TEST(SketchTest, DrainBackpressure) {}
-
-// class DrainErrorPipe : public ErrorPipe, public DrainOnlyPipe {
-//  public:
-//   DrainErrorPipe(ErrorGenerator* err_gen, size_t dop)
-//       : ErrorPipe(err_gen, static_cast<DrainOnlyPipe*>(this)), DrainOnlyPipe(dop) {}
-
-//   PipelineTaskPipe Pipe() override { return DrainOnlyPipe::Pipe(); }
-
-//  private:
-//   std::unique_ptr<ErrorGenerator> err_gen_;
-// };
 
 // TEST(SketchTest, DrainError) {
 //   size_t dop = 2;
