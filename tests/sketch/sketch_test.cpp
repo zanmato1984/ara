@@ -440,11 +440,11 @@ class PipelineStagesBuilder {
 template <typename Scheduler>
 class Driver {
  public:
-  Driver(std::vector<Pipeline> pipelines, Scheduler* scheduler)
-      : pipelines_(std::move(pipelines)), scheduler_(scheduler) {}
+  Driver(Scheduler* scheduler) : scheduler_(scheduler) {}
 
-  TaskResult Run(size_t dop) {
-    for (const auto& pipeline : pipelines_) {
+  // TODO: Inter-pipeline dependencies.
+  TaskResult Run(size_t dop, std::vector<Pipeline> pipelines) {
+    for (const auto& pipeline : pipelines) {
       ARRA_ASSIGN_OR_RAISE(auto result, RunPipeline(dop, pipeline));
       ARRA_DCHECK(result.IsFinished());
     }
@@ -523,7 +523,6 @@ class Driver {
   }
 
  private:
-  std::vector<Pipeline> pipelines_;
   Scheduler* scheduler_;
 };
 
@@ -1482,45 +1481,45 @@ TEST(PipelineTest, OddQuadroStagePipeline) {
   ASSERT_EQ(stages[3].second->tasks_.size(), 1);
 }
 
-TEST(DriverTest, OneToOne) {
+TEST(ControlFlowTest, OneToOne) {
   size_t dop = 8;
   MemorySource source({{1}});
   IdentityPipe pipe;
   MemorySink sink;
   Pipeline pipeline{{{&source, {&pipe}}}, &sink};
   FollyFutureScheduler scheduler(4);
-  Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
-  auto result = driver.Run(dop);
+  Driver<FollyFutureScheduler> driver(&scheduler);
+  auto result = driver.Run(dop, {pipeline});
   ASSERT_OK(result);
   ASSERT_TRUE(result->IsFinished());
   ASSERT_EQ(sink.batches_.size(), 1);
   ASSERT_EQ(sink.batches_[0], (Batch{1}));
 }
 
-TEST(DriverTest, OneToThreeFlat) {
+TEST(ControlFlowTest, OneToThreeFlat) {
   size_t dop = 8;
   MemorySource source({{1}});
   TimesNFlatPipe pipe(3);
   MemorySink sink;
   Pipeline pipeline{{{&source, {&pipe}}}, &sink};
   FollyFutureScheduler scheduler(4);
-  Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
-  auto result = driver.Run(dop);
+  Driver<FollyFutureScheduler> driver(&scheduler);
+  auto result = driver.Run(dop, {pipeline});
   ASSERT_OK(result);
   ASSERT_TRUE(result->IsFinished());
   ASSERT_EQ(sink.batches_.size(), 1);
   ASSERT_EQ(sink.batches_[0], (Batch{1, 1, 1}));
 }
 
-TEST(DriverTest, OneToThreeSliced) {
+TEST(ControlFlowTest, OneToThreeSliced) {
   size_t dop = 8;
   MemorySource source({{1}});
   TimesNSlicedPipe pipe(dop, 3);
   MemorySink sink;
   Pipeline pipeline{{{&source, {&pipe}}}, &sink};
   FollyFutureScheduler scheduler(4);
-  Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
-  auto result = driver.Run(dop);
+  Driver<FollyFutureScheduler> driver(&scheduler);
+  auto result = driver.Run(dop, {pipeline});
   ASSERT_OK(result);
   ASSERT_TRUE(result->IsFinished());
   ASSERT_EQ(sink.batches_.size(), 3);
@@ -1529,7 +1528,7 @@ TEST(DriverTest, OneToThreeSliced) {
   }
 }
 
-TEST(DriverTest, AccumulateThree) {
+TEST(ControlFlowTest, AccumulateThree) {
   {
     size_t dop = 1;
     DistributedMemorySource source(dop, {{1}, {1}, {1}});
@@ -1537,8 +1536,8 @@ TEST(DriverTest, AccumulateThree) {
     MemorySink sink;
     Pipeline pipeline{{{&source, {&pipe}}}, &sink};
     FollyFutureScheduler scheduler(4);
-    Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
-    auto result = driver.Run(dop);
+    Driver<FollyFutureScheduler> driver(&scheduler);
+    auto result = driver.Run(dop, {pipeline});
     ASSERT_OK(result);
     ASSERT_TRUE(result->IsFinished());
     ASSERT_EQ(sink.batches_.size(), dop);
@@ -1554,8 +1553,8 @@ TEST(DriverTest, AccumulateThree) {
     MemorySink sink;
     Pipeline pipeline{{{&source, {&pipe}}}, &sink};
     FollyFutureScheduler scheduler(4);
-    Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
-    auto result = driver.Run(dop);
+    Driver<FollyFutureScheduler> driver(&scheduler);
+    auto result = driver.Run(dop, {pipeline});
     ASSERT_OK(result);
     ASSERT_TRUE(result->IsFinished());
     ASSERT_EQ(sink.batches_.size(), dop * 2);
@@ -1570,7 +1569,7 @@ TEST(DriverTest, AccumulateThree) {
   }
 }
 
-TEST(DriverTest, BasicBackpressure) {
+TEST(ControlFlowTest, BasicBackpressure) {
   size_t dop = 8;
   BackpressureContexts ctx(dop);
   InfiniteSource internal_source({});
@@ -1581,8 +1580,8 @@ TEST(DriverTest, BasicBackpressure) {
   BackpressureSink sink(dop, ctx, 100, 200, 300, &internal_sink);
   Pipeline pipeline{{{&source, {&pipe}}}, &sink};
   FollyFutureScheduler scheduler(4);
-  Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
-  auto result = driver.Run(dop);
+  Driver<FollyFutureScheduler> driver(&scheduler);
+  auto result = driver.Run(dop, {pipeline});
   ASSERT_OK(result);
   ASSERT_TRUE(result->IsFinished());
   for (const auto& c : ctx) {
@@ -1595,7 +1594,7 @@ TEST(DriverTest, BasicBackpressure) {
   }
 }
 
-TEST(DriverTest, BasicError) {
+TEST(ControlFlowTest, BasicError) {
   {
     size_t dop = 8;
     InfiniteSource source(Batch{});
@@ -1605,8 +1604,8 @@ TEST(DriverTest, BasicError) {
     ErrorSource err_source(&err_gen, &source);
     Pipeline pipeline{{{&err_source, {&pipe}}}, &sink};
     FollyFutureScheduler scheduler(4);
-    Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
-    auto result = driver.Run(dop);
+    Driver<FollyFutureScheduler> driver(&scheduler);
+    auto result = driver.Run(dop, {pipeline});
     ASSERT_NOT_OK(result);
     ASSERT_TRUE(result.status().IsInvalid());
     ASSERT_EQ(result.status().message(), "42");
@@ -1621,8 +1620,8 @@ TEST(DriverTest, BasicError) {
     ErrorPipe err_pipe(&err_gen, &pipe);
     Pipeline pipeline{{{&source, {&err_pipe}}}, &sink};
     FollyFutureScheduler scheduler(4);
-    Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
-    auto result = driver.Run(dop);
+    Driver<FollyFutureScheduler> driver(&scheduler);
+    auto result = driver.Run(dop, {pipeline});
     ASSERT_NOT_OK(result);
     ASSERT_TRUE(result.status().IsInvalid());
     ASSERT_EQ(result.status().message(), "42");
@@ -1637,8 +1636,8 @@ TEST(DriverTest, BasicError) {
     ErrorSink err_sink(&err_gen, &sink);
     Pipeline pipeline{{{&source, {&pipe}}}, &err_sink};
     FollyFutureScheduler scheduler(4);
-    Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
-    auto result = driver.Run(dop);
+    Driver<FollyFutureScheduler> driver(&scheduler);
+    auto result = driver.Run(dop, {pipeline});
     ASSERT_NOT_OK(result);
     ASSERT_TRUE(result.status().IsInvalid());
     ASSERT_EQ(result.status().message(), "42");
@@ -1665,7 +1664,7 @@ class TaskObserver : public FollyFutureDoublePoolScheduler::TaskObserver {
   std::vector<std::unordered_set<std::pair<ThreadId, std::string>>> io_thread_infos_;
 };
 
-TEST(DriverTest, BasicYield) {
+TEST(ControlFlowTest, BasicYield) {
   {
     size_t dop = 8;
     MemorySource source({{1}, {1}, {1}});
@@ -1673,8 +1672,8 @@ TEST(DriverTest, BasicYield) {
     MemorySink sink;
     Pipeline pipeline{{{&source, {&pipe}}}, &sink};
     FollyFutureScheduler scheduler(4);
-    Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
-    auto result = driver.Run(dop);
+    Driver<FollyFutureScheduler> driver(&scheduler);
+    auto result = driver.Run(dop, {pipeline});
     ASSERT_OK(result);
     ASSERT_EQ(sink.batches_.size(), 3);
     for (size_t i = 0; i < 3; ++i) {
@@ -1689,8 +1688,8 @@ TEST(DriverTest, BasicYield) {
     MemorySink sink;
     Pipeline pipeline{{{&source, {&pipe}}}, &sink};
     FollyFutureScheduler scheduler(4);
-    Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
-    auto result = driver.Run(dop);
+    Driver<FollyFutureScheduler> driver(&scheduler);
+    auto result = driver.Run(dop, {pipeline});
     ASSERT_OK(result);
     ASSERT_EQ(sink.batches_.size(), 3);
     for (size_t i = 0; i < 3; ++i) {
@@ -1711,8 +1710,8 @@ TEST(DriverTest, BasicYield) {
     TaskObserver observer(dop);
     FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor, &observer);
 
-    Driver<FollyFutureDoublePoolScheduler> driver({pipeline}, &scheduler);
-    auto result = driver.Run(dop);
+    Driver<FollyFutureDoublePoolScheduler> driver(&scheduler);
+    auto result = driver.Run(dop, {pipeline});
     ASSERT_OK(result);
     ASSERT_EQ(sink.batches_.size(), 4);
     for (size_t i = 0; i < 4; ++i) {
@@ -1729,7 +1728,7 @@ TEST(DriverTest, BasicYield) {
   }
 }
 
-TEST(DriverTest, Drain) {
+TEST(ControlFlowTest, Drain) {
   size_t dop = 2;
   MemorySource source({{1}, {1}, {1}, {1}});
   DrainOnlyPipe pipe(dop);
@@ -1740,8 +1739,8 @@ TEST(DriverTest, Drain) {
   folly::IOThreadPoolExecutor io_executor(1);
   FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
 
-  Driver<FollyFutureDoublePoolScheduler> driver({pipeline}, &scheduler);
-  auto result = driver.Run(dop);
+  Driver<FollyFutureDoublePoolScheduler> driver(&scheduler);
+  auto result = driver.Run(dop, {pipeline});
   ASSERT_OK(result);
   ASSERT_EQ(sink.batches_.size(), 4);
   for (size_t i = 0; i < 4; ++i) {
@@ -1749,7 +1748,7 @@ TEST(DriverTest, Drain) {
   }
 }
 
-TEST(DriverTest, MultiDrain) {
+TEST(ControlFlowTest, MultiDrain) {
   size_t dop = 2;
   MemorySource source({{1}, {1}, {1}, {1}});
   DrainOnlyPipe pipe_1(dop);
@@ -1762,8 +1761,8 @@ TEST(DriverTest, MultiDrain) {
   folly::IOThreadPoolExecutor io_executor(1);
   FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
 
-  Driver<FollyFutureDoublePoolScheduler> driver({pipeline}, &scheduler);
-  auto result = driver.Run(dop);
+  Driver<FollyFutureDoublePoolScheduler> driver(&scheduler);
+  auto result = driver.Run(dop, {pipeline});
   ASSERT_OK(result);
   ASSERT_EQ(sink.batches_.size(), 4);
   for (size_t i = 0; i < 4; ++i) {
@@ -1771,7 +1770,7 @@ TEST(DriverTest, MultiDrain) {
   }
 }
 
-TEST(DriverTest, DrainBackpressure) {
+TEST(ControlFlowTest, DrainBackpressure) {
   size_t dop = 1;
   BackpressureContexts ctx(dop);
   DistributedMemorySource source(dop, {{1}, {1}, {1}, {1}});
@@ -1781,8 +1780,8 @@ TEST(DriverTest, DrainBackpressure) {
   BackpressureSink sink(dop, ctx, 2, 42, 1000, &internal_sink);
   Pipeline pipeline{{{&source, {&pipe}}}, &sink};
   FollyFutureScheduler scheduler(4);
-  Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
-  auto result = driver.Run(dop);
+  Driver<FollyFutureScheduler> driver(&scheduler);
+  auto result = driver.Run(dop, {pipeline});
   ASSERT_OK(result);
   ASSERT_TRUE(result->IsFinished());
   for (const auto& c : ctx) {
@@ -1795,7 +1794,7 @@ TEST(DriverTest, DrainBackpressure) {
   }
 }
 
-TEST(DriverTest, DrainError) {
+TEST(ControlFlowTest, DrainError) {
   size_t dop = 2;
   MemorySource source({{1}, {1}, {1}, {1}, {1}, {1}, {1}, {1}});
   ErrorGenerator err_gen(7);
@@ -1807,15 +1806,21 @@ TEST(DriverTest, DrainError) {
   folly::IOThreadPoolExecutor io_executor(1);
   FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
 
-  Driver<FollyFutureDoublePoolScheduler> driver({pipeline}, &scheduler);
-  auto result = driver.Run(dop);
+  Driver<FollyFutureDoublePoolScheduler> driver(&scheduler);
+  auto result = driver.Run(dop, {pipeline});
   ASSERT_NOT_OK(result);
   ASSERT_TRUE(result.status().IsInvalid());
   ASSERT_EQ(result.status().message(), "7");
 }
 
-TEST(DriverTest, DrainYield) {}
-TEST(DriverTest, ErrorAfterBackpressure) {}
-TEST(DriverTest, ErrorAfterYield) {}
-TEST(DriverTest, BackpressureAfterYield) {}
-TEST(DriverTest, YieldAfterBackpressure) {}
+TEST(ControlFlowTest, DrainYield) {}
+TEST(ControlFlowTest, ErrorAfterBackpressure) {}
+TEST(ControlFlowTest, ErrorAfterDrainBackpressure) {}
+TEST(ControlFlowTest, ErrorAfterYield) {}
+TEST(ControlFlowTest, ErrorAfterDrainYield) {}
+TEST(ControlFlowTest, BackpressureAfterYield) {}
+TEST(ControlFlowTest, BackpressureAfterDrainYield) {}
+TEST(ControlFlowTest, YieldAfterBackpressure) {}
+TEST(ControlFlowTest, YieldAfterDrainBackpressure) {}
+
+TEST(ComplexTest, UnionTwoBushyRightJoins) {}
