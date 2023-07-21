@@ -257,6 +257,9 @@ class PipelinePlexTask {
       }
       ARRA_DCHECK(result->IsSourcePipeHasMore() || result->IsFinished());
       if (result->GetOutput().has_value()) {
+        if (result->IsFinished()) {
+          ++local_states_[thread_id].draining;
+        }
         return Pipe(thread_id, drain_id + 1, std::move(result->GetOutput()));
       }
     }
@@ -976,7 +979,8 @@ using BackpressureContexts = std::vector<BackpressureContext>;
 
 class BackpressureSource : public SourceOp {
  public:
-  BackpressureSource(BackpressureContexts& ctx) : ctx_(ctx) {}
+  BackpressureSource(BackpressureContexts& ctx, SourceOp* source)
+      : ctx_(ctx), source_(source) {}
 
   PipelineTaskSource Source() override {
     return [&](ThreadId thread_id) -> arrow::Result<OperatorResult> {
@@ -989,22 +993,23 @@ class BackpressureSource : public SourceOp {
       if (ctx_[thread_id].exit) {
         return OperatorResult::Finished(std::nullopt);
       } else {
-        return OperatorResult::SourcePipeHasMore({});
+        return source_->Source()(thread_id);
       }
     };
   }
 
-  TaskGroups Frontend() override { return {}; }
+  TaskGroups Frontend() override { return source_->Frontend(); }
 
-  TaskGroups Backend() override { return {}; }
+  TaskGroups Backend() override { return source_->Backend(); }
 
  private:
   BackpressureContexts& ctx_;
+  SourceOp* source_;
 };
 
 class BackpressurePipe : public PipeOp {
  public:
-  BackpressurePipe(BackpressureContexts& ctx) : ctx_(ctx) {}
+  BackpressurePipe(BackpressureContexts& ctx, PipeOp* pipe) : ctx_(ctx), pipe_(pipe) {}
 
   PipelineTaskPipe Pipe() override {
     return [&](ThreadId thread_id,
@@ -1014,26 +1019,41 @@ class BackpressurePipe : public PipeOp {
       } else {
         ctx_[thread_id].pipe_non_backpressure++;
       }
-      return OperatorResult::PipeEven(std::move(input.value()));
+      return pipe_->Pipe()(thread_id, std::move(input.value()));
     };
   }
 
-  std::optional<PipelineTaskDrain> Drain() override { return std::nullopt; }
+  std::optional<PipelineTaskDrain> Drain() override {
+    auto drain = pipe_->Drain();
+    if (!drain.has_value()) {
+      return std::nullopt;
+    }
+    return [&, drain](ThreadId thread_id) -> arrow::Result<OperatorResult> {
+      if (ctx_[thread_id].backpressure) {
+        ctx_[thread_id].pipe_backpressure++;
+      } else {
+        ctx_[thread_id].pipe_non_backpressure++;
+      }
+      return drain.value()(thread_id);
+    };
+  }
 
-  std::unique_ptr<SourceOp> Source() override { return nullptr; }
+  std::unique_ptr<SourceOp> Source() override { return pipe_->Source(); }
 
  private:
   BackpressureContexts& ctx_;
+  PipeOp* pipe_;
 };
 
 class BackpressureSink : public SinkOp {
  public:
   BackpressureSink(size_t dop, BackpressureContexts& ctx, size_t backpressure_start,
-                   size_t backpressure_stop, size_t exit)
+                   size_t backpressure_stop, size_t exit, SinkOp* sink)
       : ctx_(ctx),
         backpressure_start_(backpressure_start),
         backpressure_stop_(backpressure_stop),
-        exit_(exit) {
+        exit_(exit),
+        sink_(sink) {
     thread_locals_.resize(dop);
   }
 
@@ -1043,7 +1063,7 @@ class BackpressureSink : public SinkOp {
       size_t counter = ++thread_locals_[thread_id].counter;
       if (counter >= exit_) {
         ctx_[thread_id].exit = true;
-        return OperatorResult::PipeSinkNeedsMore();
+        return sink_->Sink()(thread_id, std::move(input.value()));
       }
       if (counter == backpressure_start_) {
         ctx_[thread_id].backpressure = true;
@@ -1055,6 +1075,7 @@ class BackpressureSink : public SinkOp {
         ARRA_DCHECK(!input.has_value());
       } else {
         ARRA_DCHECK(input.has_value());
+        ARRA_RETURN_NOT_OK(sink_->Sink()(thread_id, std::move(input.value())));
       }
       if (counter >= backpressure_start_ && counter < backpressure_stop_) {
         return OperatorResult::SinkBackpressure();
@@ -1063,13 +1084,14 @@ class BackpressureSink : public SinkOp {
     };
   }
 
-  TaskGroups Frontend() override { return {}; }
+  TaskGroups Frontend() override { return sink_->Frontend(); }
 
-  TaskGroups Backend() override { return {}; }
+  TaskGroups Backend() override { return sink_->Backend(); }
 
  private:
   BackpressureContexts& ctx_;
   size_t backpressure_start_, backpressure_stop_, exit_;
+  SinkOp* sink_;
 
   struct ThreadLocal {
     size_t counter = 0;
@@ -1551,9 +1573,12 @@ TEST(DriverTest, AccumulateThree) {
 TEST(DriverTest, BasicBackpressure) {
   size_t dop = 8;
   BackpressureContexts ctx(dop);
-  BackpressureSource source(ctx);
-  BackpressurePipe pipe(ctx);
-  BackpressureSink sink(dop, ctx, 100, 200, 300);
+  InfiniteSource internal_source({});
+  BackpressureSource source(ctx, &internal_source);
+  IdentityPipe internal_pipe;
+  BackpressurePipe pipe(ctx, &internal_pipe);
+  BlackHoleSink internal_sink;
+  BackpressureSink sink(dop, ctx, 100, 200, 300, &internal_sink);
   Pipeline pipeline{{{&source, {&pipe}}}, &sink};
   FollyFutureScheduler scheduler(4);
   Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
@@ -1746,7 +1771,29 @@ TEST(DriverTest, MultiDrain) {
   }
 }
 
-TEST(DriverTest, DrainBackpressure) {}
+TEST(DriverTest, DrainBackpressure) {
+  size_t dop = 1;
+  BackpressureContexts ctx(dop);
+  DistributedMemorySource source(dop, {{1}, {1}, {1}, {1}});
+  DrainOnlyPipe internal_pipe(dop);
+  BackpressurePipe pipe(ctx, &internal_pipe);
+  BlackHoleSink internal_sink;
+  BackpressureSink sink(dop, ctx, 2, 42, 1000, &internal_sink);
+  Pipeline pipeline{{{&source, {&pipe}}}, &sink};
+  FollyFutureScheduler scheduler(4);
+  Driver<FollyFutureScheduler> driver({pipeline}, &scheduler);
+  auto result = driver.Run(dop);
+  ASSERT_OK(result);
+  ASSERT_TRUE(result->IsFinished());
+  for (const auto& c : ctx) {
+    ASSERT_EQ(c.backpressure, false);
+    ASSERT_EQ(c.exit, false);
+    ASSERT_EQ(c.source_backpressure, 0);
+    ASSERT_EQ(c.source_non_backpressure, 0);
+    ASSERT_EQ(c.pipe_backpressure, 0);
+    ASSERT_EQ(c.pipe_non_backpressure, 8);
+  }
+}
 
 TEST(DriverTest, DrainError) {
   size_t dop = 2;
@@ -1767,4 +1814,8 @@ TEST(DriverTest, DrainError) {
   ASSERT_EQ(result.status().message(), "7");
 }
 
+TEST(DriverTest, DrainYield) {}
 TEST(DriverTest, ErrorAfterBackpressure) {}
+TEST(DriverTest, ErrorAfterYield) {}
+TEST(DriverTest, BackpressureAfterYield) {}
+TEST(DriverTest, YieldAfterBackpressure) {}
