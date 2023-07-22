@@ -1238,6 +1238,7 @@ class ErrorSink : virtual public SinkOp, public ErrorOpWrapper {
   SinkOp* sink_;
 };
 
+// TODO: The following pipes can all be delegate class.
 class SpillThruPipe : public PipeOp {
  public:
   SpillThruPipe(size_t dop) : thread_locals_(dop) {}
