@@ -1372,6 +1372,129 @@ class DrainSpillDelegatePipe : public PipeOp {
   std::vector<ThreadLocal> thread_locals_;
 };
 
+class ProjectPipe : public PipeOp {
+ public:
+  ProjectPipe(std::function<Batch(Batch&)> expr) : expr_(expr) {}
+
+  PipelineTaskPipe Pipe() override {
+    return [&](ThreadId thread_id,
+               std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+      if (input.has_value()) {
+        return OperatorResult::PipeEven(expr_(input.value()));
+      }
+      return OperatorResult::PipeSinkNeedsMore();
+    };
+  }
+
+  std::optional<PipelineTaskDrain> Drain() override { return std::nullopt; }
+
+  std::unique_ptr<SourceOp> Source() override { return nullptr; }
+
+ private:
+  std::function<Batch(Batch&)> expr_;
+};
+
+class PowerPipe : public PipeOp {
+ public:
+  PowerPipe(size_t n) : n_(n) {}
+
+  PipelineTaskPipe Pipe() override {
+    return [&](ThreadId, std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+      if (input.has_value()) {
+        for (size_t i = 1; i < n_; ++i) {
+          std::lock_guard<std::mutex> lock(mutex_);
+          batches_.push_back(input.value());
+        }
+        return OperatorResult::PipeEven(std::move(input.value()));
+      }
+      return OperatorResult::PipeSinkNeedsMore();
+    };
+  }
+
+  std::optional<PipelineTaskDrain> Drain() override { return std::nullopt; }
+
+  std::unique_ptr<SourceOp> Source() override {
+    return std::make_unique<MemorySource>(std::move(batches_));
+  }
+
+ private:
+  size_t n_;
+
+  std::mutex mutex_;
+  std::list<Batch> batches_;
+};
+
+class SortSink : SinkOp {
+ public:
+  SortSink(size_t dop) : dop_(dop), thread_locals_(dop) {}
+
+  PipelineTaskSink Sink() override {
+    return [&](ThreadId thread_id,
+               std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+      if (input.has_value()) {
+        std::sort(input.value().begin(), input.value().end());
+        Batch merged(input.value().size() + thread_locals_[thread_id].sorted.size());
+        std::merge(input.value().begin(), input.value().end(),
+                   thread_locals_[thread_id].sorted.begin(),
+                   thread_locals_[thread_id].sorted.end(), merged.begin());
+        std::swap(thread_locals_[thread_id].sorted, merged);
+      }
+      return OperatorResult::PipeSinkNeedsMore();
+    };
+  }
+
+  TaskGroups Frontend() override {
+    TaskGroups task_groups;
+    size_t num_payloads = dop_;
+    while (num_payloads > 2) {
+      size_t num_tasks = arrow::bit_util::CeilDiv(num_payloads, 2);
+      task_groups.push_back({[&, num_payloads](ThreadId thread_id) -> TaskResult {
+                               return Merge(thread_id, num_payloads);
+                             },
+                             num_tasks, std::nullopt});
+      num_payloads = num_tasks;
+    }
+    task_groups.push_back({[&, num_payloads](ThreadId thread_id) -> TaskResult {
+                             return Merge(thread_id, num_payloads);
+                           },
+                           1,
+                           [&]() -> TaskResult {
+                             std::swap(sorted, thread_locals_[0].sorted);
+                             return TaskStatus::Finished();
+                           }});
+    return task_groups;
+  }
+
+  TaskGroups Backend() override { return {}; }
+
+ private:
+  TaskResult Merge(ThreadId thread_id, size_t num_payloads) {
+    size_t first = thread_id,
+           second = thread_id + arrow::bit_util::CeilDiv(num_payloads, 2);
+    if (second >= num_payloads) {
+      return TaskStatus::Finished();
+    }
+    Batch merged(thread_locals_[first].sorted.size() +
+                 thread_locals_[second].sorted.size());
+    std::merge(thread_locals_[first].sorted.begin(), thread_locals_[first].sorted.end(),
+               thread_locals_[second].sorted.begin(), thread_locals_[second].sorted.end(),
+               merged.begin());
+    std::swap(thread_locals_[first].sorted, merged);
+    return TaskStatus::Finished();
+  }
+
+ private:
+  size_t dop_;
+
+  struct ThreadLocal {
+    Batch sorted;
+  };
+  std::vector<ThreadLocal> thread_locals_;
+
+ public:
+  Batch sorted;
+};
+
 }  // namespace arra::sketch
 
 using namespace arra::sketch;
