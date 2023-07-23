@@ -976,9 +976,9 @@ struct BackpressureContext {
 };
 using BackpressureContexts = std::vector<BackpressureContext>;
 
-class BackpressureSource : public SourceOp {
+class BackpressureDelegateSource : public SourceOp {
  public:
-  BackpressureSource(BackpressureContexts& ctx, SourceOp* source)
+  BackpressureDelegateSource(BackpressureContexts& ctx, SourceOp* source)
       : ctx_(ctx), source_(source) {}
 
   PipelineTaskSource Source() override {
@@ -1006,9 +1006,10 @@ class BackpressureSource : public SourceOp {
   SourceOp* source_;
 };
 
-class BackpressurePipe : public PipeOp {
+class BackpressureDelegatePipe : public PipeOp {
  public:
-  BackpressurePipe(BackpressureContexts& ctx, PipeOp* pipe) : ctx_(ctx), pipe_(pipe) {}
+  BackpressureDelegatePipe(BackpressureContexts& ctx, PipeOp* pipe)
+      : ctx_(ctx), pipe_(pipe) {}
 
   PipelineTaskPipe Pipe() override {
     return [&](ThreadId thread_id,
@@ -1044,10 +1045,11 @@ class BackpressurePipe : public PipeOp {
   PipeOp* pipe_;
 };
 
-class BackpressureSink : public SinkOp {
+class BackpressureDelegateSink : public SinkOp {
  public:
-  BackpressureSink(size_t dop, BackpressureContexts& ctx, size_t backpressure_start,
-                   size_t backpressure_stop, size_t exit, SinkOp* sink)
+  BackpressureDelegateSink(size_t dop, BackpressureContexts& ctx,
+                           size_t backpressure_start, size_t backpressure_stop,
+                           size_t exit, SinkOp* sink)
       : ctx_(ctx),
         backpressure_start_(backpressure_start),
         backpressure_stop_(backpressure_stop),
@@ -1155,9 +1157,9 @@ class ErrorOpWrapper {
   ErrorGenerator* err_gen_;
 };
 
-class ErrorSource : virtual public SourceOp, public ErrorOpWrapper {
+class ErrorDelegateSource : virtual public SourceOp, public ErrorOpWrapper {
  public:
-  ErrorSource(ErrorGenerator* err_gen, SourceOp* source)
+  ErrorDelegateSource(ErrorGenerator* err_gen, SourceOp* source)
       : ErrorOpWrapper(err_gen), source_(source) {}
 
   PipelineTaskSource Source() override {
@@ -1180,9 +1182,9 @@ class ErrorSource : virtual public SourceOp, public ErrorOpWrapper {
   SourceOp* source_;
 };
 
-class ErrorPipe : virtual public PipeOp, public ErrorOpWrapper {
+class ErrorDelegatePipe : virtual public PipeOp, public ErrorOpWrapper {
  public:
-  ErrorPipe(ErrorGenerator* err_gen, PipeOp* pipe)
+  ErrorDelegatePipe(ErrorGenerator* err_gen, PipeOp* pipe)
       : ErrorOpWrapper(err_gen), pipe_(pipe) {}
 
   PipelineTaskPipe Pipe() override {
@@ -1204,7 +1206,7 @@ class ErrorPipe : virtual public PipeOp, public ErrorOpWrapper {
 
   std::unique_ptr<SourceOp> Source() override {
     pipe_source_ = pipe_->Source();
-    return std::make_unique<ErrorSource>(err_gen_, pipe_source_.get());
+    return std::make_unique<ErrorDelegateSource>(err_gen_, pipe_source_.get());
   }
 
  private:
@@ -1212,9 +1214,9 @@ class ErrorPipe : virtual public PipeOp, public ErrorOpWrapper {
   std::unique_ptr<SourceOp> pipe_source_;
 };
 
-class ErrorSink : virtual public SinkOp, public ErrorOpWrapper {
+class ErrorDelegateSink : virtual public SinkOp, public ErrorOpWrapper {
  public:
-  ErrorSink(ErrorGenerator* err_gen, SinkOp* sink)
+  ErrorDelegateSink(ErrorGenerator* err_gen, SinkOp* sink)
       : ErrorOpWrapper(err_gen), sink_(sink) {}
 
   PipelineTaskSink Sink() override {
@@ -1238,40 +1240,43 @@ class ErrorSink : virtual public SinkOp, public ErrorOpWrapper {
   SinkOp* sink_;
 };
 
-// TODO: The following pipes can all be delegate class.
-class SpillThruPipe : public PipeOp {
+class SpillDelegatePipe : public PipeOp {
  public:
-  SpillThruPipe(size_t dop) : thread_locals_(dop) {}
+  SpillDelegatePipe(size_t dop, PipeOp* pipe) : thread_locals_(dop), pipe_(pipe) {}
 
   PipelineTaskPipe Pipe() override {
     return [&](ThreadId thread_id,
                std::optional<Batch> input) -> arrow::Result<OperatorResult> {
       if (thread_locals_[thread_id].spilling) {
         ARRA_DCHECK(!input.has_value());
-        ARRA_DCHECK(thread_locals_[thread_id].batch.has_value());
+        ARRA_DCHECK(thread_locals_[thread_id].result.has_value());
         thread_locals_[thread_id].spilling = false;
         return OperatorResult::PipeSinkNeedsMore();
       }
-      if (thread_locals_[thread_id].batch.has_value()) {
+      if (thread_locals_[thread_id].result.has_value()) {
         ARRA_DCHECK(!input.has_value());
-        auto output = std::move(thread_locals_[thread_id].batch.value());
-        thread_locals_[thread_id].batch = std::nullopt;
-        return OperatorResult::PipeEven(std::move(output));
+        ARRA_DCHECK(!thread_locals_[thread_id].spilling);
+        auto result = std::move(thread_locals_[thread_id].result.value());
+        thread_locals_[thread_id].result = std::nullopt;
+        return result;
       }
       ARRA_DCHECK(input.has_value());
-      thread_locals_[thread_id].batch = std::move(input.value());
+      ARRA_ASSIGN_OR_RAISE(thread_locals_[thread_id].result,
+                           pipe_->Pipe()(thread_id, std::move(input)));
       thread_locals_[thread_id].spilling = true;
       return OperatorResult::PipeYield();
     };
   }
 
-  std::optional<PipelineTaskDrain> Drain() override { return std::nullopt; }
+  std::optional<PipelineTaskDrain> Drain() override { return pipe_->Drain(); }
 
-  std::unique_ptr<SourceOp> Source() override { return nullptr; }
+  std::unique_ptr<SourceOp> Source() override { return pipe_->Source(); }
 
  private:
+  PipeOp* pipe_;
+
   struct ThreadLocal {
-    std::optional<Batch> batch = std::nullopt;
+    std::optional<arrow::Result<OperatorResult>> result = std::nullopt;
     bool spilling = false;
   };
   std::vector<ThreadLocal> thread_locals_;
@@ -1314,10 +1319,11 @@ class DrainOnlyPipe : public PipeOp {
   std::vector<ThreadLocal> thread_locals_;
 };
 
-class DrainErrorPipe : public ErrorPipe, public DrainOnlyPipe {
+class DrainErrorPipe : public ErrorDelegatePipe, public DrainOnlyPipe {
  public:
   DrainErrorPipe(ErrorGenerator* err_gen, size_t dop)
-      : ErrorPipe(err_gen, static_cast<DrainOnlyPipe*>(this)), DrainOnlyPipe(dop) {}
+      : ErrorDelegatePipe(err_gen, static_cast<DrainOnlyPipe*>(this)),
+        DrainOnlyPipe(dop) {}
 
   PipelineTaskPipe Pipe() override { return DrainOnlyPipe::Pipe(); }
 
@@ -1325,54 +1331,42 @@ class DrainErrorPipe : public ErrorPipe, public DrainOnlyPipe {
   std::unique_ptr<ErrorGenerator> err_gen_;
 };
 
-class SpillThruDrainOnlyPipe : public PipeOp {
+class DrainSpillDelegatePipe : public PipeOp {
  public:
-  SpillThruDrainOnlyPipe(size_t dop) : thread_locals_(dop) {}
+  DrainSpillDelegatePipe(size_t dop, PipeOp* pipe) : thread_locals_(dop), pipe_(pipe) {}
 
-  PipelineTaskPipe Pipe() override {
-    return [&](ThreadId thread_id,
-               std::optional<Batch> input) -> arrow::Result<OperatorResult> {
-      ARRA_DCHECK(input.has_value());
-      thread_locals_[thread_id].batches.push_back(std::move(input.value()));
-      return OperatorResult::PipeSinkNeedsMore();
-    };
-  }
+  PipelineTaskPipe Pipe() override { return pipe_->Pipe(); }
 
   std::optional<PipelineTaskDrain> Drain() override {
-    return [&](ThreadId thread_id) -> arrow::Result<OperatorResult> {
+    auto drain = pipe_->Drain();
+    if (!drain.has_value()) {
+      return std::nullopt;
+    }
+    return [&, drain](ThreadId thread_id) -> arrow::Result<OperatorResult> {
       if (thread_locals_[thread_id].spilling) {
-        ARRA_DCHECK(!thread_locals_[thread_id].batches.empty());
-        ARRA_DCHECK(!thread_locals_[thread_id].spilled.has_value());
-        thread_locals_[thread_id].spilled.emplace(
-            std::move(thread_locals_[thread_id].batches.front()));
-        thread_locals_[thread_id].batches.pop_front();
+        ARRA_DCHECK(thread_locals_[thread_id].result.has_value());
         thread_locals_[thread_id].spilling = false;
         return OperatorResult::PipeSinkNeedsMore();
       }
-      if (thread_locals_[thread_id].spilled.has_value()) {
+      if (thread_locals_[thread_id].result.has_value()) {
         ARRA_DCHECK(!thread_locals_[thread_id].spilling);
-        if (thread_locals_[thread_id].batches.empty()) {
-          return OperatorResult::Finished(std::move(thread_locals_[thread_id].spilled));
-        } else {
-          auto output = std::move(thread_locals_[thread_id].spilled.value());
-          thread_locals_[thread_id].spilled = std::nullopt;
-          return OperatorResult::SourcePipeHasMore(std::move(output));
-        }
+        auto result = std::move(thread_locals_[thread_id].result.value());
+        thread_locals_[thread_id].result = std::nullopt;
+        return result;
       }
-      if (thread_locals_[thread_id].batches.empty()) {
-        return OperatorResult::Finished(std::nullopt);
-      }
+      ARRA_ASSIGN_OR_RAISE(thread_locals_[thread_id].result, drain.value()(thread_id));
       thread_locals_[thread_id].spilling = true;
       return OperatorResult::PipeYield();
     };
   }
 
-  std::unique_ptr<SourceOp> Source() override { return nullptr; }
+  std::unique_ptr<SourceOp> Source() override { return pipe_->Source(); }
 
  private:
+  PipeOp* pipe_;
+
   struct ThreadLocal {
-    std::list<Batch> batches;
-    std::optional<Batch> spilled = std::nullopt;
+    std::optional<arrow::Result<OperatorResult>> result = std::nullopt;
     bool spilling = false;
   };
   std::vector<ThreadLocal> thread_locals_;
@@ -1627,11 +1621,11 @@ TEST(ControlFlowTest, BasicBackpressure) {
   size_t dop = 8;
   BackpressureContexts ctx(dop);
   InfiniteSource internal_source({});
-  BackpressureSource source(ctx, &internal_source);
+  BackpressureDelegateSource source(ctx, &internal_source);
   IdentityPipe internal_pipe;
-  BackpressurePipe pipe(ctx, &internal_pipe);
+  BackpressureDelegatePipe pipe(ctx, &internal_pipe);
   BlackHoleSink internal_sink;
-  BackpressureSink sink(dop, ctx, 100, 200, 300, &internal_sink);
+  BackpressureDelegateSink sink(dop, ctx, 100, 200, 300, &internal_sink);
   Pipeline pipeline{{{&source, {&pipe}}}, &sink};
   FollyFutureScheduler scheduler(4);
   Driver<FollyFutureScheduler> driver(&scheduler);
@@ -1655,7 +1649,7 @@ TEST(ControlFlowTest, BasicError) {
     IdentityPipe pipe;
     BlackHoleSink sink;
     ErrorGenerator err_gen(42);
-    ErrorSource err_source(&err_gen, &source);
+    ErrorDelegateSource err_source(&err_gen, &source);
     Pipeline pipeline{{{&err_source, {&pipe}}}, &sink};
     FollyFutureScheduler scheduler(4);
     Driver<FollyFutureScheduler> driver(&scheduler);
@@ -1671,7 +1665,7 @@ TEST(ControlFlowTest, BasicError) {
     IdentityPipe pipe;
     BlackHoleSink sink;
     ErrorGenerator err_gen(42);
-    ErrorPipe err_pipe(&err_gen, &pipe);
+    ErrorDelegatePipe err_pipe(&err_gen, &pipe);
     Pipeline pipeline{{{&source, {&err_pipe}}}, &sink};
     FollyFutureScheduler scheduler(4);
     Driver<FollyFutureScheduler> driver(&scheduler);
@@ -1687,7 +1681,7 @@ TEST(ControlFlowTest, BasicError) {
     IdentityPipe pipe;
     BlackHoleSink sink;
     ErrorGenerator err_gen(42);
-    ErrorSink err_sink(&err_gen, &sink);
+    ErrorDelegateSink err_sink(&err_gen, &sink);
     Pipeline pipeline{{{&source, {&pipe}}}, &err_sink};
     FollyFutureScheduler scheduler(4);
     Driver<FollyFutureScheduler> driver(&scheduler);
@@ -1722,7 +1716,8 @@ TEST(ControlFlowTest, BasicYield) {
   {
     size_t dop = 8;
     MemorySource source({{1}, {1}, {1}});
-    SpillThruPipe pipe(dop);
+    IdentityPipe internal_pipe;
+    SpillDelegatePipe pipe(dop, &internal_pipe);
     MemorySink sink;
     Pipeline pipeline{{{&source, {&pipe}}}, &sink};
     FollyFutureScheduler scheduler(4);
@@ -1738,7 +1733,8 @@ TEST(ControlFlowTest, BasicYield) {
   {
     size_t dop = 2;
     MemorySource source({{1}, {1}, {1}});
-    SpillThruPipe pipe(dop);
+    IdentityPipe internal_pipe;
+    SpillDelegatePipe pipe(dop, &internal_pipe);
     MemorySink sink;
     Pipeline pipeline{{{&source, {&pipe}}}, &sink};
     FollyFutureScheduler scheduler(4);
@@ -1754,7 +1750,8 @@ TEST(ControlFlowTest, BasicYield) {
   {
     size_t dop = 8;
     MemorySource source({{1}, {1}, {1}, {1}});
-    SpillThruPipe pipe(dop);
+    IdentityPipe internal_pipe;
+    SpillDelegatePipe pipe(dop, &internal_pipe);
     MemorySink sink;
     Pipeline pipeline{{{&source, {&pipe}}}, &sink};
 
@@ -1829,9 +1826,9 @@ TEST(ControlFlowTest, DrainBackpressure) {
   BackpressureContexts ctx(dop);
   DistributedMemorySource source(dop, {{1}, {1}, {1}, {1}});
   DrainOnlyPipe internal_pipe(dop);
-  BackpressurePipe pipe(ctx, &internal_pipe);
+  BackpressureDelegatePipe pipe(ctx, &internal_pipe);
   BlackHoleSink internal_sink;
-  BackpressureSink sink(dop, ctx, 2, 42, 1000, &internal_sink);
+  BackpressureDelegateSink sink(dop, ctx, 2, 42, 1000, &internal_sink);
   Pipeline pipeline{{{&source, {&pipe}}}, &sink};
   FollyFutureScheduler scheduler(4);
   Driver<FollyFutureScheduler> driver(&scheduler);
@@ -1854,7 +1851,7 @@ TEST(ControlFlowTest, DrainError) {
   ErrorGenerator err_gen(7);
   DrainErrorPipe pipe(&err_gen, dop);
   BlackHoleSink sink;
-  Pipeline pipeline{{{&source, {static_cast<ErrorPipe*>(&pipe)}}}, &sink};
+  Pipeline pipeline{{{&source, {static_cast<ErrorDelegatePipe*>(&pipe)}}}, &sink};
 
   folly::CPUThreadPoolExecutor cpu_executor(4);
   folly::IOThreadPoolExecutor io_executor(1);
@@ -1870,7 +1867,8 @@ TEST(ControlFlowTest, DrainError) {
 TEST(ControlFlowTest, DrainYield) {
   size_t dop = 8;
   MemorySource source({{1}, {1}, {1}, {1}});
-  SpillThruDrainOnlyPipe pipe(dop);
+  DrainOnlyPipe internal_pipe(dop);
+  DrainSpillDelegatePipe pipe(dop, &internal_pipe);
   MemorySink sink;
   Pipeline pipeline{{{&source, {&pipe}}}, &sink};
 
