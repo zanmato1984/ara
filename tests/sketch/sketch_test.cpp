@@ -701,6 +701,8 @@ class FollyFutureDoublePoolScheduler {
   TaskObserver* observer_;
 };
 
+// TODO: Maybe a C++20 coroutine-based scheduler.
+
 class InfiniteSource : public SourceOp {
  public:
   InfiniteSource(Batch batch) : batch_(std::move(batch)) {}
@@ -1394,6 +1396,88 @@ class ProjectPipe : public PipeOp {
   std::function<Batch(Batch&)> expr_;
 };
 
+class FibonacciSource : public SourceOp {
+ public:
+  PipelineTaskSource Source() override {
+    return [&](ThreadId) -> arrow::Result<OperatorResult> {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!done_) {
+        done_ = true;
+        return OperatorResult::Finished(Batch{1});
+      }
+      return OperatorResult::Finished(std::nullopt);
+    };
+  }
+
+  TaskGroups Frontend() override { return {}; }
+
+  TaskGroups Backend() override { return {}; }
+
+ private:
+  std::mutex mutex_;
+  bool done_ = false;
+};
+
+class FibonacciPipe : public PipeOp {
+ public:
+  PipelineTaskPipe Pipe() override {
+    return [&](ThreadId, std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+      ARRA_DCHECK(input.has_value() && input.value().size() == 1);
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!first_.has_value()) {
+        first_ = input.value()[0];
+        return OperatorResult::PipeEven(std::move(input.value()));
+      }
+      if (!second_.has_value()) {
+        second_ = input.value()[0];
+        return OperatorResult::PipeEven(std::move(input.value()));
+      }
+      first_ = std::move(second_);
+      second_ = input.value()[0];
+      return OperatorResult::PipeEven(std::move(input.value()));
+    };
+  }
+
+  std::optional<PipelineTaskDrain> Drain() override { return std::nullopt; }
+
+ private:
+  class InternalSource : public SourceOp {
+   public:
+    InternalSource(std::optional<int>& first, std::optional<int>& second)
+        : done_(false), first_(first), second_(second) {}
+
+    PipelineTaskSource Source() override {
+      return [&](ThreadId) -> arrow::Result<OperatorResult> {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ARRA_DCHECK(first_.has_value() && second_.has_value());
+        if (!done_) {
+          done_ = true;
+          return OperatorResult::Finished(Batch{first_.value() + second_.value()});
+        }
+        return OperatorResult::Finished(std::nullopt);
+      };
+    }
+
+    TaskGroups Frontend() override { return {}; }
+
+    TaskGroups Backend() override { return {}; }
+
+   private:
+    std::mutex mutex_;
+    bool done_;
+    std::optional<int>&first_, &second_;
+  };
+
+ public:
+  std::unique_ptr<SourceOp> Source() override {
+    return std::make_unique<InternalSource>(first_, second_);
+  }
+
+ private:
+  std::mutex mutex_;
+  std::optional<int> first_ = std::nullopt, second_ = std::nullopt;
+};
+
 class PowerPipe : public PipeOp {
  public:
   PowerPipe(size_t n) : n_(n) {}
@@ -1424,7 +1508,7 @@ class PowerPipe : public PipeOp {
   std::list<Batch> batches_;
 };
 
-class SortSink : SinkOp {
+class SortSink : public SinkOp {
  public:
   SortSink(size_t dop) : dop_(dop), thread_locals_(dop) {}
 
@@ -1437,7 +1521,7 @@ class SortSink : SinkOp {
         std::merge(input.value().begin(), input.value().end(),
                    thread_locals_[thread_id].sorted.begin(),
                    thread_locals_[thread_id].sorted.end(), merged.begin());
-        std::swap(thread_locals_[thread_id].sorted, merged);
+        thread_locals_[thread_id].sorted = std::move(merged);
       }
       return OperatorResult::PipeSinkNeedsMore();
     };
@@ -1455,11 +1539,12 @@ class SortSink : SinkOp {
       num_payloads = num_tasks;
     }
     task_groups.push_back({[&, num_payloads](ThreadId thread_id) -> TaskResult {
+                             ARRA_DCHECK(thread_id == 0);
                              return Merge(thread_id, num_payloads);
                            },
                            1,
                            [&]() -> TaskResult {
-                             std::swap(sorted, thread_locals_[0].sorted);
+                             sorted = std::move(thread_locals_[0].sorted);
                              return TaskStatus::Finished();
                            }});
     return task_groups;
@@ -1479,7 +1564,7 @@ class SortSink : SinkOp {
     std::merge(thread_locals_[first].sorted.begin(), thread_locals_[first].sorted.end(),
                thread_locals_[second].sorted.begin(), thread_locals_[second].sorted.end(),
                merged.begin());
-    std::swap(thread_locals_[first].sorted, merged);
+    thread_locals_[first].sorted = std::move(merged);
     return TaskStatus::Finished();
   }
 
@@ -2027,4 +2112,77 @@ TEST(ControlFlowTest, BackpressureAfterDrainYield) {}
 TEST(ControlFlowTest, YieldAfterBackpressure) {}
 TEST(ControlFlowTest, YieldAfterDrainBackpressure) {}
 
-TEST(ComplexTest, UnionTwoBushyRightJoins) {}
+TEST(OperatorTest, Sort) {
+  size_t dop = 7;
+  DistributedMemorySource source(dop, {{1, 10, 100}, {2, 20, 200}, {3, 30, 300}});
+  SortSink sink(dop);
+  Pipeline pipeline{{{&source, {}}}, &sink};
+
+  folly::CPUThreadPoolExecutor cpu_executor(4);
+  folly::IOThreadPoolExecutor io_executor(1);
+  FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+
+  Driver<FollyFutureDoublePoolScheduler> driver(&scheduler);
+  auto result = driver.Run(dop, {pipeline});
+  ASSERT_OK(result);
+  ASSERT_TRUE(result->IsFinished());
+  ASSERT_EQ(sink.sorted,
+            (Batch{1,   1,   1,   1,   1,   1,   1,   2,   2,   2,   2,   2,   2,
+                   2,   3,   3,   3,   3,   3,   3,   3,   10,  10,  10,  10,  10,
+                   10,  10,  20,  20,  20,  20,  20,  20,  20,  30,  30,  30,  30,
+                   30,  30,  30,  100, 100, 100, 100, 100, 100, 100, 200, 200, 200,
+                   200, 200, 200, 200, 300, 300, 300, 300, 300, 300, 300}));
+}
+
+class FibonacciTest : public testing::TestWithParam<size_t> {
+ protected:
+  void Fibonacci(const std::vector<PipeOp*>& pipes) {
+    size_t dop = 8;
+    FibonacciSource source_1, source_2;
+    MemorySink sink;
+    Pipeline pipeline{{{&source_1, pipes}, {&source_2, pipes}}, &sink};
+
+    folly::CPUThreadPoolExecutor cpu_executor(4);
+    folly::IOThreadPoolExecutor io_executor(1);
+    FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+
+    Driver<FollyFutureDoublePoolScheduler> driver(&scheduler);
+    auto result = driver.Run(dop, {pipeline});
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsFinished());
+
+    for (const auto& batch : sink.batches_) {
+      ASSERT_EQ(batch.size(), 1);
+    }
+    Batch act(sink.batches_.size());
+    std::transform(sink.batches_.begin(), sink.batches_.end(), act.begin(),
+                   [](const auto& batch) { return batch[0]; });
+
+    size_t n = GetParam();
+    Batch exp(n);
+    exp[0] = 1;
+    exp[1] = 1;
+    for (size_t i = 2; i < n; ++i) {
+      exp[i] = exp[i - 1] + exp[i - 2];
+    }
+
+    ASSERT_EQ(act, exp);
+  }
+};
+
+TEST_P(FibonacciTest, PlainFibonacci) {
+  auto n = GetParam();
+  std::vector<FibonacciPipe> pipe_objs(n);
+  std::vector<PipeOp*> pipes(n - 2);
+  if (n > 2) {
+    std::transform(pipe_objs.begin(), pipe_objs.end(), pipes.begin(),
+                   [](auto& pipe_obj) { return static_cast<PipeOp*>(&pipe_obj); });
+  }
+  Fibonacci(pipes);
+}
+
+INSTANTIATE_TEST_SUITE_P(ComplexTest, FibonacciTest,
+                         testing::Range(size_t(2), size_t(43)),
+                         [](const auto& param_info) {
+                           return std::to_string(param_info.param);
+                         });
