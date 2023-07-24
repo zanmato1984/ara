@@ -2172,7 +2172,7 @@ class FibonacciTest : public testing::TestWithParam<size_t> {
 
 TEST_P(FibonacciTest, PlainFibonacci) {
   auto n = GetParam();
-  std::vector<FibonacciPipe> pipe_objs(n);
+  std::vector<FibonacciPipe> pipe_objs(n - 2);
   std::vector<PipeOp*> pipes(n - 2);
   if (n > 2) {
     std::transform(pipe_objs.begin(), pipe_objs.end(), pipes.begin(),
