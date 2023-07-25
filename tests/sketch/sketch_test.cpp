@@ -566,23 +566,25 @@ class FollyFutureDoublePoolScheduler {
       tasks.push_back(std::move(tf));
       payload[i] = TaskStatus::Continue();
     }
-    auto task_group_f = std::move(f).thenValue([task_promises = std::move(task_promises), tasks = std::move(tasks)](auto&&) mutable {
-                         for (size_t i = 0; i < task_promises.size(); ++i) {
-                           task_promises[i].setValue();
-                         }
-                         return folly::collectAll(tasks);
-                       })
-                       .thenValue([&task_cont](auto&& try_results) -> TaskResult {
-                         for (auto&& try_result : try_results) {
-                           ARRA_DCHECK(try_result.hasValue());
-                           auto result = try_result.value();
-                           ARRA_RETURN_NOT_OK(result);
-                         }
-                         if (task_cont.has_value()) {
-                           return task_cont.value()();
-                         }
-                         return TaskStatus::Finished();
-                       });
+    auto task_group_f = std::move(f)
+                            .thenValue([task_promises = std::move(task_promises),
+                                        tasks = std::move(tasks)](auto&&) mutable {
+                              for (size_t i = 0; i < task_promises.size(); ++i) {
+                                task_promises[i].setValue();
+                              }
+                              return folly::collectAll(tasks);
+                            })
+                            .thenValue([&task_cont](auto&& try_results) -> TaskResult {
+                              for (auto&& try_result : try_results) {
+                                ARRA_DCHECK(try_result.hasValue());
+                                auto result = try_result.value();
+                                ARRA_RETURN_NOT_OK(result);
+                              }
+                              if (task_cont.has_value()) {
+                                return task_cont.value()();
+                              }
+                              return TaskStatus::Finished();
+                            });
     return {std::pair<folly::Promise<folly::Unit>, folly::Future<TaskResult>>{
                 std::move(p), std::move(task_group_f)},
             std::move(payload)};
@@ -627,11 +629,12 @@ class FollyFutureDoublePoolScheduler {
         }
       });
     };
-    auto task_f = std::move(f).thenValue([pred, thunk, &result](auto&&) -> folly::Future<TaskResult> {
-      return folly::whileDo(pred, thunk).thenValue([&](auto&&) {
-        return std::move(result);
-      });
-    });
+    auto task_f = std::move(f).thenValue(
+        [pred, thunk, &result](auto&&) -> folly::Future<TaskResult> {
+          return folly::whileDo(pred, thunk).thenValue([&](auto&&) {
+            return std::move(result);
+          });
+        });
     return {std::move(p), std::move(task_f)};
   }
 
@@ -1793,9 +1796,9 @@ TEST(ControlFlowTest, BasicBackpressure) {
   BlackHoleSink internal_sink;
   BackpressureDelegateSink sink(dop, ctx, 100, 200, 300, &internal_sink);
   Pipeline pipeline{{{&source, {&pipe}}}, &sink};
-    folly::CPUThreadPoolExecutor cpu_executor(4);
-    folly::IOThreadPoolExecutor io_executor(1);
-    FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+  folly::CPUThreadPoolExecutor cpu_executor(4);
+  folly::IOThreadPoolExecutor io_executor(1);
+  FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
   Driver<FollyFutureDoublePoolScheduler> driver(&scheduler);
   auto result = driver.Run(dop, {pipeline});
   ASSERT_OK(result);
