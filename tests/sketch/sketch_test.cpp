@@ -528,11 +528,13 @@ class Driver {
 
 class FollyFutureDoublePoolScheduler {
  private:
-  using ConcreteTask = folly::Future<TaskResult>;
+  using ConcreteTask = std::pair<folly::Promise<folly::Unit>, folly::Future<TaskResult>>;
   using TaskGroupPayload = std::vector<TaskResult>;
 
  public:
-  using TaskGroupHandle = std::pair<folly::Future<TaskResult>, TaskGroupPayload>;
+  using TaskGroupHandle =
+      std::pair<std::pair<folly::Promise<folly::Unit>, folly::Future<TaskResult>>,
+                TaskGroupPayload>;
   using TaskGroupsHandle = std::vector<TaskGroupHandle>;
 
   class TaskObserver {
@@ -554,15 +556,20 @@ class FollyFutureDoublePoolScheduler {
     auto num_tasks = std::get<1>(group);
     auto& task_cont = std::get<2>(group);
 
-    TaskGroupHandle handle{folly::makeFuture(TaskStatus::Finished()),
-                           TaskGroupPayload(num_tasks)};
-    std::vector<ConcreteTask> tasks;
+    auto [p, f] = folly::makePromiseContract<folly::Unit>(cpu_executor_);
+    std::vector<folly::Promise<folly::Unit>> task_promises;
+    std::vector<folly::Future<TaskResult>> tasks;
+    TaskGroupPayload payload(num_tasks);
     for (size_t i = 0; i < num_tasks; ++i) {
-      handle.second[i] = TaskStatus::Continue();
-      tasks.push_back(MakeTask(task, i, handle.second[i]));
+      auto [tp, tf] = MakeTask(task, i, payload[i]);
+      task_promises.push_back(std::move(tp));
+      tasks.push_back(std::move(tf));
+      payload[i] = TaskStatus::Continue();
     }
-    handle.first = folly::via(cpu_executor_)
-                       .thenValue([tasks = std::move(tasks)](auto&&) mutable {
+    auto task_group_f = std::move(f).thenValue([task_promises = std::move(task_promises), tasks = std::move(tasks)](auto&&) mutable {
+                         for (size_t i = 0; i < task_promises.size(); ++i) {
+                           task_promises[i].setValue();
+                         }
                          return folly::collectAll(tasks);
                        })
                        .thenValue([&task_cont](auto&& try_results) -> TaskResult {
@@ -576,7 +583,9 @@ class FollyFutureDoublePoolScheduler {
                          }
                          return TaskStatus::Finished();
                        });
-    return std::move(handle);
+    return {std::pair<folly::Promise<folly::Unit>, folly::Future<TaskResult>>{
+                std::move(p), std::move(task_group_f)},
+            std::move(payload)};
   }
 
   TaskGroupsHandle ScheduleTaskGroups(const TaskGroups& groups) {
@@ -587,7 +596,10 @@ class FollyFutureDoublePoolScheduler {
     return handles;
   }
 
-  TaskResult WaitTaskGroup(TaskGroupHandle& group) { return group.first.wait().value(); }
+  TaskResult WaitTaskGroup(TaskGroupHandle& group) {
+    group.first.first.setValue();
+    return group.first.second.wait().value();
+  }
 
   TaskResult WaitTaskGroups(TaskGroupsHandle& groups) {
     for (auto& group : groups) {
@@ -598,6 +610,8 @@ class FollyFutureDoublePoolScheduler {
 
  private:
   ConcreteTask MakeTask(const Task& task, TaskId task_id, TaskResult& result) {
+    auto [p, f] = folly::makePromiseContract<folly::Unit>(cpu_executor_);
+
     auto pred = [&]() {
       return result.ok() && !result->IsFinished() && !result->IsCancelled();
     };
@@ -613,9 +627,12 @@ class FollyFutureDoublePoolScheduler {
         }
       });
     };
-    return folly::whileDo(pred, thunk).thenValue([&](auto&&) {
-      return std::move(result);
+    auto task_f = std::move(f).thenValue([pred, thunk, &result](auto&&) -> folly::Future<TaskResult> {
+      return folly::whileDo(pred, thunk).thenValue([&](auto&&) {
+        return std::move(result);
+      });
     });
+    return {std::move(p), std::move(task_f)};
   }
 
  private:
