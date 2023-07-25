@@ -526,85 +526,6 @@ class Driver {
   Scheduler* scheduler_;
 };
 
-class FollyFutureScheduler {
- private:
-  using ConcreteTask = folly::SemiFuture<TaskResult>;
-  using TaskGroupPayload = std::vector<TaskResult>;
-  using ConcreteTaskGroup = std::pair<folly::SemiFuture<TaskResult>, TaskGroupPayload>;
-  using ConcoretTaskGroups = ConcreteTaskGroup;
-
- public:
-  using TaskGroupHandle = std::pair<folly::Future<TaskResult>, TaskGroupPayload>;
-  using TaskGroupsHandle = TaskGroupHandle;
-
-  FollyFutureScheduler(size_t num_threads) : executor_(num_threads) {}
-
-  TaskGroupHandle ScheduleTaskGroup(const TaskGroup& group) {
-    auto& task = std::get<0>(group);
-    auto num_tasks = std::get<1>(group);
-    auto& task_cont = std::get<2>(group);
-
-    TaskGroupHandle handle{folly::makeFuture(TaskStatus::Finished()),
-                           TaskGroupPayload(num_tasks)};
-    std::vector<ConcreteTask> tasks;
-    for (size_t i = 0; i < num_tasks; ++i) {
-      handle.second[i] = TaskStatus::Continue();
-      tasks.push_back(MakeTask(task, i, handle.second[i]));
-    }
-    handle.first = folly::via(&executor_)
-                       .thenValue([tasks = std::move(tasks)](auto&&) mutable {
-                         return folly::collectAll(tasks);
-                       })
-                       .thenValue([&task_cont](auto&& try_results) -> TaskResult {
-                         for (auto&& try_result : try_results) {
-                           ARRA_DCHECK(try_result.hasValue());
-                           auto result = try_result.value();
-                           ARRA_RETURN_NOT_OK(result);
-                         }
-                         if (task_cont.has_value()) {
-                           return task_cont.value()();
-                         }
-                         return TaskStatus::Finished();
-                       });
-    return std::move(handle);
-  }
-
-  TaskGroupsHandle ScheduleTaskGroups(const TaskGroups& groups) {
-    TaskGroupsHandle handles;
-    for (const auto& group : groups) {
-      handles.push_back(ScheduleTaskGroup(group));
-    }
-    return handles;
-  }
-
-  TaskResult WaitTaskGroup(TaskGroupHandle& group) { return group.first.wait().value(); }
-
-  TaskResult WaitTaskGroups(TaskGroupsHandle& groups) {
-    for (auto& group : groups) {
-      ARRA_RETURN_NOT_OK(WaitTaskGroup(group));
-    }
-    return TaskStatus::Finished();
-  }
-
- private:
-  static ConcreteTask MakeTask(const Task& task, TaskId task_id, TaskResult& result) {
-    auto pred = [&]() {
-      return result.ok() &&
-             (result->IsContinue() || result->IsBackpressure() || result->IsYield());
-    };
-    auto thunk = [&, task_id]() {
-      return folly::makeSemiFuture().defer(
-          [&, task_id](auto&&) { result = task(task_id); });
-    };
-    return folly::whileDo(pred, thunk).deferValue([&](auto&&) {
-      return std::move(result);
-    });
-  }
-
- private:
-  folly::CPUThreadPoolExecutor executor_;
-};
-
 class FollyFutureDoublePoolScheduler {
  private:
   using ConcreteTask = folly::Future<TaskResult>;
@@ -1753,8 +1674,10 @@ TEST(ControlFlowTest, OneToOne) {
   IdentityPipe pipe;
   MemorySink sink;
   Pipeline pipeline{{{&source, {&pipe}}}, &sink};
-  FollyFutureScheduler scheduler(4);
-  Driver<FollyFutureScheduler> driver(&scheduler);
+  folly::CPUThreadPoolExecutor cpu_executor(4);
+  folly::IOThreadPoolExecutor io_executor(1);
+  FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+  Driver<FollyFutureDoublePoolScheduler> driver(&scheduler);
   auto result = driver.Run(dop, {pipeline});
   ASSERT_OK(result);
   ASSERT_TRUE(result->IsFinished());
@@ -1768,8 +1691,10 @@ TEST(ControlFlowTest, OneToThreeFlat) {
   TimesNFlatPipe pipe(3);
   MemorySink sink;
   Pipeline pipeline{{{&source, {&pipe}}}, &sink};
-  FollyFutureScheduler scheduler(4);
-  Driver<FollyFutureScheduler> driver(&scheduler);
+  folly::CPUThreadPoolExecutor cpu_executor(4);
+  folly::IOThreadPoolExecutor io_executor(1);
+  FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+  Driver<FollyFutureDoublePoolScheduler> driver(&scheduler);
   auto result = driver.Run(dop, {pipeline});
   ASSERT_OK(result);
   ASSERT_TRUE(result->IsFinished());
@@ -1783,8 +1708,10 @@ TEST(ControlFlowTest, OneToThreeSliced) {
   TimesNSlicedPipe pipe(dop, 3);
   MemorySink sink;
   Pipeline pipeline{{{&source, {&pipe}}}, &sink};
-  FollyFutureScheduler scheduler(4);
-  Driver<FollyFutureScheduler> driver(&scheduler);
+  folly::CPUThreadPoolExecutor cpu_executor(4);
+  folly::IOThreadPoolExecutor io_executor(1);
+  FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+  Driver<FollyFutureDoublePoolScheduler> driver(&scheduler);
   auto result = driver.Run(dop, {pipeline});
   ASSERT_OK(result);
   ASSERT_TRUE(result->IsFinished());
@@ -1801,8 +1728,10 @@ TEST(ControlFlowTest, AccumulateThree) {
     AccumulatePipe pipe(dop, 3);
     MemorySink sink;
     Pipeline pipeline{{{&source, {&pipe}}}, &sink};
-    FollyFutureScheduler scheduler(4);
-    Driver<FollyFutureScheduler> driver(&scheduler);
+    folly::CPUThreadPoolExecutor cpu_executor(4);
+    folly::IOThreadPoolExecutor io_executor(1);
+    FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+    Driver<FollyFutureDoublePoolScheduler> driver(&scheduler);
     auto result = driver.Run(dop, {pipeline});
     ASSERT_OK(result);
     ASSERT_TRUE(result->IsFinished());
@@ -1818,8 +1747,10 @@ TEST(ControlFlowTest, AccumulateThree) {
     AccumulatePipe pipe(dop, 3);
     MemorySink sink;
     Pipeline pipeline{{{&source, {&pipe}}}, &sink};
-    FollyFutureScheduler scheduler(4);
-    Driver<FollyFutureScheduler> driver(&scheduler);
+    folly::CPUThreadPoolExecutor cpu_executor(4);
+    folly::IOThreadPoolExecutor io_executor(1);
+    FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+    Driver<FollyFutureDoublePoolScheduler> driver(&scheduler);
     auto result = driver.Run(dop, {pipeline});
     ASSERT_OK(result);
     ASSERT_TRUE(result->IsFinished());
@@ -1845,8 +1776,10 @@ TEST(ControlFlowTest, BasicBackpressure) {
   BlackHoleSink internal_sink;
   BackpressureDelegateSink sink(dop, ctx, 100, 200, 300, &internal_sink);
   Pipeline pipeline{{{&source, {&pipe}}}, &sink};
-  FollyFutureScheduler scheduler(4);
-  Driver<FollyFutureScheduler> driver(&scheduler);
+    folly::CPUThreadPoolExecutor cpu_executor(4);
+    folly::IOThreadPoolExecutor io_executor(1);
+    FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+  Driver<FollyFutureDoublePoolScheduler> driver(&scheduler);
   auto result = driver.Run(dop, {pipeline});
   ASSERT_OK(result);
   ASSERT_TRUE(result->IsFinished());
@@ -1869,8 +1802,10 @@ TEST(ControlFlowTest, BasicError) {
     ErrorGenerator err_gen(42);
     ErrorDelegateSource err_source(&err_gen, &source);
     Pipeline pipeline{{{&err_source, {&pipe}}}, &sink};
-    FollyFutureScheduler scheduler(4);
-    Driver<FollyFutureScheduler> driver(&scheduler);
+    folly::CPUThreadPoolExecutor cpu_executor(4);
+    folly::IOThreadPoolExecutor io_executor(1);
+    FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+    Driver<FollyFutureDoublePoolScheduler> driver(&scheduler);
     auto result = driver.Run(dop, {pipeline});
     ASSERT_NOT_OK(result);
     ASSERT_TRUE(result.status().IsInvalid());
@@ -1885,8 +1820,10 @@ TEST(ControlFlowTest, BasicError) {
     ErrorGenerator err_gen(42);
     ErrorDelegatePipe err_pipe(&err_gen, &pipe);
     Pipeline pipeline{{{&source, {&err_pipe}}}, &sink};
-    FollyFutureScheduler scheduler(4);
-    Driver<FollyFutureScheduler> driver(&scheduler);
+    folly::CPUThreadPoolExecutor cpu_executor(4);
+    folly::IOThreadPoolExecutor io_executor(1);
+    FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+    Driver<FollyFutureDoublePoolScheduler> driver(&scheduler);
     auto result = driver.Run(dop, {pipeline});
     ASSERT_NOT_OK(result);
     ASSERT_TRUE(result.status().IsInvalid());
@@ -1901,8 +1838,10 @@ TEST(ControlFlowTest, BasicError) {
     ErrorGenerator err_gen(42);
     ErrorDelegateSink err_sink(&err_gen, &sink);
     Pipeline pipeline{{{&source, {&pipe}}}, &err_sink};
-    FollyFutureScheduler scheduler(4);
-    Driver<FollyFutureScheduler> driver(&scheduler);
+    folly::CPUThreadPoolExecutor cpu_executor(4);
+    folly::IOThreadPoolExecutor io_executor(1);
+    FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+    Driver<FollyFutureDoublePoolScheduler> driver(&scheduler);
     auto result = driver.Run(dop, {pipeline});
     ASSERT_NOT_OK(result);
     ASSERT_TRUE(result.status().IsInvalid());
@@ -1938,8 +1877,10 @@ TEST(ControlFlowTest, BasicYield) {
     SpillDelegatePipe pipe(dop, &internal_pipe);
     MemorySink sink;
     Pipeline pipeline{{{&source, {&pipe}}}, &sink};
-    FollyFutureScheduler scheduler(4);
-    Driver<FollyFutureScheduler> driver(&scheduler);
+    folly::CPUThreadPoolExecutor cpu_executor(4);
+    folly::IOThreadPoolExecutor io_executor(1);
+    FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+    Driver<FollyFutureDoublePoolScheduler> driver(&scheduler);
     auto result = driver.Run(dop, {pipeline});
     ASSERT_OK(result);
     ASSERT_EQ(sink.batches_.size(), 3);
@@ -1955,8 +1896,10 @@ TEST(ControlFlowTest, BasicYield) {
     SpillDelegatePipe pipe(dop, &internal_pipe);
     MemorySink sink;
     Pipeline pipeline{{{&source, {&pipe}}}, &sink};
-    FollyFutureScheduler scheduler(4);
-    Driver<FollyFutureScheduler> driver(&scheduler);
+    folly::CPUThreadPoolExecutor cpu_executor(4);
+    folly::IOThreadPoolExecutor io_executor(1);
+    FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+    Driver<FollyFutureDoublePoolScheduler> driver(&scheduler);
     auto result = driver.Run(dop, {pipeline});
     ASSERT_OK(result);
     ASSERT_EQ(sink.batches_.size(), 3);
@@ -2048,8 +1991,10 @@ TEST(ControlFlowTest, DrainBackpressure) {
   BlackHoleSink internal_sink;
   BackpressureDelegateSink sink(dop, ctx, 2, 42, 1000, &internal_sink);
   Pipeline pipeline{{{&source, {&pipe}}}, &sink};
-  FollyFutureScheduler scheduler(4);
-  Driver<FollyFutureScheduler> driver(&scheduler);
+  folly::CPUThreadPoolExecutor cpu_executor(4);
+  folly::IOThreadPoolExecutor io_executor(1);
+  FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+  Driver<FollyFutureDoublePoolScheduler> driver(&scheduler);
   auto result = driver.Run(dop, {pipeline});
   ASSERT_OK(result);
   ASSERT_TRUE(result->IsFinished());
@@ -2130,12 +2075,11 @@ class SortTest : public testing::TestWithParam<size_t> {
     SortSink sink(dop);
     Pipeline pipeline{{{&source, pipes}}, &sink};
 
-    // folly::CPUThreadPoolExecutor cpu_executor(8);
-    // folly::IOThreadPoolExecutor io_executor(1);
-    // FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
-    FollyFutureScheduler scheduler(8);
+    folly::CPUThreadPoolExecutor cpu_executor(8);
+    folly::IOThreadPoolExecutor io_executor(1);
+    FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
 
-    Driver<FollyFutureScheduler> driver(&scheduler);
+    Driver<FollyFutureDoublePoolScheduler> driver(&scheduler);
     auto result = driver.Run(dop, {pipeline});
     ASSERT_OK(result);
     ASSERT_TRUE(result->IsFinished());
