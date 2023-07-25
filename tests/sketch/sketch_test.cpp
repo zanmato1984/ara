@@ -530,10 +530,12 @@ class FollyFutureScheduler {
  private:
   using ConcreteTask = folly::SemiFuture<TaskResult>;
   using TaskGroupPayload = std::vector<TaskResult>;
+  using ConcreteTaskGroup = std::pair<folly::SemiFuture<TaskResult>, TaskGroupPayload>;
+  using ConcoretTaskGroups = ConcreteTaskGroup;
 
  public:
   using TaskGroupHandle = std::pair<folly::Future<TaskResult>, TaskGroupPayload>;
-  using TaskGroupsHandle = std::vector<TaskGroupHandle>;
+  using TaskGroupsHandle = TaskGroupHandle;
 
   FollyFutureScheduler(size_t num_threads) : executor_(num_threads) {}
 
@@ -1557,8 +1559,16 @@ class SortSink : public SinkOp {
     size_t first = thread_id,
            second = thread_id + arrow::bit_util::CeilDiv(num_payloads, 2);
     if (second >= num_payloads) {
+      std::stringstream ss;
+      ss << "Bypass: first: " << first << ", second: " << second
+         << ", num_payloads: " << num_payloads << std::endl;
+      std::cout << ss.str();
       return TaskStatus::Finished();
     }
+    std::stringstream ss;
+    ss << "Merge: first: " << first << ", second: " << second
+       << ", num_payloads: " << num_payloads << std::endl;
+    std::cout << ss.str();
     Batch merged(thread_locals_[first].sorted.size() +
                  thread_locals_[second].sorted.size());
     std::merge(thread_locals_[first].sorted.begin(), thread_locals_[first].sorted.end(),
@@ -2112,27 +2122,42 @@ TEST(ControlFlowTest, BackpressureAfterDrainYield) {}
 TEST(ControlFlowTest, YieldAfterBackpressure) {}
 TEST(ControlFlowTest, YieldAfterDrainBackpressure) {}
 
-TEST(OperatorTest, Sort) {
-  size_t dop = 7;
-  DistributedMemorySource source(dop, {{1, 10, 100}, {2, 20, 200}, {3, 30, 300}});
-  SortSink sink(dop);
-  Pipeline pipeline{{{&source, {}}}, &sink};
+class SortTest : public testing::TestWithParam<size_t> {
+ protected:
+  void Sort(const std::vector<PipeOp*>& pipes) {
+    size_t dop = GetParam();
+    DistributedMemorySource source(dop, {{1, 10, 100}, {2, 20, 200}, {3, 30, 300}});
+    SortSink sink(dop);
+    Pipeline pipeline{{{&source, pipes}}, &sink};
 
-  folly::CPUThreadPoolExecutor cpu_executor(4);
-  folly::IOThreadPoolExecutor io_executor(1);
-  FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+    // folly::CPUThreadPoolExecutor cpu_executor(8);
+    // folly::IOThreadPoolExecutor io_executor(1);
+    // FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+    FollyFutureScheduler scheduler(8);
 
-  Driver<FollyFutureDoublePoolScheduler> driver(&scheduler);
-  auto result = driver.Run(dop, {pipeline});
-  ASSERT_OK(result);
-  ASSERT_TRUE(result->IsFinished());
-  ASSERT_EQ(sink.sorted,
-            (Batch{1,   1,   1,   1,   1,   1,   1,   2,   2,   2,   2,   2,   2,
-                   2,   3,   3,   3,   3,   3,   3,   3,   10,  10,  10,  10,  10,
-                   10,  10,  20,  20,  20,  20,  20,  20,  20,  30,  30,  30,  30,
-                   30,  30,  30,  100, 100, 100, 100, 100, 100, 100, 200, 200, 200,
-                   200, 200, 200, 200, 300, 300, 300, 300, 300, 300, 300}));
+    Driver<FollyFutureScheduler> driver(&scheduler);
+    auto result = driver.Run(dop, {pipeline});
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsFinished());
+    ASSERT_EQ(sink.sorted.size(), dop * 9);
+    size_t iter = 0;
+    for (size_t elem : {1, 2, 3, 10, 20, 30, 100, 200, 300}) {
+      for (size_t i = 0; i < dop; ++i) {
+        ASSERT_EQ(sink.sorted[iter++], elem);
+      }
+    }
+  }
+};
+
+TEST_P(SortTest, PlainSort) {
+  auto dop = GetParam();
+  Sort({});
 }
+
+INSTANTIATE_TEST_SUITE_P(OperatorTest, SortTest, testing::Range(size_t(1), size_t(43)),
+                         [](const auto& param_info) {
+                           return std::to_string(param_info.param);
+                         });
 
 class FibonacciTest : public testing::TestWithParam<size_t> {
  protected:
