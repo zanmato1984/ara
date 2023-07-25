@@ -2478,6 +2478,8 @@ TEST_P(RecursivePowPlusPolynomialTest, Bushy) {
              [&](auto& term) { return this->MakeBushyPipelinePlexes(term, false); });
 }
 
+// TODO: Drain/Yield patterns.
+
 INSTANTIATE_TEST_SUITE_P(ComplexTest, RecursivePowPlusPolynomialTest,
                          testing::Combine(testing::Values(1, 2, 3, 4),
                                           testing::Values(1, 3, 5, 7, 9),
@@ -2490,4 +2492,4 @@ INSTANTIATE_TEST_SUITE_P(ComplexTest, RecursivePowPlusPolynomialTest,
                            return ss.str();
                          });
 
-// TODO: PowPlusPow test.
+// TODO: PowPlusPow tests.
