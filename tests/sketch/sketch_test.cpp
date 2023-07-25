@@ -2275,11 +2275,12 @@ INSTANTIATE_TEST_SUITE_P(ComplexTest, FibonacciTest,
                            return std::to_string(param_info.param);
                          });
 
-class PolynomialTest : public testing::TestWithParam<std::tuple<size_t, size_t, size_t>> {
- protected:
-  using PowPipe = PowerSourcePipe;
-  using PlusPipe = IdentityPipe;
+using PowPipe = PowerSourcePipe;
+using PlusPipe = IdentityPipe;
 
+class RecursivePowPlusPolynomialTest
+    : public testing::TestWithParam<std::tuple<size_t, size_t, size_t>> {
+ protected:
   struct Term {
     Term(size_t a, size_t b)
         : indeterminate(MemorySource({Batch{1}})), pow(a), coefficient({Batch(b, 1)}) {}
@@ -2371,6 +2372,52 @@ class PolynomialTest : public testing::TestWithParam<std::tuple<size_t, size_t, 
         term->indeterminate);
   }
 
+  std::list<PipelinePlex> MakeBushyPipelinePlexes(MemorySource& indeterminate,
+                                                  PowPipe& pow, PlusPipe& plus,
+                                                  MemorySource& coefficient,
+                                                  bool indeterminate_up) {
+    if (indeterminate_up) {
+      return {{&indeterminate, {&pow, &plus}}, {&coefficient, {&plus}}};
+    } else {
+      return {{&coefficient, {&plus}}, {&indeterminate, {&pow, &plus}}};
+    }
+  }
+
+  std::list<PipelinePlex> MakeBushyPipelinePlexes(std::unique_ptr<Term>& indeterminate,
+                                                  PowPipe& pow, PlusPipe& plus,
+                                                  MemorySource& coefficient,
+                                                  bool indeterminate_up) {
+    auto plexes = std::visit(
+        [&, indeterminate_up](auto&& next_indeterminate) {
+          return MakeBushyPipelinePlexes(next_indeterminate, indeterminate->pow,
+                                         indeterminate->plus, indeterminate->coefficient,
+                                         !indeterminate_up);
+        },
+        indeterminate->indeterminate);
+    for (auto& plex : plexes) {
+      plex.pipes.emplace_back(&pow);
+    }
+    if (indeterminate_up) {
+      plexes.emplace_front(PipelinePlex{&coefficient, {}});
+    } else {
+      plexes.emplace_back(PipelinePlex{&coefficient, {}});
+    }
+    for (auto& plex : plexes) {
+      plex.pipes.emplace_back(&plus);
+    }
+    return plexes;
+  }
+
+  std::list<PipelinePlex> MakeBushyPipelinePlexes(std::unique_ptr<Term>& term,
+                                                  bool indeterminate_up) {
+    return std::visit(
+        [&](auto&& indeterminate) {
+          return MakeBushyPipelinePlexes(indeterminate, term->pow, term->plus,
+                                         term->coefficient, !indeterminate_up);
+        },
+        term->indeterminate);
+  }
+
   template <typename F>
   void Polynomial(size_t a, size_t b, size_t c, F&& make_plexes) {
     size_t dop = 8;
@@ -2380,43 +2427,58 @@ class PolynomialTest : public testing::TestWithParam<std::tuple<size_t, size_t, 
     MemorySink sink;
     Pipeline pipeline{plexes, &sink};
 
-    folly::CPUThreadPoolExecutor cpu_executor(4);
-    folly::IOThreadPoolExecutor io_executor(1);
-    FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
-
-    Driver<FollyFutureDoublePoolScheduler> driver(&scheduler);
-    auto result = driver.Run(dop, {pipeline});
-    ASSERT_OK(result);
-    ASSERT_TRUE(result->IsFinished());
-
-    size_t exp_num_batches = a + 1, exp_num_elems = a + b;
-    for (size_t i = 1; i < c; ++i) {
-      exp_num_batches = exp_num_batches * a + 1;
-      exp_num_elems = exp_num_elems * a + b;
+    {
+      auto stages = PipelineStagesBuilder(dop, pipeline).Build();
+      ASSERT_EQ(stages.size(), c + 1);
     }
-    ASSERT_EQ(sink.batches_.size(), exp_num_batches);
-    size_t act_num_elems =
-        std::accumulate(sink.batches_.begin(), sink.batches_.end(), size_t(0),
-                        [](size_t acc, const auto& batch) { return acc + batch.size(); });
-    ASSERT_EQ(act_num_elems, exp_num_elems);
-    for (const auto& batch : sink.batches_) {
-      std::for_each(batch.begin(), batch.end(), [](int elem) { ASSERT_EQ(elem, 1); });
+
+    {
+      folly::CPUThreadPoolExecutor cpu_executor(4);
+      folly::IOThreadPoolExecutor io_executor(1);
+      FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+
+      Driver<FollyFutureDoublePoolScheduler> driver(&scheduler);
+      auto result = driver.Run(dop, {pipeline});
+      ASSERT_OK(result);
+      ASSERT_TRUE(result->IsFinished());
+
+      size_t exp_num_batches = a + 1, exp_num_elems = a + b;
+      for (size_t i = 1; i < c; ++i) {
+        exp_num_batches = exp_num_batches * a + 1;
+        exp_num_elems = exp_num_elems * a + b;
+      }
+      ASSERT_EQ(sink.batches_.size(), exp_num_batches);
+      size_t act_num_elems = std::accumulate(
+          sink.batches_.begin(), sink.batches_.end(), size_t(0),
+          [](size_t acc, const auto& batch) { return acc + batch.size(); });
+      ASSERT_EQ(act_num_elems, exp_num_elems);
+      for (const auto& batch : sink.batches_) {
+        std::for_each(batch.begin(), batch.end(), [](int elem) { ASSERT_EQ(elem, 1); });
+      }
     }
   }
 };
 
-TEST_P(PolynomialTest, TopDeep) {
+TEST_P(RecursivePowPlusPolynomialTest, TopDeep) {
   auto [a, b, c] = GetParam();
   Polynomial(a, b, c, [&](auto& term) { return this->MakeTopDeepPipelinePlexes(term); });
 }
 
-TEST_P(PolynomialTest, BottomDeep) {
+TEST_P(RecursivePowPlusPolynomialTest, BottomDeep) {
   auto [a, b, c] = GetParam();
   Polynomial(a, b, c,
              [&](auto& term) { return this->MakeBottomDeepPipelinePlexes(term); });
 }
 
-INSTANTIATE_TEST_SUITE_P(ComplexTest, PolynomialTest,
+TEST_P(RecursivePowPlusPolynomialTest, Bushy) {
+  auto [a, b, c] = GetParam();
+  Polynomial(a, b, c,
+             [&](auto& term) { return this->MakeBushyPipelinePlexes(term, true); });
+  Polynomial(a, b, c,
+             [&](auto& term) { return this->MakeBushyPipelinePlexes(term, false); });
+}
+
+INSTANTIATE_TEST_SUITE_P(ComplexTest, RecursivePowPlusPolynomialTest,
                          testing::Combine(testing::Values(1, 2, 3, 4),
                                           testing::Values(1, 3, 5, 7, 9),
                                           testing::Values(1, 2, 4, 8)),
