@@ -2280,41 +2280,41 @@ class PolynomialTest : public testing::TestWithParam<std::tuple<size_t, size_t, 
   using PowPipe = PowerSourcePipe;
   using PlusPipe = IdentityPipe;
 
-  struct PowAPlusBForCTerm {
-    PowAPlusBForCTerm(size_t a, size_t b)
+  struct Term {
+    Term(size_t a, size_t b)
         : indeterminate(MemorySource({Batch{1}})), pow(a), coefficient({Batch(b, 1)}) {}
 
-    PowAPlusBForCTerm(size_t a, size_t b,
-                      std::unique_ptr<PowAPlusBForCTerm> indeterminate)
+    Term(size_t a, size_t b, std::unique_ptr<Term> indeterminate)
         : indeterminate(std::move(indeterminate)), pow(a), coefficient({Batch(b, 1)}) {}
 
-    std::variant<std::unique_ptr<PowAPlusBForCTerm>, MemorySource> indeterminate;
+    std::variant<std::unique_ptr<Term>, MemorySource> indeterminate;
     PowPipe pow;
     PlusPipe plus;
     MemorySource coefficient;
   };
 
-  std::unique_ptr<PowAPlusBForCTerm> MakePowAPlusBForC(size_t a, size_t b, size_t c) {
+  std::unique_ptr<Term> MakeTerm(size_t a, size_t b, size_t c) {
     ARRA_DCHECK(a > 0 && b > 0 && c > 0);
     if (c == 1) {
-      return std::make_unique<PowAPlusBForCTerm>(a, b);
+      return std::make_unique<Term>(a, b);
     }
-    return std::make_unique<PowAPlusBForCTerm>(a, b, MakePowAPlusBForC(a, b, c - 1));
+    return std::make_unique<Term>(a, b, MakeTerm(a, b, c - 1));
   }
 
-  std::vector<PipelinePlex> MakePipelinePlexes(MemorySource& indeterminate, PowPipe& pow,
-                                               PlusPipe& plus,
-                                               MemorySource& coefficient) {
+  std::list<PipelinePlex> MakeTopDeepPipelinePlexes(MemorySource& indeterminate,
+                                                    PowPipe& pow, PlusPipe& plus,
+                                                    MemorySource& coefficient) {
     return {{&indeterminate, {&pow, &plus}}, {&coefficient, {&plus}}};
   }
 
-  std::vector<PipelinePlex> MakePipelinePlexes(
-      std::unique_ptr<PowAPlusBForCTerm>& indeterminate, PowPipe& pow, PlusPipe& plus,
-      MemorySource& coefficient) {
+  std::list<PipelinePlex> MakeTopDeepPipelinePlexes(std::unique_ptr<Term>& indeterminate,
+                                                    PowPipe& pow, PlusPipe& plus,
+                                                    MemorySource& coefficient) {
     auto plexes = std::visit(
         [&](auto&& next_indeterminate) {
-          return MakePipelinePlexes(next_indeterminate, indeterminate->pow,
-                                    indeterminate->plus, indeterminate->coefficient);
+          return MakeTopDeepPipelinePlexes(next_indeterminate, indeterminate->pow,
+                                           indeterminate->plus,
+                                           indeterminate->coefficient);
         },
         indeterminate->indeterminate);
     for (auto& plex : plexes) {
@@ -2327,18 +2327,56 @@ class PolynomialTest : public testing::TestWithParam<std::tuple<size_t, size_t, 
     return plexes;
   }
 
-  std::vector<PipelinePlex> MakePipelinePlexes(std::unique_ptr<PowAPlusBForCTerm>& term) {
+  std::list<PipelinePlex> MakeTopDeepPipelinePlexes(std::unique_ptr<Term>& term) {
     return std::visit(
         [&](auto&& indeterminate) {
-          return MakePipelinePlexes(indeterminate, term->pow, term->plus,
-                                    term->coefficient);
+          return MakeTopDeepPipelinePlexes(indeterminate, term->pow, term->plus,
+                                           term->coefficient);
         },
         term->indeterminate);
   }
 
-  void PowAPlusBForC(size_t dop, size_t a, size_t b, size_t c) {
-    auto term = MakePowAPlusBForC(a, b, c);
-    auto plexes = MakePipelinePlexes(term);
+  std::list<PipelinePlex> MakeBottomDeepPipelinePlexes(MemorySource& indeterminate,
+                                                       PowPipe& pow, PlusPipe& plus,
+                                                       MemorySource& coefficient) {
+    return {{&coefficient, {&plus}}, {&indeterminate, {&pow, &plus}}};
+  }
+
+  std::list<PipelinePlex> MakeBottomDeepPipelinePlexes(
+      std::unique_ptr<Term>& indeterminate, PowPipe& pow, PlusPipe& plus,
+      MemorySource& coefficient) {
+    auto plexes = std::visit(
+        [&](auto&& next_indeterminate) {
+          return MakeBottomDeepPipelinePlexes(next_indeterminate, indeterminate->pow,
+                                              indeterminate->plus,
+                                              indeterminate->coefficient);
+        },
+        indeterminate->indeterminate);
+    for (auto& plex : plexes) {
+      plex.pipes.emplace_back(&pow);
+    }
+    plexes.emplace_front(PipelinePlex{&coefficient, {}});
+    for (auto& plex : plexes) {
+      plex.pipes.emplace_back(&plus);
+    }
+    return plexes;
+  }
+
+  std::list<PipelinePlex> MakeBottomDeepPipelinePlexes(std::unique_ptr<Term>& term) {
+    return std::visit(
+        [&](auto&& indeterminate) {
+          return MakeBottomDeepPipelinePlexes(indeterminate, term->pow, term->plus,
+                                              term->coefficient);
+        },
+        term->indeterminate);
+  }
+
+  template <typename F>
+  void Polynomial(size_t a, size_t b, size_t c, F&& make_plexes) {
+    size_t dop = 8;
+    auto term = MakeTerm(a, b, c);
+    auto plex_list = make_plexes(term);
+    std::vector<PipelinePlex> plexes(plex_list.begin(), plex_list.end());
     MemorySink sink;
     Pipeline pipeline{plexes, &sink};
 
@@ -2367,10 +2405,15 @@ class PolynomialTest : public testing::TestWithParam<std::tuple<size_t, size_t, 
   }
 };
 
-TEST_P(PolynomialTest, PowAPlusBForC) {
-  size_t dop = 8;
+TEST_P(PolynomialTest, TopDeep) {
   auto [a, b, c] = GetParam();
-  PowAPlusBForC(dop, a, b, c);
+  Polynomial(a, b, c, [&](auto& term) { return this->MakeTopDeepPipelinePlexes(term); });
+}
+
+TEST_P(PolynomialTest, BottomDeep) {
+  auto [a, b, c] = GetParam();
+  Polynomial(a, b, c,
+             [&](auto& term) { return this->MakeBottomDeepPipelinePlexes(term); });
 }
 
 INSTANTIATE_TEST_SUITE_P(ComplexTest, PolynomialTest,
