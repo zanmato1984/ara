@@ -2110,6 +2110,19 @@ TEST_P(SortTest, PlainSort) {
   Sort({});
 }
 
+TEST_P(SortTest, SortWithDrain) {
+  auto dop = GetParam();
+  DrainOnlyPipe pipe(dop);
+  Sort({&pipe});
+}
+
+TEST_P(SortTest, SortWithYield) {
+  auto dop = GetParam();
+  IdentityPipe internal_pipe;
+  SpillDelegatePipe pipe(dop, &internal_pipe);
+  Sort({&pipe});
+}
+
 INSTANTIATE_TEST_SUITE_P(OperatorTest, SortTest, testing::Range(size_t(1), size_t(43)),
                          [](const auto& param_info) {
                            return std::to_string(param_info.param);
