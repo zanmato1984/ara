@@ -875,8 +875,39 @@ class PowerSourcePipe : public PipeOp {
 
   std::optional<PipelineTaskDrain> Drain() override { return std::nullopt; }
 
+ private:
+  class InternalSource : public SourceOp {
+   public:
+    InternalSource(std::list<Batch>& batches) : batches_(batches) {}
+
+    PipelineTaskSource Source() override {
+      return [&](ThreadId) -> arrow::Result<OperatorResult> {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (batches_.empty()) {
+          return OperatorResult::Finished(std::nullopt);
+        }
+        auto output = std::move(batches_.front());
+        batches_.pop_front();
+        if (batches_.empty()) {
+          return OperatorResult::Finished(std::move(output));
+        } else {
+          return OperatorResult::SourcePipeHasMore(std::move(output));
+        }
+      };
+    }
+
+    TaskGroups Frontend() override { return {}; }
+
+    TaskGroups Backend() override { return {}; }
+
+   private:
+    std::mutex mutex_;
+    std::list<Batch>& batches_;
+  };
+
+ public:
   std::unique_ptr<SourceOp> Source() override {
-    return std::make_unique<MemorySource>(std::move(batches_));
+    return std::make_unique<InternalSource>(batches_);
   }
 
  private:
@@ -1416,7 +1447,7 @@ class FibonacciPipe : public PipeOp {
  private:
   class InternalSource : public SourceOp {
    public:
-    InternalSource(std::optional<int>& first, std::optional<int>& second)
+    InternalSource(const std::optional<int>& first, const std::optional<int>& second)
         : done_(false), first_(first), second_(second) {}
 
     PipelineTaskSource Source() override {
@@ -1438,7 +1469,7 @@ class FibonacciPipe : public PipeOp {
    private:
     std::mutex mutex_;
     bool done_;
-    std::optional<int>&first_, &second_;
+    const std::optional<int>&first_, &second_;
   };
 
  public:
@@ -1718,6 +1749,25 @@ TEST(ControlFlowTest, OneToThreeSliced) {
   size_t dop = 8;
   MemorySource source({{1}});
   PowerSlicedPipe pipe(dop, 3);
+  MemorySink sink;
+  Pipeline pipeline{{{&source, {&pipe}}}, &sink};
+  folly::CPUThreadPoolExecutor cpu_executor(4);
+  folly::IOThreadPoolExecutor io_executor(1);
+  FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+  Driver<FollyFutureDoublePoolScheduler> driver(&scheduler);
+  auto result = driver.Run(dop, {pipeline});
+  ASSERT_OK(result);
+  ASSERT_TRUE(result->IsFinished());
+  ASSERT_EQ(sink.batches_.size(), 3);
+  for (size_t i = 0; i < 3; ++i) {
+    ASSERT_EQ(sink.batches_[i], (Batch{1}));
+  }
+}
+
+TEST(ControlFlowTest, OneToThreeSource) {
+  size_t dop = 8;
+  MemorySource source({{1}});
+  PowerSourcePipe pipe(3);
   MemorySink sink;
   Pipeline pipeline{{{&source, {&pipe}}}, &sink};
   folly::CPUThreadPoolExecutor cpu_executor(4);
