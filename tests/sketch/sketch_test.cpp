@@ -2130,8 +2130,7 @@ INSTANTIATE_TEST_SUITE_P(OperatorTest, SortTest, testing::Range(size_t(1), size_
 
 class FibonacciTest : public testing::TestWithParam<size_t> {
  protected:
-  void Fibonacci(const std::vector<PipeOp*>& pipes) {
-    size_t dop = 8;
+  void Fibonacci(size_t dop, const std::vector<PipeOp*>& pipes) {
     FibonacciSource source_1, source_2;
     MemorySink sink;
     Pipeline pipeline{{{&source_1, pipes}, {&source_2, pipes}}, &sink};
@@ -2165,14 +2164,49 @@ class FibonacciTest : public testing::TestWithParam<size_t> {
 };
 
 TEST_P(FibonacciTest, PlainFibonacci) {
+  size_t dop = 8;
   auto n = GetParam();
   std::vector<FibonacciPipe> pipe_objs(n - 2);
   std::vector<PipeOp*> pipes(n - 2);
   if (n > 2) {
     std::transform(pipe_objs.begin(), pipe_objs.end(), pipes.begin(),
-                   [](auto& pipe_obj) { return static_cast<PipeOp*>(&pipe_obj); });
+                   [](auto& pipe_obj) { return &pipe_obj; });
   }
-  Fibonacci(pipes);
+  Fibonacci(dop, pipes);
+}
+
+TEST_P(FibonacciTest, FibonacciWithDrain) {
+  size_t dop = 8;
+  auto n = GetParam();
+  std::vector<FibonacciPipe> fibonacci_pipe_objs(n - 2);
+  std::vector<DrainOnlyPipe> drain_pipe_objs;
+  for (size_t i = 0; i < n - 2; ++i) {
+    drain_pipe_objs.emplace_back(dop);
+  }
+  std::vector<PipeOp*> pipes(2 * (n - 2));
+  if (n > 2) {
+    for (size_t i = 0; i < n - 2; ++i) {
+      pipes[2 * i] = static_cast<PipeOp*>(&fibonacci_pipe_objs[i]);
+      pipes[2 * i + 1] = static_cast<PipeOp*>(&drain_pipe_objs[i]);
+    }
+  }
+  Fibonacci(dop, pipes);
+}
+
+TEST_P(FibonacciTest, FibonacciWithYield) {
+  size_t dop = 8;
+  auto n = GetParam();
+  std::vector<FibonacciPipe> fibonacci_pipe_objs(n - 2);
+  std::vector<SpillDelegatePipe> spill_pipe_objs;
+  for (size_t i = 0; i < n - 2; ++i) {
+    spill_pipe_objs.emplace_back(dop, &fibonacci_pipe_objs[i]);
+  }
+  std::vector<PipeOp*> pipes(n - 2);
+  if (n > 2) {
+    std::transform(spill_pipe_objs.begin(), spill_pipe_objs.end(), pipes.begin(),
+                   [](auto& pipe_obj) { return &pipe_obj; });
+  }
+  Fibonacci(dop, pipes);
 }
 
 INSTANTIATE_TEST_SUITE_P(ComplexTest, FibonacciTest,
