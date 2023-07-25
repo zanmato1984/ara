@@ -1500,16 +1500,8 @@ class SortSink : public SinkOp {
     size_t first = thread_id,
            second = thread_id + arrow::bit_util::CeilDiv(num_payloads, 2);
     if (second >= num_payloads) {
-      std::stringstream ss;
-      ss << "Bypass: first: " << first << ", second: " << second
-         << ", num_payloads: " << num_payloads << std::endl;
-      std::cout << ss.str();
       return TaskStatus::Finished();
     }
-    std::stringstream ss;
-    ss << "Merge: first: " << first << ", second: " << second
-       << ", num_payloads: " << num_payloads << std::endl;
-    std::cout << ss.str();
     Batch merged(thread_locals_[first].sorted.size() +
                  thread_locals_[second].sorted.size());
     std::merge(thread_locals_[first].sorted.begin(), thread_locals_[first].sorted.end(),
