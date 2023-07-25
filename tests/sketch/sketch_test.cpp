@@ -2279,36 +2279,66 @@ class PolynomialTest : public testing::TestWithParam<std::tuple<size_t, size_t, 
  protected:
   using PowPipe = PowerSourcePipe;
   using PlusPipe = IdentityPipe;
-  std::tuple<std::vector<MemorySource>, std::vector<PowPipe>, std::vector<PlusPipe>,
-             std::vector<PipelinePlex>>
-  PowXPlusYForZ(size_t x, size_t y, size_t z) {
-    ARRA_DCHECK(x > 0 && y > 0 && z > 0);
-    if (z == 1) {
-      std::vector<MemorySource> sources{{{{1}}}};
-      std::vector<PipelinePlex> plexes{{&sources[0], {}}};
-      return std::make_tuple(std::move(sources), std::vector<PowPipe>{},
-                             std::vector<PlusPipe>{}, std::move(plexes));
-    }
 
-    auto t = PowXPlusYForZ(x, y, z - 1);
-    auto& [sources, pow_pipes, plus_pipes, plexes] = t;
-    pow_pipes.emplace_back(x);
-    for (auto& plex : plexes) {
-      plex.pipes.emplace_back(&pow_pipes.back());
+  struct PowAPlusBForCTerm {
+    PowAPlusBForCTerm(size_t a, size_t b)
+        : indeterminate(MemorySource({Batch{1}})), pow(a), coefficient({Batch(b, 1)}) {}
+
+    PowAPlusBForCTerm(size_t a, size_t b,
+                      std::unique_ptr<PowAPlusBForCTerm> indeterminate)
+        : indeterminate(std::move(indeterminate)), pow(a), coefficient({Batch(b, 1)}) {}
+
+    std::variant<std::unique_ptr<PowAPlusBForCTerm>, MemorySource> indeterminate;
+    PowPipe pow;
+    PlusPipe plus;
+    MemorySource coefficient;
+  };
+
+  std::unique_ptr<PowAPlusBForCTerm> MakePowAPlusBForC(size_t a, size_t b, size_t c) {
+    ARRA_DCHECK(a > 0 && b > 0 && c > 0);
+    if (c == 1) {
+      return std::make_unique<PowAPlusBForCTerm>(a, b);
     }
-    sources.emplace_back(std::list<Batch>{Batch(y, 1)});
-    plexes.emplace_back(PipelinePlex{&sources.back(), {}});
-    plus_pipes.emplace_back();
-    for (auto& plex : plexes) {
-      plex.pipes.emplace_back(&plus_pipes.back());
-    }
-    return std::make_tuple(std::move(sources), std::move(pow_pipes),
-                           std::move(plus_pipes), std::move(plexes));
+    return std::make_unique<PowAPlusBForCTerm>(a, b, MakePowAPlusBForC(a, b, c - 1));
   }
 
-  void PowXPlusYForZ(size_t dop, size_t x, size_t y, size_t z) {
-    auto t = PowXPlusYForZ(x, y, z);
-    auto& [sources, pow_pipes, plus_pipes, plexes] = t;
+  std::vector<PipelinePlex> MakePipelinePlexes(MemorySource& indeterminate, PowPipe& pow,
+                                               PlusPipe& plus,
+                                               MemorySource& coefficient) {
+    return {{&indeterminate, {&pow, &plus}}, {&coefficient, {&plus}}};
+  }
+
+  std::vector<PipelinePlex> MakePipelinePlexes(
+      std::unique_ptr<PowAPlusBForCTerm>& indeterminate, PowPipe& pow, PlusPipe& plus,
+      MemorySource& coefficient) {
+    auto plexes = std::visit(
+        [&](auto&& next_indeterminate) {
+          return MakePipelinePlexes(next_indeterminate, indeterminate->pow,
+                                    indeterminate->plus, indeterminate->coefficient);
+        },
+        indeterminate->indeterminate);
+    for (auto& plex : plexes) {
+      plex.pipes.emplace_back(&pow);
+    }
+    plexes.emplace_back(PipelinePlex{&coefficient, {}});
+    for (auto& plex : plexes) {
+      plex.pipes.emplace_back(&plus);
+    }
+    return plexes;
+  }
+
+  std::vector<PipelinePlex> MakePipelinePlexes(std::unique_ptr<PowAPlusBForCTerm>& term) {
+    return std::visit(
+        [&](auto&& indeterminate) {
+          return MakePipelinePlexes(indeterminate, term->pow, term->plus,
+                                    term->coefficient);
+        },
+        term->indeterminate);
+  }
+
+  void PowAPlusBForC(size_t dop, size_t a, size_t b, size_t c) {
+    auto term = MakePowAPlusBForC(a, b, c);
+    auto plexes = MakePipelinePlexes(term);
     MemorySink sink;
     Pipeline pipeline{plexes, &sink};
 
@@ -2320,18 +2350,33 @@ class PolynomialTest : public testing::TestWithParam<std::tuple<size_t, size_t, 
     auto result = driver.Run(dop, {pipeline});
     ASSERT_OK(result);
     ASSERT_TRUE(result->IsFinished());
+
+    size_t exp_num_batches = a + 1, exp_num_elems = a + b;
+    for (size_t i = 1; i < c; ++i) {
+      exp_num_batches = exp_num_batches * a + 1;
+      exp_num_elems = exp_num_elems * a + b;
+    }
+    ASSERT_EQ(sink.batches_.size(), exp_num_batches);
+    size_t act_num_elems =
+        std::accumulate(sink.batches_.begin(), sink.batches_.end(), size_t(0),
+                        [](size_t acc, const auto& batch) { return acc + batch.size(); });
+    ASSERT_EQ(act_num_elems, exp_num_elems);
+    for (const auto& batch : sink.batches_) {
+      std::for_each(batch.begin(), batch.end(), [](int elem) { ASSERT_EQ(elem, 1); });
+    }
   }
 };
 
-TEST_P(PolynomialTest, PowXPlusYForZ) {
+TEST_P(PolynomialTest, PowAPlusBForC) {
   size_t dop = 8;
-  auto [x, y, z] = GetParam();
-  PowXPlusYForZ(dop, x, y, z);
+  auto [a, b, c] = GetParam();
+  PowAPlusBForC(dop, a, b, c);
 }
 
 INSTANTIATE_TEST_SUITE_P(ComplexTest, PolynomialTest,
-                         testing::Combine(testing::Values(2, 4), testing::Values(1, 2),
-                                          testing::Values(1, 2, 4, 8, 16)),
+                         testing::Combine(testing::Values(1, 2, 3, 4),
+                                          testing::Values(1, 3, 5, 7, 9),
+                                          testing::Values(1, 2, 4, 8)),
                          [](const auto& param_info) {
                            std::stringstream ss;
                            ss << "pow_" << std::get<0>(param_info.param) << "_plus_"
