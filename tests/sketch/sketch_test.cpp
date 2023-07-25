@@ -668,6 +668,10 @@ class MemorySource : public SourceOp {
  public:
   MemorySource(std::list<Batch> batches) : batches_(std::move(batches)) {}
 
+  MemorySource(const MemorySource& other) : batches_(other.batches_) {}
+
+  MemorySource(MemorySource&& other) : batches_(std::move(other.batches_)) {}
+
   PipelineTaskSource Source() override {
     return [&](ThreadId) -> arrow::Result<OperatorResult> {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -859,6 +863,12 @@ class PowerSlicedPipe : public PipeOp {
 class PowerSourcePipe : public PipeOp {
  public:
   PowerSourcePipe(size_t n) : n_(n) {}
+
+  PowerSourcePipe(const PowerSourcePipe& other)
+      : n_(other.n_), batches_(other.batches_) {}
+
+  PowerSourcePipe(PowerSourcePipe&& other)
+      : n_(other.n_), batches_(std::move(other.batches_)) {}
 
   PipelineTaskPipe Pipe() override {
     return [&](ThreadId, std::optional<Batch> input) -> arrow::Result<OperatorResult> {
@@ -2263,4 +2273,69 @@ INSTANTIATE_TEST_SUITE_P(ComplexTest, FibonacciTest,
                          testing::Range(size_t(2), size_t(43)),
                          [](const auto& param_info) {
                            return std::to_string(param_info.param);
+                         });
+
+class PolynomialTest : public testing::TestWithParam<std::tuple<size_t, size_t, size_t>> {
+ protected:
+  using PowPipe = PowerSourcePipe;
+  using PlusPipe = IdentityPipe;
+  std::tuple<std::vector<MemorySource>, std::vector<PowPipe>, std::vector<PlusPipe>,
+             std::vector<PipelinePlex>>
+  PowXPlusYForZ(size_t x, size_t y, size_t z) {
+    ARRA_DCHECK(x > 0 && y > 0 && z > 0);
+    if (z == 1) {
+      std::vector<MemorySource> sources{{{{1}}}};
+      std::vector<PipelinePlex> plexes{{&sources[0], {}}};
+      return std::make_tuple(std::move(sources), std::vector<PowPipe>{},
+                             std::vector<PlusPipe>{}, std::move(plexes));
+    }
+
+    auto t = PowXPlusYForZ(x, y, z - 1);
+    auto& [sources, pow_pipes, plus_pipes, plexes] = t;
+    pow_pipes.emplace_back(x);
+    for (auto& plex : plexes) {
+      plex.pipes.emplace_back(&pow_pipes.back());
+    }
+    sources.emplace_back(std::list<Batch>{Batch(y, 1)});
+    plexes.emplace_back(PipelinePlex{&sources.back(), {}});
+    plus_pipes.emplace_back();
+    for (auto& plex : plexes) {
+      plex.pipes.emplace_back(&plus_pipes.back());
+    }
+    return std::make_tuple(std::move(sources), std::move(pow_pipes),
+                           std::move(plus_pipes), std::move(plexes));
+  }
+
+  void PowXPlusYForZ(size_t dop, size_t x, size_t y, size_t z) {
+    auto t = PowXPlusYForZ(x, y, z);
+    auto& [sources, pow_pipes, plus_pipes, plexes] = t;
+    MemorySink sink;
+    Pipeline pipeline{plexes, &sink};
+
+    folly::CPUThreadPoolExecutor cpu_executor(4);
+    folly::IOThreadPoolExecutor io_executor(1);
+    FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+
+    Driver<FollyFutureDoublePoolScheduler> driver(&scheduler);
+    auto result = driver.Run(dop, {pipeline});
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsFinished());
+  }
+};
+
+TEST_P(PolynomialTest, PowXPlusYForZ) {
+  size_t dop = 8;
+  auto [x, y, z] = GetParam();
+  PowXPlusYForZ(dop, x, y, z);
+}
+
+INSTANTIATE_TEST_SUITE_P(ComplexTest, PolynomialTest,
+                         testing::Combine(testing::Values(2, 4), testing::Values(1, 2),
+                                          testing::Values(1, 2, 4, 8, 16)),
+                         [](const auto& param_info) {
+                           std::stringstream ss;
+                           ss << "pow_" << std::get<0>(param_info.param) << "_plus_"
+                              << std::get<1>(param_info.param) << "_for_"
+                              << std::get<2>(param_info.param);
+                           return ss.str();
                          });
