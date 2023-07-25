@@ -789,9 +789,9 @@ class IdentityWithAnotherSourcePipe : public IdentityPipe {
   std::unique_ptr<SourceOp> source_;
 };
 
-class TimesNFlatPipe : public PipeOp {
+class PowerFlatPipe : public PipeOp {
  public:
-  TimesNFlatPipe(size_t n) : n_(n) {}
+  PowerFlatPipe(size_t n) : n_(n) {}
 
   PipelineTaskPipe Pipe() override {
     return [&](ThreadId, std::optional<Batch> input) -> arrow::Result<OperatorResult> {
@@ -815,9 +815,9 @@ class TimesNFlatPipe : public PipeOp {
   size_t n_;
 };
 
-class TimesNSlicedPipe : public PipeOp {
+class PowerSlicedPipe : public PipeOp {
  public:
-  TimesNSlicedPipe(size_t dop, size_t n) : dop_(dop), n_(n) {
+  PowerSlicedPipe(size_t dop, size_t n) : dop_(dop), n_(n) {
     thread_locals_.resize(dop_);
   }
 
@@ -854,6 +854,36 @@ class TimesNSlicedPipe : public PipeOp {
     std::list<Batch> batches;
   };
   std::vector<ThreadLocal> thread_locals_;
+};
+
+class PowerSourcePipe : public PipeOp {
+ public:
+  PowerSourcePipe(size_t n) : n_(n) {}
+
+  PipelineTaskPipe Pipe() override {
+    return [&](ThreadId, std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+      if (input.has_value()) {
+        for (size_t i = 1; i < n_; ++i) {
+          std::lock_guard<std::mutex> lock(mutex_);
+          batches_.push_back(input.value());
+        }
+        return OperatorResult::PipeEven(std::move(input.value()));
+      }
+      return OperatorResult::PipeSinkNeedsMore();
+    };
+  }
+
+  std::optional<PipelineTaskDrain> Drain() override { return std::nullopt; }
+
+  std::unique_ptr<SourceOp> Source() override {
+    return std::make_unique<MemorySource>(std::move(batches_));
+  }
+
+ private:
+  size_t n_;
+
+  std::mutex mutex_;
+  std::list<Batch> batches_;
 };
 
 class AccumulatePipe : public PipeOp {
@@ -1421,36 +1451,6 @@ class FibonacciPipe : public PipeOp {
   std::optional<int> first_ = std::nullopt, second_ = std::nullopt;
 };
 
-class PowerPipe : public PipeOp {
- public:
-  PowerPipe(size_t n) : n_(n) {}
-
-  PipelineTaskPipe Pipe() override {
-    return [&](ThreadId, std::optional<Batch> input) -> arrow::Result<OperatorResult> {
-      if (input.has_value()) {
-        for (size_t i = 1; i < n_; ++i) {
-          std::lock_guard<std::mutex> lock(mutex_);
-          batches_.push_back(input.value());
-        }
-        return OperatorResult::PipeEven(std::move(input.value()));
-      }
-      return OperatorResult::PipeSinkNeedsMore();
-    };
-  }
-
-  std::optional<PipelineTaskDrain> Drain() override { return std::nullopt; }
-
-  std::unique_ptr<SourceOp> Source() override {
-    return std::make_unique<MemorySource>(std::move(batches_));
-  }
-
- private:
-  size_t n_;
-
-  std::mutex mutex_;
-  std::list<Batch> batches_;
-};
-
 class SortSink : public SinkOp {
  public:
   SortSink(size_t dop) : dop_(dop), thread_locals_(dop) {}
@@ -1700,7 +1700,7 @@ TEST(ControlFlowTest, OneToOne) {
 TEST(ControlFlowTest, OneToThreeFlat) {
   size_t dop = 8;
   MemorySource source({{1}});
-  TimesNFlatPipe pipe(3);
+  PowerFlatPipe pipe(3);
   MemorySink sink;
   Pipeline pipeline{{{&source, {&pipe}}}, &sink};
   folly::CPUThreadPoolExecutor cpu_executor(4);
@@ -1717,7 +1717,7 @@ TEST(ControlFlowTest, OneToThreeFlat) {
 TEST(ControlFlowTest, OneToThreeSliced) {
   size_t dop = 8;
   MemorySource source({{1}});
-  TimesNSlicedPipe pipe(dop, 3);
+  PowerSlicedPipe pipe(dop, 3);
   MemorySink sink;
   Pipeline pipeline{{{&source, {&pipe}}}, &sink};
   folly::CPUThreadPoolExecutor cpu_executor(4);
