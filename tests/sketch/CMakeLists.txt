@@ -34,3 +34,7 @@ set(SKETCH_HASH_JOIN_TEST_SRC
         "${CMAKE_CURRENT_SOURCE_DIR}/sketch_hash_join.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/sketch_hash_join_test.cpp")
 configure_test(sketch_hash_join_test "${SKETCH_HASH_JOIN_TEST_SRC}")
+
+set(SKETCH_RESULT_AND_STATUS_TEST_SRC
+        "${CMAKE_CURRENT_SOURCE_DIR}/sketch_result_and_status_test.cpp")
+configure_test(sketch_result_and_status_test "${SKETCH_RESULT_AND_STATUS_TEST_SRC}")
