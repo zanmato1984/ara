@@ -164,7 +164,10 @@ struct PipelinePlex {
   std::vector<PipeOp*> pipes;
 };
 
-using Pipeline = std::pair<std::vector<PipelinePlex>, SinkOp*>;
+struct Pipeline {
+  std::vector<PipelinePlex> plexes;
+  SinkOp* sink;
+};
 
 // TODO: Decouple the pipeline task descriptions from the task execution, so that the execution
 // is flexible to use more advanced and simpler machineries such as coroutine.
@@ -372,8 +375,8 @@ class PipelineStagesBuilder {
  private:
   void BuildTopology() {
     std::unordered_map<PipeOp*, SourceOp*> pipe_source_map;
-    auto sink = pipeline_.second;
-    for (auto& plex : pipeline_.first) {
+    auto sink = pipeline_.sink;
+    for (auto& plex : pipeline_.plexes) {
       size_t stage = 0;
       topology_.emplace(plex.source, std::pair<size_t, PipelinePlex>{stage++, plex});
       for (size_t i = 0; i < plex.pipes.size(); ++i) {
@@ -421,7 +424,7 @@ class PipelineStagesBuilder {
             plex.pipes.begin(), plex.pipes.end(), pipes.begin(),
             [&](auto* pipe) { return std::make_pair(pipe->Pipe(), pipe->Drain()); });
         plex_tasks.push_back(std::make_unique<PipelinePlexTask>(
-            dop_, plex.source->Source(), std::move(pipes), pipeline_.second->Sink()));
+            dop_, plex.source->Source(), std::move(pipes), pipeline_.sink->Sink()));
       }
       task_stages.emplace_back(
           std::move(sources_keepalive),
@@ -457,7 +460,7 @@ class Driver {
  private:
   TaskResult RunPipeline(size_t dop, const Pipeline& pipeline) {
     auto stages = PipelineStagesBuilder(dop, pipeline).Build();
-    auto sink = pipeline.second;
+    auto sink = pipeline.sink;
 
     // TODO: Backend should be waited even error happens.
     auto sink_be = sink->Backend();
