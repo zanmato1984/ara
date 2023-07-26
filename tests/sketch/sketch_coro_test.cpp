@@ -16,7 +16,12 @@ struct Generator {
     void unhandled_exception() {}
     int current_value;
   };
+
+  constexpr bool await_ready() const noexcept { return false; }
+  void await_suspend(std::coroutine_handle<> h) const {}
+  constexpr void await_resume() const noexcept {}
   explicit Generator(promise_type::Handle coro) : coro_(coro) {}
+
   ~Generator() {
     if (coro_) coro_.destroy();
   }
@@ -44,6 +49,7 @@ Generator myCoroutine() {
   int x = 0;
   while (true) {
     co_yield x++;
+    co_await myCoroutine();
   }
 }
 
