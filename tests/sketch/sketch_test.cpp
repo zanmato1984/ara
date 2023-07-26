@@ -1335,6 +1335,51 @@ class DrainOnlyPipe : public PipeOp {
   std::vector<ThreadLocal> thread_locals_;
 };
 
+class DrainOnlyDelegatePipe : public PipeOp {
+ public:
+  DrainOnlyDelegatePipe(size_t dop, PipeOp* pipe) : thread_locals_(dop), pipe_(pipe) {}
+
+  PipelineTaskPipe Pipe() override {
+    return [&](ThreadId thread_id,
+               std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+      ARRA_ASSIGN_OR_RAISE(auto result, pipe_->Pipe()(thread_id, std::move(input)));
+      if (!result.IsPipeEven() && !result.IsSourcePipeHasMore() && !result.IsFinished()) {
+        return result;
+      }
+      if (result.GetOutput().has_value()) {
+        thread_locals_[thread_id].batches.push_back(
+            std::move(result.GetOutput().value()));
+      }
+      return OperatorResult::PipeSinkNeedsMore();
+    };
+  }
+
+  std::optional<PipelineTaskDrain> Drain() override {
+    ARRA_DCHECK(!pipe_->Drain().has_value());
+    return [&](ThreadId thread_id) -> arrow::Result<OperatorResult> {
+      if (thread_locals_[thread_id].batches.empty()) {
+        return OperatorResult::Finished(std::nullopt);
+      }
+      auto batch = std::move(thread_locals_[thread_id].batches.front());
+      thread_locals_[thread_id].batches.pop_front();
+      if (thread_locals_[thread_id].batches.empty()) {
+        return OperatorResult::Finished(std::move(batch));
+      } else {
+        return OperatorResult::SourcePipeHasMore(std::move(batch));
+      }
+    };
+  }
+
+  std::unique_ptr<SourceOp> Source() override { return pipe_->Source(); }
+
+ private:
+  PipeOp* pipe_;
+  struct ThreadLocal {
+    std::list<Batch> batches;
+  };
+  std::vector<ThreadLocal> thread_locals_;
+};
+
 class DrainErrorPipe : public ErrorDelegatePipe, public DrainOnlyPipe {
  public:
   DrainErrorPipe(ErrorGenerator* err_gen, size_t dop)
@@ -2185,7 +2230,8 @@ TEST_P(SortTest, SortWithYield) {
 
 INSTANTIATE_TEST_SUITE_P(OperatorTest, SortTest, testing::Range(size_t(1), size_t(43)),
                          [](const auto& param_info) {
-                           return std::to_string(param_info.param);
+                           return std::to_string(param_info.index) + "_" +
+                                  std::to_string(param_info.param);
                          });
 
 class FibonacciTest : public testing::TestWithParam<size_t> {
@@ -2272,44 +2318,75 @@ TEST_P(FibonacciTest, FibonacciWithYield) {
 INSTANTIATE_TEST_SUITE_P(ComplexTest, FibonacciTest,
                          testing::Range(size_t(2), size_t(43)),
                          [](const auto& param_info) {
-                           return std::to_string(param_info.param);
+                           return std::to_string(param_info.index) + "_" +
+                                  std::to_string(param_info.param);
                          });
-
-using PowPipe = PowerSourcePipe;
-using PlusPipe = IdentityPipe;
 
 class RecursivePowPlusPolynomialTest
     : public testing::TestWithParam<std::tuple<size_t, size_t, size_t>> {
  protected:
-  struct Term {
-    Term(size_t a, size_t b)
+  struct SimpleTerm {
+    SimpleTerm(size_t dop, size_t a, size_t b)
         : indeterminate(MemorySource({Batch{1}})), pow(a), coefficient({Batch(b, 1)}) {}
 
-    Term(size_t a, size_t b, std::unique_ptr<Term> indeterminate)
+    SimpleTerm(size_t dop, size_t a, size_t b, std::unique_ptr<SimpleTerm> indeterminate)
         : indeterminate(std::move(indeterminate)), pow(a), coefficient({Batch(b, 1)}) {}
 
-    std::variant<std::unique_ptr<Term>, MemorySource> indeterminate;
-    PowPipe pow;
-    PlusPipe plus;
+    std::variant<std::unique_ptr<SimpleTerm>, MemorySource> indeterminate;
+    PowerSourcePipe pow;
+    IdentityPipe plus;
     MemorySource coefficient;
   };
 
-  std::unique_ptr<Term> MakeTerm(size_t a, size_t b, size_t c) {
+  template <typename Pow, typename Plus>
+  struct DelegateTerm {
+    DelegateTerm(size_t dop, size_t a, size_t b)
+        : indeterminate(MemorySource({Batch{1}})),
+          pow_internal(a),
+          pow(dop, &pow_internal),
+          plus(dop, &plus_internal),
+          coefficient({Batch(b, 1)}) {}
+
+    DelegateTerm(size_t dop, size_t a, size_t b,
+                 std::unique_ptr<DelegateTerm<Pow, Plus>> indeterminate)
+        : indeterminate(std::move(indeterminate)),
+          pow_internal(a),
+          pow(dop, &pow_internal),
+          plus(dop, &plus_internal),
+          coefficient({Batch(b, 1)}) {}
+
+    std::variant<std::unique_ptr<DelegateTerm<Pow, Plus>>, MemorySource> indeterminate;
+    PowerSourcePipe pow_internal;
+    Pow pow;
+    IdentityPipe plus_internal;
+    Plus plus;
+    MemorySource coefficient;
+  };
+  using DrainOnlyTerm = DelegateTerm<DrainOnlyDelegatePipe, DrainOnlyDelegatePipe>;
+  using YieldTerm = DelegateTerm<SpillDelegatePipe, SpillDelegatePipe>;
+  using DrainOnlyPowYieldPlusTerm =
+      DelegateTerm<DrainOnlyDelegatePipe, SpillDelegatePipe>;
+  using YieldPowDrainOnlyPlusTerm =
+      DelegateTerm<SpillDelegatePipe, DrainOnlyDelegatePipe>;
+
+  template <typename Term>
+  std::unique_ptr<Term> MakeTerm(size_t dop, size_t a, size_t b, size_t c) {
     ARRA_DCHECK(a > 0 && b > 0 && c > 0);
     if (c == 1) {
-      return std::make_unique<Term>(a, b);
+      return std::make_unique<Term>(dop, a, b);
     }
-    return std::make_unique<Term>(a, b, MakeTerm(a, b, c - 1));
+    return std::make_unique<Term>(dop, a, b, MakeTerm<Term>(dop, a, b, c - 1));
   }
 
   std::list<PipelinePlex> MakeTopDeepPipelinePlexes(MemorySource& indeterminate,
-                                                    PowPipe& pow, PlusPipe& plus,
+                                                    PipeOp& pow, PipeOp& plus,
                                                     MemorySource& coefficient) {
     return {{&indeterminate, {&pow, &plus}}, {&coefficient, {&plus}}};
   }
 
+  template <typename Term>
   std::list<PipelinePlex> MakeTopDeepPipelinePlexes(std::unique_ptr<Term>& indeterminate,
-                                                    PowPipe& pow, PlusPipe& plus,
+                                                    PipeOp& pow, PipeOp& plus,
                                                     MemorySource& coefficient) {
     auto plexes = std::visit(
         [&](auto&& next_indeterminate) {
@@ -2328,6 +2405,7 @@ class RecursivePowPlusPolynomialTest
     return plexes;
   }
 
+  template <typename Term>
   std::list<PipelinePlex> MakeTopDeepPipelinePlexes(std::unique_ptr<Term>& term) {
     return std::visit(
         [&](auto&& indeterminate) {
@@ -2338,13 +2416,14 @@ class RecursivePowPlusPolynomialTest
   }
 
   std::list<PipelinePlex> MakeBottomDeepPipelinePlexes(MemorySource& indeterminate,
-                                                       PowPipe& pow, PlusPipe& plus,
+                                                       PipeOp& pow, PipeOp& plus,
                                                        MemorySource& coefficient) {
     return {{&coefficient, {&plus}}, {&indeterminate, {&pow, &plus}}};
   }
 
+  template <typename Term>
   std::list<PipelinePlex> MakeBottomDeepPipelinePlexes(
-      std::unique_ptr<Term>& indeterminate, PowPipe& pow, PlusPipe& plus,
+      std::unique_ptr<Term>& indeterminate, PipeOp& pow, PipeOp& plus,
       MemorySource& coefficient) {
     auto plexes = std::visit(
         [&](auto&& next_indeterminate) {
@@ -2363,6 +2442,7 @@ class RecursivePowPlusPolynomialTest
     return plexes;
   }
 
+  template <typename Term>
   std::list<PipelinePlex> MakeBottomDeepPipelinePlexes(std::unique_ptr<Term>& term) {
     return std::visit(
         [&](auto&& indeterminate) {
@@ -2373,7 +2453,7 @@ class RecursivePowPlusPolynomialTest
   }
 
   std::list<PipelinePlex> MakeBushyPipelinePlexes(MemorySource& indeterminate,
-                                                  PowPipe& pow, PlusPipe& plus,
+                                                  PipeOp& pow, PipeOp& plus,
                                                   MemorySource& coefficient,
                                                   bool indeterminate_up) {
     if (indeterminate_up) {
@@ -2383,8 +2463,9 @@ class RecursivePowPlusPolynomialTest
     }
   }
 
+  template <typename Term>
   std::list<PipelinePlex> MakeBushyPipelinePlexes(std::unique_ptr<Term>& indeterminate,
-                                                  PowPipe& pow, PlusPipe& plus,
+                                                  PipeOp& pow, PipeOp& plus,
                                                   MemorySource& coefficient,
                                                   bool indeterminate_up) {
     auto plexes = std::visit(
@@ -2408,6 +2489,7 @@ class RecursivePowPlusPolynomialTest
     return plexes;
   }
 
+  template <typename Term>
   std::list<PipelinePlex> MakeBushyPipelinePlexes(std::unique_ptr<Term>& term,
                                                   bool indeterminate_up) {
     return std::visit(
@@ -2418,10 +2500,12 @@ class RecursivePowPlusPolynomialTest
         term->indeterminate);
   }
 
-  template <typename F>
-  void Polynomial(size_t a, size_t b, size_t c, F&& make_plexes) {
+  template <typename Term>
+  void Polynomial(
+      size_t a, size_t b, size_t c,
+      std::function<std::list<PipelinePlex>(std::unique_ptr<Term>&)> make_plexes) {
     size_t dop = 8;
-    auto term = MakeTerm(a, b, c);
+    auto term = MakeTerm<Term>(dop, a, b, c);
     auto plex_list = make_plexes(term);
     std::vector<PipelinePlex> plexes(plex_list.begin(), plex_list.end());
     MemorySink sink;
@@ -2461,24 +2545,55 @@ class RecursivePowPlusPolynomialTest
 
 TEST_P(RecursivePowPlusPolynomialTest, TopDeep) {
   auto [a, b, c] = GetParam();
-  Polynomial(a, b, c, [&](auto& term) { return this->MakeTopDeepPipelinePlexes(term); });
+  Polynomial<SimpleTerm>(
+      a, b, c, [&](auto& term) { return this->MakeTopDeepPipelinePlexes(term); });
+  Polynomial<DrainOnlyTerm>(
+      a, b, c, [&](auto& term) { return this->MakeTopDeepPipelinePlexes(term); });
+  Polynomial<YieldTerm>(
+      a, b, c, [&](auto& term) { return this->MakeTopDeepPipelinePlexes(term); });
+  Polynomial<DrainOnlyPowYieldPlusTerm>(
+      a, b, c, [&](auto& term) { return this->MakeTopDeepPipelinePlexes(term); });
+  Polynomial<YieldPowDrainOnlyPlusTerm>(
+      a, b, c, [&](auto& term) { return this->MakeTopDeepPipelinePlexes(term); });
 }
 
 TEST_P(RecursivePowPlusPolynomialTest, BottomDeep) {
   auto [a, b, c] = GetParam();
-  Polynomial(a, b, c,
-             [&](auto& term) { return this->MakeBottomDeepPipelinePlexes(term); });
+  Polynomial<SimpleTerm>(
+      a, b, c, [&](auto& term) { return this->MakeBottomDeepPipelinePlexes(term); });
+  Polynomial<DrainOnlyTerm>(
+      a, b, c, [&](auto& term) { return this->MakeBottomDeepPipelinePlexes(term); });
+  Polynomial<YieldTerm>(
+      a, b, c, [&](auto& term) { return this->MakeBottomDeepPipelinePlexes(term); });
+  Polynomial<DrainOnlyPowYieldPlusTerm>(
+      a, b, c, [&](auto& term) { return this->MakeBottomDeepPipelinePlexes(term); });
+  Polynomial<YieldPowDrainOnlyPlusTerm>(
+      a, b, c, [&](auto& term) { return this->MakeBottomDeepPipelinePlexes(term); });
 }
 
 TEST_P(RecursivePowPlusPolynomialTest, Bushy) {
   auto [a, b, c] = GetParam();
-  Polynomial(a, b, c,
-             [&](auto& term) { return this->MakeBushyPipelinePlexes(term, true); });
-  Polynomial(a, b, c,
-             [&](auto& term) { return this->MakeBushyPipelinePlexes(term, false); });
+  Polynomial<SimpleTerm>(
+      a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, true); });
+  Polynomial<SimpleTerm>(
+      a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, false); });
+  Polynomial<DrainOnlyTerm>(
+      a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, true); });
+  Polynomial<DrainOnlyTerm>(
+      a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, false); });
+  Polynomial<YieldTerm>(
+      a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, true); });
+  Polynomial<YieldTerm>(
+      a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, false); });
+  Polynomial<DrainOnlyPowYieldPlusTerm>(
+      a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, true); });
+  Polynomial<DrainOnlyPowYieldPlusTerm>(
+      a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, false); });
+  Polynomial<YieldPowDrainOnlyPlusTerm>(
+      a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, true); });
+  Polynomial<YieldPowDrainOnlyPlusTerm>(
+      a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, false); });
 }
-
-// TODO: Drain/Yield patterns.
 
 INSTANTIATE_TEST_SUITE_P(ComplexTest, RecursivePowPlusPolynomialTest,
                          testing::Combine(testing::Values(1, 2, 3, 4),
@@ -2486,7 +2601,8 @@ INSTANTIATE_TEST_SUITE_P(ComplexTest, RecursivePowPlusPolynomialTest,
                                           testing::Values(1, 2, 4, 8)),
                          [](const auto& param_info) {
                            std::stringstream ss;
-                           ss << "pow_" << std::get<0>(param_info.param) << "_plus_"
+                           ss << param_info.index << "_pow_"
+                              << std::get<0>(param_info.param) << "_plus_"
                               << std::get<1>(param_info.param) << "_for_"
                               << std::get<2>(param_info.param);
                            return ss.str();
