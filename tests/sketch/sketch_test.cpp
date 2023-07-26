@@ -166,6 +166,9 @@ struct PipelinePlex {
 
 using Pipeline = std::pair<std::vector<PipelinePlex>, SinkOp*>;
 
+// TODO: Decouple the pipeline task descriptions from the task execution, so that the execution
+// is flexible to use more advanced and simpler machineries such as coroutine.
+// TODO: The execution of the pipeline task seems bound to the scheduler?
 class PipelinePlexTask {
  public:
   PipelinePlexTask(
@@ -2607,5 +2610,3 @@ INSTANTIATE_TEST_SUITE_P(ComplexTest, RecursivePowPlusPolynomialTest,
                               << std::get<2>(param_info.param);
                            return ss.str();
                          });
-
-// TODO: PowPlusPow tests.
