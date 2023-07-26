@@ -387,7 +387,7 @@ class SyncPipelineTask {
    private:
     arrow::Result<OperatorResult> Pipe(ThreadId thread_id, size_t pipe_id,
                                        std::optional<Batch> input) {
-      for (size_t i = pipe_id; i < plex_.pipes.size(); i++) {
+      for (size_t i = pipe_id; i < plex_.pipes.size(); ++i) {
         auto result = plex_.pipes[i].first(thread_id, std::move(input));
         if (!result.ok()) {
           cancelled = true;
@@ -474,9 +474,9 @@ class SyncPipelineTask {
   std::vector<PipelinePlexTask> tasks_;
 };
 
-class CoPipelineTask {
+class CoroPipelineTask {
  private:
-  struct CoPipelinePlexTask {
+  struct CoroPipelinePlexTask {
     struct Coroutine {
       struct promise_type {
         using Handle = std::coroutine_handle<promise_type>;
@@ -494,8 +494,15 @@ class CoPipelineTask {
         arrow::Result<OperatorResult> current_value_;
       };
 
-      explicit Coroutine(promise_type::Handle handle) : handle_(handle) {}
+      constexpr bool await_ready() const noexcept { return false; }
+      void await_suspend(std::coroutine_handle<>) const {}
+      arrow::Result<OperatorResult> await_resume() const noexcept {
+        return OperatorResult::PipeYield();
+      }
 
+      explicit Coroutine(promise_type::Handle handle) : handle_(handle) {}
+      Coroutine(const Coroutine&) = delete;
+      Coroutine(Coroutine&& coro) : handle_(std::move(coro.handle_)) {}
       ~Coroutine() {
         if (handle_) {
           handle_.destroy();
@@ -512,7 +519,7 @@ class CoPipelineTask {
     };
 
    public:
-    CoPipelinePlexTask(size_t dop, PhysicalPipelinePlex plex)
+    CoroPipelinePlexTask(size_t dop, PhysicalPipelinePlex plex)
         : dop_(dop), plex_(std::move(plex)) {
       std::vector<size_t> drains;
       for (size_t i = 0; i < plex_.pipes.size(); ++i) {
@@ -521,17 +528,22 @@ class CoPipelineTask {
         }
       }
       for (size_t i = 0; i < dop; ++i) {
-        local_states_.emplace_back(ThreadLocalState{drains, MakeCoroutine(i)});
+        local_states_.emplace_back(ThreadLocalState{drains, RunCoroutine(i)});
       }
     }
 
-    CoPipelinePlexTask(const CoPipelinePlexTask& other)
-        : CoPipelinePlexTask(other.dop_, other.plex_) {}
+    CoroPipelinePlexTask(const CoroPipelinePlexTask& other)
+        : CoroPipelinePlexTask(other.dop_, other.plex_) {}
 
-    CoPipelinePlexTask(CoPipelinePlexTask&& other)
-        : CoPipelinePlexTask(other.dop_, std::move(other.plex_)) {}
+    CoroPipelinePlexTask(CoroPipelinePlexTask&& other)
+        : CoroPipelinePlexTask(other.dop_, std::move(other.plex_)) {}
 
-    Coroutine MakeCoroutine(ThreadId thread_id) {
+    arrow::Result<OperatorResult> Run(ThreadId thread_id) {
+      return local_states_[thread_id].coroutine.Run();
+    }
+
+   private:
+    Coroutine RunCoroutine(ThreadId thread_id) {
       while (true) {
         if (cancelled) {
           co_return OperatorResult::Cancelled();
@@ -558,86 +570,32 @@ class CoPipelineTask {
           }
         }
 
-        auto last_output = std::move(result->GetOutput());
-        for (size_t i = 0; i < plex_.pipes.size(); ++i) {
-          auto result = plex_.pipes[i].first(thread_id, std::move(last_output));
-          bool needs_more = false;
-          while (true) {
-            if (result->IsPipeSinkNeedsMore()) {
-              ARRA_DCHECK(result->GetOutput().has_value());
-              last_output = std::move(result->GetOutput());
-              break;
-            } else if (result->IsPipeYield()) {
-              co_yield OperatorResult::PipeYield();
-              result = plex_.pipes[i].first(thread_id, std::nullopt);
-              ARRA_DCHECK(result->IsPipeSinkNeedsMore());
-              result = plex_.pipes[i].first(thread_id, std::nullopt);
-            } else if (result->IsPipeEven()) {
-              ARRA_DCHECK(result->GetOutput().has_value());
-              last_output = std::move(result->GetOutput());
-              break;
-            } else if (result->IsSourcePipeHasMore()) {
-              // co_yield CoPipe(thread_id, i, std::move(last_output));
-              // TODO: How to recursively call coroutine:
-              // https://gist.github.com/polytypic/17ff7693d27d8ccf53ee47beaa166f45
-              co_yield MakeCoroutine(thread_id);
-            }
-            ARRA_DCHECK(result->IsPipeSinkBackpressure());
-            co_yield OperatorResult::PipeSinkBackpressure();
-          }
-        }
+        result = co_await PipeCoroutine(thread_id, 0,
+                                        std::move(std::move(result->GetOutput())));
       }
     }
 
-    Coroutine CoPipe(ThreadId thread_id, size_t pipe_id, std::optional<Batch> input) {
-      co_yield OperatorResult::PipeYield();
-    }
-
-   private:
-    arrow::Result<OperatorResult> Pipe(ThreadId thread_id, size_t pipe_id,
-                                       std::optional<Batch> input) {
-      for (size_t i = pipe_id; i < plex_.pipes.size(); i++) {
+    Coroutine PipeCoroutine(ThreadId thread_id, size_t pipe_id,
+                            std::optional<Batch> input) {
+      for (size_t i = pipe_id; i < plex_.pipes.size(); ++i) {
         auto result = plex_.pipes[i].first(thread_id, std::move(input));
-        if (!result.ok()) {
-          cancelled = true;
-          return result.status();
-        }
-        if (local_states_[thread_id].yield) {
-          ARRA_DCHECK(result->IsPipeSinkNeedsMore());
-          local_states_[thread_id].pipe_stack.push(i);
-          local_states_[thread_id].yield = false;
-          return OperatorResult::PipeSinkNeedsMore();
+        if (result->IsPipeSinkNeedsMore()) {
+          co_return OperatorResult::PipeSinkNeedsMore();
         }
         if (result->IsPipeYield()) {
-          ARRA_DCHECK(!local_states_[thread_id].yield);
-          local_states_[thread_id].pipe_stack.push(i);
-          local_states_[thread_id].yield = true;
-          return OperatorResult::PipeYield();
-        }
-        ARRA_DCHECK(result->IsPipeSinkNeedsMore() || result->IsPipeEven() ||
-                    result->IsSourcePipeHasMore());
-        if (result->IsPipeEven() || result->IsSourcePipeHasMore()) {
-          if (result->IsSourcePipeHasMore()) {
-            local_states_[thread_id].pipe_stack.push(i);
-          }
+          co_yield OperatorResult::PipeYield();
+          result = plex_.pipes[i].first(thread_id, std::nullopt);
+          ARRA_DCHECK(result->IsPipeSinkNeedsMore());
+          result = plex_.pipes[i].first(thread_id, std::nullopt);
+        } else if (result->IsPipeEven()) {
           ARRA_DCHECK(result->GetOutput().has_value());
           input = std::move(result->GetOutput());
-        } else {
-          return OperatorResult::PipeSinkNeedsMore();
+          break;
+        } else if (result->IsSourcePipeHasMore()) {
+          result = co_await PipeCoroutine(thread_id, pipe_id, input);
         }
       }
-
-      auto result = plex_.sink(thread_id, std::move(input));
-      if (!result.ok()) {
-        cancelled = true;
-        return result.status();
-      }
-      ARRA_DCHECK(result->IsPipeSinkNeedsMore() || result->IsSinkBackpressure());
-      if (result->IsSinkBackpressure()) {
-        local_states_[thread_id].backpressure = true;
-        return OperatorResult::SinkBackpressure();
-      }
-      return OperatorResult::PipeSinkNeedsMore();
+      co_return OperatorResult::PipeYield();
     }
 
    private:
@@ -653,13 +611,13 @@ class CoPipelineTask {
   };
 
  public:
-  static CoPipelineTask Make(size_t dop, PhysicalPipeline pipeline) {
+  static CoroPipelineTask Make(size_t dop, PhysicalPipeline pipeline) {
     return {dop, std::move(pipeline)};
   }
 
-  CoPipelineTask(size_t dop, PhysicalPipeline pipeline) {
+  CoroPipelineTask(size_t dop, PhysicalPipeline pipeline) {
     for (auto& plex : pipeline.plexes) {
-      tasks_.push_back(CoPipelinePlexTask(dop, std::move(plex)));
+      tasks_.push_back(CoroPipelinePlexTask(dop, std::move(plex)));
     }
   }
 
@@ -677,7 +635,7 @@ class CoPipelineTask {
   }
 
  private:
-  std::vector<CoPipelinePlexTask> tasks_;
+  std::vector<CoroPipelinePlexTask> tasks_;
 };
 
 template <typename PipelineTask, typename Scheduler>
