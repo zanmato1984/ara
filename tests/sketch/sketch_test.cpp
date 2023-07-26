@@ -6,6 +6,7 @@
 #include <folly/executors/IOThreadPoolExecutor.h>
 #include <folly/futures/Future.h>
 #include <gtest/gtest.h>
+#include <coroutine>
 #include <stack>
 
 #define ARRA_DCHECK ARROW_DCHECK
@@ -471,6 +472,212 @@ class SyncPipelineTask {
 
  private:
   std::vector<PipelinePlexTask> tasks_;
+};
+
+class CoPipelineTask {
+ private:
+  struct CoPipelinePlexTask {
+    struct Coroutine {
+      struct promise_type {
+        using Handle = std::coroutine_handle<promise_type>;
+        Coroutine get_return_object() { return Coroutine{Handle::from_promise(*this)}; }
+        std::suspend_always initial_suspend() { return {}; }
+        std::suspend_always final_suspend() noexcept { return {}; }
+        std::suspend_always yield_value(arrow::Result<OperatorResult>&& value) {
+          current_value_ = std::move(value);
+          return {};
+        }
+        void return_value(arrow::Result<OperatorResult>&& value) {
+          current_value_ = std::move(value);
+        }
+        void unhandled_exception() {}
+        arrow::Result<OperatorResult> current_value_;
+      };
+
+      explicit Coroutine(promise_type::Handle handle) : handle_(handle) {}
+
+      ~Coroutine() {
+        if (handle_) {
+          handle_.destroy();
+        }
+      }
+
+      arrow::Result<OperatorResult> Run() {
+        handle_.resume();
+        return std::move(handle_.promise().current_value_);
+      }
+
+     private:
+      promise_type::Handle handle_;
+    };
+
+   public:
+    CoPipelinePlexTask(size_t dop, PhysicalPipelinePlex plex)
+        : dop_(dop), plex_(std::move(plex)) {
+      std::vector<size_t> drains;
+      for (size_t i = 0; i < plex_.pipes.size(); ++i) {
+        if (plex_.pipes[i].second.has_value()) {
+          drains.push_back(i);
+        }
+      }
+      for (size_t i = 0; i < dop; ++i) {
+        local_states_.emplace_back(ThreadLocalState{drains, MakeCoroutine(i)});
+      }
+    }
+
+    CoPipelinePlexTask(const CoPipelinePlexTask& other)
+        : CoPipelinePlexTask(other.dop_, other.plex_) {}
+
+    CoPipelinePlexTask(CoPipelinePlexTask&& other)
+        : CoPipelinePlexTask(other.dop_, std::move(other.plex_)) {}
+
+    Coroutine MakeCoroutine(ThreadId thread_id) {
+      while (true) {
+        if (cancelled) {
+          co_return OperatorResult::Cancelled();
+        }
+
+        auto result = plex_.source(thread_id);
+        while (true) {
+          if (!result.ok()) {
+            cancelled = true;
+            co_return result.status();
+          }
+          if (result->IsSourceNotReady()) {
+            co_yield OperatorResult::SourceNotReady();
+            result = plex_.source(thread_id);
+          } else if (result->IsFinished()) {
+            if (result->GetOutput().has_value()) {
+              break;
+            }
+            co_return OperatorResult::Finished(std::nullopt);
+          } else {
+            ARRA_DCHECK(result->IsSourcePipeHasMore());
+            ARRA_DCHECK(result->GetOutput().has_value());
+            break;
+          }
+        }
+
+        auto last_output = std::move(result->GetOutput());
+        for (size_t i = 0; i < plex_.pipes.size(); ++i) {
+          auto result = plex_.pipes[i].first(thread_id, std::move(last_output));
+          bool needs_more = false;
+          while (true) {
+            if (result->IsPipeSinkNeedsMore()) {
+              ARRA_DCHECK(result->GetOutput().has_value());
+              last_output = std::move(result->GetOutput());
+              break;
+            } else if (result->IsPipeYield()) {
+              co_yield OperatorResult::PipeYield();
+              result = plex_.pipes[i].first(thread_id, std::nullopt);
+              ARRA_DCHECK(result->IsPipeSinkNeedsMore());
+              result = plex_.pipes[i].first(thread_id, std::nullopt);
+            } else if (result->IsPipeEven()) {
+              ARRA_DCHECK(result->GetOutput().has_value());
+              last_output = std::move(result->GetOutput());
+              break;
+            } else if (result->IsSourcePipeHasMore()) {
+              // co_yield CoPipe(thread_id, i, std::move(last_output));
+              // TODO: How to recursively call coroutine:
+              // https://gist.github.com/polytypic/17ff7693d27d8ccf53ee47beaa166f45
+              co_yield MakeCoroutine(thread_id);
+            }
+            ARRA_DCHECK(result->IsPipeSinkBackpressure());
+            co_yield OperatorResult::PipeSinkBackpressure();
+          }
+        }
+      }
+    }
+
+    Coroutine CoPipe(ThreadId thread_id, size_t pipe_id, std::optional<Batch> input) {
+      co_yield OperatorResult::PipeYield();
+    }
+
+   private:
+    arrow::Result<OperatorResult> Pipe(ThreadId thread_id, size_t pipe_id,
+                                       std::optional<Batch> input) {
+      for (size_t i = pipe_id; i < plex_.pipes.size(); i++) {
+        auto result = plex_.pipes[i].first(thread_id, std::move(input));
+        if (!result.ok()) {
+          cancelled = true;
+          return result.status();
+        }
+        if (local_states_[thread_id].yield) {
+          ARRA_DCHECK(result->IsPipeSinkNeedsMore());
+          local_states_[thread_id].pipe_stack.push(i);
+          local_states_[thread_id].yield = false;
+          return OperatorResult::PipeSinkNeedsMore();
+        }
+        if (result->IsPipeYield()) {
+          ARRA_DCHECK(!local_states_[thread_id].yield);
+          local_states_[thread_id].pipe_stack.push(i);
+          local_states_[thread_id].yield = true;
+          return OperatorResult::PipeYield();
+        }
+        ARRA_DCHECK(result->IsPipeSinkNeedsMore() || result->IsPipeEven() ||
+                    result->IsSourcePipeHasMore());
+        if (result->IsPipeEven() || result->IsSourcePipeHasMore()) {
+          if (result->IsSourcePipeHasMore()) {
+            local_states_[thread_id].pipe_stack.push(i);
+          }
+          ARRA_DCHECK(result->GetOutput().has_value());
+          input = std::move(result->GetOutput());
+        } else {
+          return OperatorResult::PipeSinkNeedsMore();
+        }
+      }
+
+      auto result = plex_.sink(thread_id, std::move(input));
+      if (!result.ok()) {
+        cancelled = true;
+        return result.status();
+      }
+      ARRA_DCHECK(result->IsPipeSinkNeedsMore() || result->IsSinkBackpressure());
+      if (result->IsSinkBackpressure()) {
+        local_states_[thread_id].backpressure = true;
+        return OperatorResult::SinkBackpressure();
+      }
+      return OperatorResult::PipeSinkNeedsMore();
+    }
+
+   private:
+    size_t dop_;
+    PhysicalPipelinePlex plex_;
+
+    struct ThreadLocalState {
+      std::vector<size_t> drains;
+      Coroutine coroutine;
+    };
+    std::vector<ThreadLocalState> local_states_;
+    std::atomic_bool cancelled = false;
+  };
+
+ public:
+  static CoPipelineTask Make(size_t dop, PhysicalPipeline pipeline) {
+    return {dop, std::move(pipeline)};
+  }
+
+  CoPipelineTask(size_t dop, PhysicalPipeline pipeline) {
+    for (auto& plex : pipeline.plexes) {
+      tasks_.push_back(CoPipelinePlexTask(dop, std::move(plex)));
+    }
+  }
+
+  arrow::Result<OperatorResult> Run(ThreadId thread_id) {
+    for (auto& task : tasks_) {
+      ARRA_ASSIGN_OR_RAISE(auto result, task.Run(thread_id));
+      if (result.IsFinished()) {
+        ARRA_DCHECK(!result.GetOutput().has_value());
+      }
+      if (!result.IsFinished() && !result.IsSourceNotReady()) {
+        return result;
+      }
+    }
+    return OperatorResult::Finished(std::nullopt);
+  }
+
+ private:
+  std::vector<CoPipelinePlexTask> tasks_;
 };
 
 template <typename PipelineTask, typename Scheduler>
