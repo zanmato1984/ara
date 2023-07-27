@@ -59,4 +59,22 @@ TEST(CoroTest, Simple) {
   while ((x = c.get_next()) < 10) {
     std::cout << x << "\n";
   }
+  auto d = myCoroutine();
+  int y = 0;
+  while ((y = d.get_next()) < 10) {
+    std::cout << y << "\n";
+  }
+}
+
+TEST(CoroTest, ContainerOfCoro) {
+  std::vector<Generator> coros;
+  for (int i = 0; i < 10; ++i) {
+    coros.emplace_back(myCoroutine());
+  }
+  for (auto& c : coros) {
+    int x = 0;
+    while ((x = c.get_next()) < 10) {
+      std::cout << x << "\n";
+    }
+  }
 }
