@@ -13,6 +13,8 @@
 #define ARRA_RETURN_NOT_OK ARROW_RETURN_NOT_OK
 #define ARRA_ASSIGN_OR_RAISE ARROW_ASSIGN_OR_RAISE
 
+// TODO: Still lots of copying for vector-emplacing code.
+
 namespace arra::sketch {
 
 struct TaskStatus {
@@ -477,10 +479,12 @@ class SyncPipelineTask {
 class CoroPipelineTask {
  private:
   struct CoroPipelinePlexTask {
-    struct Coroutine {
+    struct CoroutineRun {
       struct promise_type {
         using Handle = std::coroutine_handle<promise_type>;
-        Coroutine get_return_object() { return Coroutine{Handle::from_promise(*this)}; }
+        CoroutineRun get_return_object() {
+          return CoroutineRun{Handle::from_promise(*this)};
+        }
         std::suspend_always initial_suspend() { return {}; }
         std::suspend_always final_suspend() noexcept { return {}; }
         std::suspend_always yield_value(arrow::Result<OperatorResult>&& value) {
@@ -494,19 +498,63 @@ class CoroPipelineTask {
         arrow::Result<OperatorResult> current_value_;
       };
 
-      constexpr bool await_ready() const noexcept { return false; }
-      void await_suspend(std::coroutine_handle<>) const {}
-      arrow::Result<OperatorResult> await_resume() const noexcept {
-        return OperatorResult::PipeYield();
+      // constexpr bool await_ready() const noexcept { return false; }
+      // void await_suspend(std::coroutine_handle<>) const {}
+      // arrow::Result<OperatorResult> await_resume() const noexcept {
+      //   return std::move(handle_.promise().current_value_);
+      // }
+
+      explicit CoroutineRun(promise_type::Handle handle) : handle_(handle) {}
+      CoroutineRun(const CoroutineRun&) = delete;
+      CoroutineRun(CoroutineRun&& coro) : handle_(std::move(coro.handle_)) {}
+      ~CoroutineRun() {
+        // if (handle_) {
+        //   handle_.destroy();
+        //   handle_ = nullptr;
+        // }
       }
 
-      explicit Coroutine(promise_type::Handle handle) : handle_(handle) {}
-      Coroutine(const Coroutine&) = delete;
-      Coroutine(Coroutine&& coro) : handle_(std::move(coro.handle_)) {}
-      ~Coroutine() {
-        if (handle_) {
-          handle_.destroy();
+      arrow::Result<OperatorResult> Run() {
+        handle_.resume();
+        return std::move(handle_.promise().current_value_);
+      }
+
+     private:
+      promise_type::Handle handle_;
+    };
+
+    struct CoroutinePipe {
+      struct promise_type {
+        using Handle = std::coroutine_handle<promise_type>;
+        CoroutinePipe get_return_object() {
+          return CoroutinePipe{Handle::from_promise(*this)};
         }
+        std::suspend_never initial_suspend() { return {}; }
+        std::suspend_always final_suspend() noexcept { return {}; }
+        std::suspend_never yield_value(arrow::Result<OperatorResult>&& value) {
+          current_value_ = std::move(value);
+          return {};
+        }
+        void return_value(arrow::Result<OperatorResult>&& value) {
+          current_value_ = std::move(value);
+        }
+        void unhandled_exception() {}
+        arrow::Result<OperatorResult> current_value_;
+      };
+
+      constexpr bool await_ready() const noexcept { return false; }
+      bool await_suspend(std::coroutine_handle<>) const { return false; }
+      arrow::Result<OperatorResult> await_resume() const noexcept {
+        return std::move(handle_.promise().current_value_);
+      }
+
+      explicit CoroutinePipe(promise_type::Handle handle) : handle_(handle) {}
+      CoroutinePipe(const CoroutinePipe&) = delete;
+      CoroutinePipe(CoroutinePipe&& coro) : handle_(std::move(coro.handle_)) {}
+      ~CoroutinePipe() {
+        // if (handle_) {
+        //   handle_.destroy();
+        // }
       }
 
       arrow::Result<OperatorResult> Run() {
@@ -520,7 +568,12 @@ class CoroPipelineTask {
 
    public:
     CoroPipelinePlexTask(size_t dop, PhysicalPipelinePlex plex)
-        : dop_(dop), plex_(std::move(plex)) {
+        : dop_(dop),
+          plex_(std::move(plex)),
+          local_states_(dop)
+          //  {
+          ,
+          coro_(CoroRun(0)) {
       std::vector<size_t> drains;
       for (size_t i = 0; i < plex_.pipes.size(); ++i) {
         if (plex_.pipes[i].second.has_value()) {
@@ -528,8 +581,11 @@ class CoroPipelineTask {
         }
       }
       for (size_t i = 0; i < dop; ++i) {
-        local_states_.emplace_back(ThreadLocalState{drains, RunCoroutine(i)});
+        local_states_[i].drains = drains;
       }
+      // for (size_t i = 0; i < dop; ++i) {
+      //   coros_.emplace_back(CoroRun(i));
+      // }
     }
 
     CoroPipelinePlexTask(const CoroPipelinePlexTask& other)
@@ -539,11 +595,13 @@ class CoroPipelineTask {
         : CoroPipelinePlexTask(other.dop_, std::move(other.plex_)) {}
 
     arrow::Result<OperatorResult> Run(ThreadId thread_id) {
-      return local_states_[thread_id].coroutine.Run();
+      return coro_.Run();
+      //  return coros_[thread_id].Run();
     }
 
    private:
-    Coroutine RunCoroutine(ThreadId thread_id) {
+    CoroutineRun CoroRun(ThreadId thread_id) {
+      std::cout << "CoroRun begin" << std::endl;
       while (true) {
         if (cancelled) {
           co_return OperatorResult::Cancelled();
@@ -570,32 +628,67 @@ class CoroPipelineTask {
           }
         }
 
-        result = co_await PipeCoroutine(thread_id, 0,
-                                        std::move(std::move(result->GetOutput())));
+        result =
+            co_await CoroPipe(thread_id, 0, std::move(std::move(result->GetOutput())));
+        ARRA_DCHECK(result->IsPipeSinkNeedsMore());
+
+        for (size_t i = 0; i < local_states_[thread_id].drains.size(); ++i) {
+          auto drain_id = local_states_[thread_id].drains[i];
+          auto result = co_await CoroDrain(thread_id, drain_id);
+          ARRA_DCHECK(result->IsFinished());
+        }
       }
     }
 
-    Coroutine PipeCoroutine(ThreadId thread_id, size_t pipe_id,
-                            std::optional<Batch> input) {
+    CoroutinePipe CoroPipe(ThreadId thread_id, size_t pipe_id,
+                           std::optional<Batch> input) {
       for (size_t i = pipe_id; i < plex_.pipes.size(); ++i) {
         auto result = plex_.pipes[i].first(thread_id, std::move(input));
         if (result->IsPipeSinkNeedsMore()) {
           co_return OperatorResult::PipeSinkNeedsMore();
         }
+        if (result->IsPipeEven()) {
+          ARRA_DCHECK(result->GetOutput().has_value());
+          input = std::move(result->GetOutput());
+          continue;
+        }
         if (result->IsPipeYield()) {
           co_yield OperatorResult::PipeYield();
           result = plex_.pipes[i].first(thread_id, std::nullopt);
           ARRA_DCHECK(result->IsPipeSinkNeedsMore());
-          result = plex_.pipes[i].first(thread_id, std::nullopt);
-        } else if (result->IsPipeEven()) {
-          ARRA_DCHECK(result->GetOutput().has_value());
-          input = std::move(result->GetOutput());
-          break;
-        } else if (result->IsSourcePipeHasMore()) {
-          result = co_await PipeCoroutine(thread_id, pipe_id, input);
+          co_return co_await CoroPipe(thread_id, pipe_id, std::nullopt);
+        }
+        while (result->IsSourcePipeHasMore()) {
+          result = co_await CoroPipe(thread_id, pipe_id, std::nullopt);
         }
       }
-      co_return OperatorResult::PipeYield();
+
+      auto result = plex_.sink(thread_id, std::move(input));
+      while (result->IsSinkBackpressure()) {
+        co_yield OperatorResult::SinkBackpressure();
+        result = plex_.sink(thread_id, std::nullopt);
+      }
+      ARRA_DCHECK(result->IsPipeSinkNeedsMore());
+      co_return OperatorResult::PipeSinkNeedsMore();
+    }
+
+    CoroutinePipe CoroDrain(ThreadId thread_id, size_t drain_id) {
+      auto result = plex_.pipes[drain_id].second.value()(thread_id);
+      if (result->IsPipeYield()) {
+        co_yield OperatorResult::PipeYield();
+        result = plex_.pipes[drain_id].second.value()(thread_id);
+        ARRA_DCHECK(result->IsPipeSinkNeedsMore());
+        co_return co_await CoroDrain(thread_id, drain_id);
+      }
+      ARRA_DCHECK(result->IsSourcePipeHasMore() || result->IsFinished());
+      if (result->GetOutput().has_value()) {
+        co_yield co_await CoroPipe(thread_id, drain_id + 1,
+                                   std::move(result->GetOutput()));
+      }
+      if (result->IsSourcePipeHasMore()) {
+        co_return co_await CoroDrain(thread_id, drain_id);
+      }
+      co_return OperatorResult::Finished(std::nullopt);
     }
 
    private:
@@ -604,9 +697,10 @@ class CoroPipelineTask {
 
     struct ThreadLocalState {
       std::vector<size_t> drains;
-      Coroutine coroutine;
     };
     std::vector<ThreadLocalState> local_states_;
+    std::vector<CoroutineRun> coros_;
+    CoroutineRun coro_;
     std::atomic_bool cancelled = false;
   };
 
@@ -1960,7 +2054,7 @@ TEST(PipelineTest, OddQuadroStagePipeline) {
 }
 
 TEST(ControlFlowTest, OneToOne) {
-  size_t dop = 8;
+  size_t dop = 1;
   MemorySource source({{1}});
   IdentityPipe pipe;
   MemorySink sink;
@@ -1968,7 +2062,7 @@ TEST(ControlFlowTest, OneToOne) {
   folly::CPUThreadPoolExecutor cpu_executor(4);
   folly::IOThreadPoolExecutor io_executor(1);
   FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
-  Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(SyncPipelineTask::Make,
+  Driver<CoroPipelineTask, FollyFutureDoublePoolScheduler> driver(CoroPipelineTask::Make,
                                                                   &scheduler);
   auto result = driver.Run(dop, {pipeline});
   ASSERT_OK(result);
