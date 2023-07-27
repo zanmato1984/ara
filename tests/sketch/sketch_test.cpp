@@ -1997,7 +1997,17 @@ TEST(PipelineTest, OddQuadroStagePipeline) {
   ASSERT_EQ(stages[3].pipeline.plexes.size(), 1);
 }
 
-TEST(ControlFlowTest, OneToOne) {
+template <typename T>
+class ControlFlowTest : public testing::Test {
+ protected:
+  using PipelineTaskType = T;
+};
+
+using PipelineTaskTypes = ::testing::Types<SyncPipelineTask, CoroPipelineTask>;
+TYPED_TEST_SUITE(ControlFlowTest, PipelineTaskTypes);
+
+TYPED_TEST(ControlFlowTest, OneToOne) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
   size_t dop = 8;
   MemorySource source({{1}});
   IdentityPipe pipe;
@@ -2006,7 +2016,7 @@ TEST(ControlFlowTest, OneToOne) {
   folly::CPUThreadPoolExecutor cpu_executor(4);
   folly::IOThreadPoolExecutor io_executor(1);
   FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
-  Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(SyncPipelineTask::Make,
+  Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(PipelineTaskType::Make,
                                                                   &scheduler);
   auto result = driver.Run(dop, {pipeline});
   ASSERT_OK(result);
@@ -2015,7 +2025,8 @@ TEST(ControlFlowTest, OneToOne) {
   ASSERT_EQ(sink.batches_[0], (Batch{1}));
 }
 
-TEST(ControlFlowTest, OneToThreeFlat) {
+TYPED_TEST(ControlFlowTest, OneToThreeFlat) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
   size_t dop = 8;
   MemorySource source({{1}});
   PowerFlatPipe pipe(3);
@@ -2024,7 +2035,7 @@ TEST(ControlFlowTest, OneToThreeFlat) {
   folly::CPUThreadPoolExecutor cpu_executor(4);
   folly::IOThreadPoolExecutor io_executor(1);
   FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
-  Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(SyncPipelineTask::Make,
+  Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(PipelineTaskType::Make,
                                                                   &scheduler);
   auto result = driver.Run(dop, {pipeline});
   ASSERT_OK(result);
@@ -2033,7 +2044,8 @@ TEST(ControlFlowTest, OneToThreeFlat) {
   ASSERT_EQ(sink.batches_[0], (Batch{1, 1, 1}));
 }
 
-TEST(ControlFlowTest, OneToThreeSliced) {
+TYPED_TEST(ControlFlowTest, OneToThreeSliced) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
   size_t dop = 8;
   MemorySource source({{1}});
   PowerSlicedPipe pipe(dop, 3);
@@ -2042,7 +2054,7 @@ TEST(ControlFlowTest, OneToThreeSliced) {
   folly::CPUThreadPoolExecutor cpu_executor(4);
   folly::IOThreadPoolExecutor io_executor(1);
   FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
-  Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(SyncPipelineTask::Make,
+  Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(PipelineTaskType::Make,
                                                                   &scheduler);
   auto result = driver.Run(dop, {pipeline});
   ASSERT_OK(result);
@@ -2053,7 +2065,8 @@ TEST(ControlFlowTest, OneToThreeSliced) {
   }
 }
 
-TEST(ControlFlowTest, OneToThreeSource) {
+TYPED_TEST(ControlFlowTest, OneToThreeSource) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
   size_t dop = 8;
   MemorySource source({{1}});
   PowerSourcePipe pipe(3);
@@ -2062,7 +2075,7 @@ TEST(ControlFlowTest, OneToThreeSource) {
   folly::CPUThreadPoolExecutor cpu_executor(4);
   folly::IOThreadPoolExecutor io_executor(1);
   FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
-  Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(SyncPipelineTask::Make,
+  Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(PipelineTaskType::Make,
                                                                   &scheduler);
   auto result = driver.Run(dop, {pipeline});
   ASSERT_OK(result);
@@ -2073,7 +2086,8 @@ TEST(ControlFlowTest, OneToThreeSource) {
   }
 }
 
-TEST(ControlFlowTest, AccumulateThree) {
+TYPED_TEST(ControlFlowTest, AccumulateThree) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
   {
     size_t dop = 1;
     DistributedMemorySource source(dop, {{1}, {1}, {1}});
@@ -2083,8 +2097,8 @@ TEST(ControlFlowTest, AccumulateThree) {
     folly::CPUThreadPoolExecutor cpu_executor(4);
     folly::IOThreadPoolExecutor io_executor(1);
     FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
-    Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(
-        SyncPipelineTask::Make, &scheduler);
+    Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(
+        PipelineTaskType::Make, &scheduler);
     auto result = driver.Run(dop, {pipeline});
     ASSERT_OK(result);
     ASSERT_TRUE(result->IsFinished());
@@ -2103,8 +2117,8 @@ TEST(ControlFlowTest, AccumulateThree) {
     folly::CPUThreadPoolExecutor cpu_executor(4);
     folly::IOThreadPoolExecutor io_executor(1);
     FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
-    Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(
-        SyncPipelineTask::Make, &scheduler);
+    Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(
+        PipelineTaskType::Make, &scheduler);
     auto result = driver.Run(dop, {pipeline});
     ASSERT_OK(result);
     ASSERT_TRUE(result->IsFinished());
@@ -2120,7 +2134,8 @@ TEST(ControlFlowTest, AccumulateThree) {
   }
 }
 
-TEST(ControlFlowTest, BasicBackpressure) {
+TYPED_TEST(ControlFlowTest, BasicBackpressure) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
   size_t dop = 8;
   BackpressureContexts ctx(dop);
   InfiniteSource internal_source({});
@@ -2133,7 +2148,7 @@ TEST(ControlFlowTest, BasicBackpressure) {
   folly::CPUThreadPoolExecutor cpu_executor(4);
   folly::IOThreadPoolExecutor io_executor(1);
   FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
-  Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(SyncPipelineTask::Make,
+  Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(PipelineTaskType::Make,
                                                                   &scheduler);
   auto result = driver.Run(dop, {pipeline});
   ASSERT_OK(result);
@@ -2148,7 +2163,8 @@ TEST(ControlFlowTest, BasicBackpressure) {
   }
 }
 
-TEST(ControlFlowTest, BasicError) {
+TYPED_TEST(ControlFlowTest, BasicError) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
   {
     size_t dop = 8;
     InfiniteSource source(Batch{});
@@ -2160,8 +2176,8 @@ TEST(ControlFlowTest, BasicError) {
     folly::CPUThreadPoolExecutor cpu_executor(4);
     folly::IOThreadPoolExecutor io_executor(1);
     FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
-    Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(
-        SyncPipelineTask::Make, &scheduler);
+    Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(
+        PipelineTaskType::Make, &scheduler);
     auto result = driver.Run(dop, {pipeline});
     ASSERT_NOT_OK(result);
     ASSERT_TRUE(result.status().IsInvalid());
@@ -2179,8 +2195,8 @@ TEST(ControlFlowTest, BasicError) {
     folly::CPUThreadPoolExecutor cpu_executor(4);
     folly::IOThreadPoolExecutor io_executor(1);
     FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
-    Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(
-        SyncPipelineTask::Make, &scheduler);
+    Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(
+        PipelineTaskType::Make, &scheduler);
     auto result = driver.Run(dop, {pipeline});
     ASSERT_NOT_OK(result);
     ASSERT_TRUE(result.status().IsInvalid());
@@ -2198,8 +2214,8 @@ TEST(ControlFlowTest, BasicError) {
     folly::CPUThreadPoolExecutor cpu_executor(4);
     folly::IOThreadPoolExecutor io_executor(1);
     FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
-    Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(
-        SyncPipelineTask::Make, &scheduler);
+    Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(
+        PipelineTaskType::Make, &scheduler);
     auto result = driver.Run(dop, {pipeline});
     ASSERT_NOT_OK(result);
     ASSERT_TRUE(result.status().IsInvalid());
@@ -2227,7 +2243,8 @@ class TaskObserver : public FollyFutureDoublePoolScheduler::TaskObserver {
   std::vector<std::unordered_set<std::pair<ThreadId, std::string>>> io_thread_infos_;
 };
 
-TEST(ControlFlowTest, BasicYield) {
+TYPED_TEST(ControlFlowTest, BasicYield) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
   {
     size_t dop = 8;
     MemorySource source({{1}, {1}, {1}});
@@ -2238,8 +2255,8 @@ TEST(ControlFlowTest, BasicYield) {
     folly::CPUThreadPoolExecutor cpu_executor(4);
     folly::IOThreadPoolExecutor io_executor(1);
     FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
-    Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(
-        SyncPipelineTask::Make, &scheduler);
+    Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(
+        PipelineTaskType::Make, &scheduler);
     auto result = driver.Run(dop, {pipeline});
     ASSERT_OK(result);
     ASSERT_EQ(sink.batches_.size(), 3);
@@ -2258,8 +2275,8 @@ TEST(ControlFlowTest, BasicYield) {
     folly::CPUThreadPoolExecutor cpu_executor(4);
     folly::IOThreadPoolExecutor io_executor(1);
     FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
-    Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(
-        SyncPipelineTask::Make, &scheduler);
+    Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(
+        PipelineTaskType::Make, &scheduler);
     auto result = driver.Run(dop, {pipeline});
     ASSERT_OK(result);
     ASSERT_EQ(sink.batches_.size(), 3);
@@ -2282,8 +2299,8 @@ TEST(ControlFlowTest, BasicYield) {
     TaskObserver observer(dop);
     FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor, &observer);
 
-    Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(
-        SyncPipelineTask::Make, &scheduler);
+    Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(
+        PipelineTaskType::Make, &scheduler);
     auto result = driver.Run(dop, {pipeline});
     ASSERT_OK(result);
     ASSERT_EQ(sink.batches_.size(), 4);
@@ -2301,7 +2318,8 @@ TEST(ControlFlowTest, BasicYield) {
   }
 }
 
-TEST(ControlFlowTest, Drain) {
+TYPED_TEST(ControlFlowTest, Drain) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
   size_t dop = 2;
   MemorySource source({{1}, {1}, {1}, {1}});
   DrainOnlyPipe pipe(dop);
@@ -2312,7 +2330,7 @@ TEST(ControlFlowTest, Drain) {
   folly::IOThreadPoolExecutor io_executor(1);
   FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
 
-  Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(SyncPipelineTask::Make,
+  Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(PipelineTaskType::Make,
                                                                   &scheduler);
   auto result = driver.Run(dop, {pipeline});
   ASSERT_OK(result);
@@ -2322,7 +2340,8 @@ TEST(ControlFlowTest, Drain) {
   }
 }
 
-TEST(ControlFlowTest, MultiDrain) {
+TYPED_TEST(ControlFlowTest, MultiDrain) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
   size_t dop = 2;
   MemorySource source({{1}, {1}, {1}, {1}});
   DrainOnlyPipe pipe_1(dop);
@@ -2335,7 +2354,7 @@ TEST(ControlFlowTest, MultiDrain) {
   folly::IOThreadPoolExecutor io_executor(1);
   FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
 
-  Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(SyncPipelineTask::Make,
+  Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(PipelineTaskType::Make,
                                                                   &scheduler);
   auto result = driver.Run(dop, {pipeline});
   ASSERT_OK(result);
@@ -2345,7 +2364,8 @@ TEST(ControlFlowTest, MultiDrain) {
   }
 }
 
-TEST(ControlFlowTest, DrainBackpressure) {
+TYPED_TEST(ControlFlowTest, DrainBackpressure) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
   size_t dop = 1;
   BackpressureContexts ctx(dop);
   DistributedMemorySource source(dop, {{1}, {1}, {1}, {1}});
@@ -2357,7 +2377,7 @@ TEST(ControlFlowTest, DrainBackpressure) {
   folly::CPUThreadPoolExecutor cpu_executor(4);
   folly::IOThreadPoolExecutor io_executor(1);
   FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
-  Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(SyncPipelineTask::Make,
+  Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(PipelineTaskType::Make,
                                                                   &scheduler);
   auto result = driver.Run(dop, {pipeline});
   ASSERT_OK(result);
@@ -2372,7 +2392,8 @@ TEST(ControlFlowTest, DrainBackpressure) {
   }
 }
 
-TEST(ControlFlowTest, DrainError) {
+TYPED_TEST(ControlFlowTest, DrainError) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
   size_t dop = 2;
   MemorySource source({{1}, {1}, {1}, {1}, {1}, {1}, {1}, {1}});
   ErrorGenerator err_gen(7);
@@ -2384,7 +2405,7 @@ TEST(ControlFlowTest, DrainError) {
   folly::IOThreadPoolExecutor io_executor(1);
   FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
 
-  Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(SyncPipelineTask::Make,
+  Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(PipelineTaskType::Make,
                                                                   &scheduler);
   auto result = driver.Run(dop, {pipeline});
   ASSERT_NOT_OK(result);
@@ -2392,7 +2413,8 @@ TEST(ControlFlowTest, DrainError) {
   ASSERT_EQ(result.status().message(), "7");
 }
 
-TEST(ControlFlowTest, DrainYield) {
+TYPED_TEST(ControlFlowTest, DrainYield) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
   size_t dop = 8;
   MemorySource source({{1}, {1}, {1}, {1}});
   DrainOnlyPipe internal_pipe(dop);
@@ -2406,7 +2428,7 @@ TEST(ControlFlowTest, DrainYield) {
   TaskObserver observer(dop);
   FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor, &observer);
 
-  Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(SyncPipelineTask::Make,
+  Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(PipelineTaskType::Make,
                                                                   &scheduler);
   auto result = driver.Run(dop, {pipeline});
   ASSERT_OK(result);
@@ -2424,14 +2446,14 @@ TEST(ControlFlowTest, DrainYield) {
   ASSERT_EQ(io_thread_info.begin()->second.substr(0, 12), "IOThreadPool");
 }
 
-TEST(ControlFlowTest, ErrorAfterBackpressure) {}
-TEST(ControlFlowTest, ErrorAfterDrainBackpressure) {}
-TEST(ControlFlowTest, ErrorAfterYield) {}
-TEST(ControlFlowTest, ErrorAfterDrainYield) {}
-TEST(ControlFlowTest, BackpressureAfterYield) {}
-TEST(ControlFlowTest, BackpressureAfterDrainYield) {}
-TEST(ControlFlowTest, YieldAfterBackpressure) {}
-TEST(ControlFlowTest, YieldAfterDrainBackpressure) {}
+TYPED_TEST(ControlFlowTest, ErrorAfterBackpressure) {}
+TYPED_TEST(ControlFlowTest, ErrorAfterDrainBackpressure) {}
+TYPED_TEST(ControlFlowTest, ErrorAfterYield) {}
+TYPED_TEST(ControlFlowTest, ErrorAfterDrainYield) {}
+TYPED_TEST(ControlFlowTest, BackpressureAfterYield) {}
+TYPED_TEST(ControlFlowTest, BackpressureAfterDrainYield) {}
+TYPED_TEST(ControlFlowTest, YieldAfterBackpressure) {}
+TYPED_TEST(ControlFlowTest, YieldAfterDrainBackpressure) {}
 
 class SortTest : public testing::TestWithParam<size_t> {
  protected:
