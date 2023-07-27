@@ -479,82 +479,37 @@ class SyncPipelineTask {
 class CoroPipelineTask {
  private:
   struct CoroPipelinePlexTask {
-    struct CoroutineRun {
+    template <typename InitialSuspend>
+    struct Coroutine {
       struct promise_type {
         using Handle = std::coroutine_handle<promise_type>;
-        CoroutineRun get_return_object() {
-          return CoroutineRun{Handle::from_promise(*this)};
-        }
-        std::suspend_always initial_suspend() { return {}; }
+        Coroutine get_return_object() { return Coroutine{Handle::from_promise(*this)}; }
+        InitialSuspend initial_suspend() noexcept { return {}; }
         std::suspend_always final_suspend() noexcept { return {}; }
-        std::suspend_always yield_value(arrow::Result<OperatorResult>&& value) {
+        std::suspend_always yield_value(arrow::Result<OperatorResult>&& value) noexcept {
           current_value_ = std::move(value);
           return {};
         }
-        void return_value(arrow::Result<OperatorResult>&& value) {
+        void return_value(arrow::Result<OperatorResult>&& value) noexcept {
           current_value_ = std::move(value);
         }
         void unhandled_exception() {}
         arrow::Result<OperatorResult> current_value_;
       };
 
-      // constexpr bool await_ready() const noexcept { return false; }
-      // void await_suspend(std::coroutine_handle<>) const {}
-      // arrow::Result<OperatorResult> await_resume() const noexcept {
-      //   return std::move(handle_.promise().current_value_);
-      // }
-
-      explicit CoroutineRun(promise_type::Handle handle) : handle_(handle) {}
-      CoroutineRun(const CoroutineRun&) = delete;
-      CoroutineRun(CoroutineRun&& coro) : handle_(std::move(coro.handle_)) {}
-      ~CoroutineRun() {
-        // if (handle_) {
-        //   handle_.destroy();
-        //   handle_ = nullptr;
-        // }
-      }
-
-      arrow::Result<OperatorResult> Run() {
-        handle_.resume();
-        return std::move(handle_.promise().current_value_);
-      }
-
-     private:
-      promise_type::Handle handle_;
-    };
-
-    struct CoroutinePipe {
-      struct promise_type {
-        using Handle = std::coroutine_handle<promise_type>;
-        CoroutinePipe get_return_object() {
-          return CoroutinePipe{Handle::from_promise(*this)};
-        }
-        std::suspend_never initial_suspend() { return {}; }
-        std::suspend_always final_suspend() noexcept { return {}; }
-        std::suspend_never yield_value(arrow::Result<OperatorResult>&& value) {
-          current_value_ = std::move(value);
-          return {};
-        }
-        void return_value(arrow::Result<OperatorResult>&& value) {
-          current_value_ = std::move(value);
-        }
-        void unhandled_exception() {}
-        arrow::Result<OperatorResult> current_value_;
-      };
-
-      constexpr bool await_ready() const noexcept { return false; }
-      bool await_suspend(std::coroutine_handle<>) const { return false; }
+      constexpr bool await_ready() const noexcept { return true; }
+      constexpr void await_suspend(std::coroutine_handle<>) const noexcept {}
       arrow::Result<OperatorResult> await_resume() const noexcept {
         return std::move(handle_.promise().current_value_);
       }
 
-      explicit CoroutinePipe(promise_type::Handle handle) : handle_(handle) {}
-      CoroutinePipe(const CoroutinePipe&) = delete;
-      CoroutinePipe(CoroutinePipe&& coro) : handle_(std::move(coro.handle_)) {}
-      ~CoroutinePipe() {
-        // if (handle_) {
-        //   handle_.destroy();
-        // }
+      Coroutine(typename promise_type::Handle handle) : handle_(handle) {}
+      Coroutine(const Coroutine&) = delete;
+      Coroutine(Coroutine&& coro) : handle_(coro.handle_) { coro.handle_ = nullptr; }
+      ~Coroutine() {
+        if (handle_) {
+          handle_.destroy();
+        }
       }
 
       arrow::Result<OperatorResult> Run() {
@@ -563,17 +518,12 @@ class CoroPipelineTask {
       }
 
      private:
-      promise_type::Handle handle_;
+      typename promise_type::Handle handle_;
     };
 
    public:
     CoroPipelinePlexTask(size_t dop, PhysicalPipelinePlex plex)
-        : dop_(dop),
-          plex_(std::move(plex)),
-          local_states_(dop)
-          //  {
-          ,
-          coro_(CoroRun(0)) {
+        : dop_(dop), plex_(std::move(plex)) {
       std::vector<size_t> drains;
       for (size_t i = 0; i < plex_.pipes.size(); ++i) {
         if (plex_.pipes[i].second.has_value()) {
@@ -581,11 +531,8 @@ class CoroPipelineTask {
         }
       }
       for (size_t i = 0; i < dop; ++i) {
-        local_states_[i].drains = drains;
+        local_states_.emplace_back(ThreadLocalState{drains, CoroRun(i)});
       }
-      // for (size_t i = 0; i < dop; ++i) {
-      //   coros_.emplace_back(CoroRun(i));
-      // }
     }
 
     CoroPipelinePlexTask(const CoroPipelinePlexTask& other)
@@ -595,13 +542,11 @@ class CoroPipelineTask {
         : CoroPipelinePlexTask(other.dop_, std::move(other.plex_)) {}
 
     arrow::Result<OperatorResult> Run(ThreadId thread_id) {
-      return coro_.Run();
-      //  return coros_[thread_id].Run();
+      return local_states_[thread_id].coroutine.Run();
     }
 
    private:
-    CoroutineRun CoroRun(ThreadId thread_id) {
-      std::cout << "CoroRun begin" << std::endl;
+    Coroutine<std::suspend_always> CoroRun(ThreadId thread_id) {
       while (true) {
         if (cancelled) {
           co_return OperatorResult::Cancelled();
@@ -640,8 +585,8 @@ class CoroPipelineTask {
       }
     }
 
-    CoroutinePipe CoroPipe(ThreadId thread_id, size_t pipe_id,
-                           std::optional<Batch> input) {
+    Coroutine<std::suspend_never> CoroPipe(ThreadId thread_id, size_t pipe_id,
+                                           std::optional<Batch> input) {
       for (size_t i = pipe_id; i < plex_.pipes.size(); ++i) {
         auto result = plex_.pipes[i].first(thread_id, std::move(input));
         if (result->IsPipeSinkNeedsMore()) {
@@ -672,7 +617,7 @@ class CoroPipelineTask {
       co_return OperatorResult::PipeSinkNeedsMore();
     }
 
-    CoroutinePipe CoroDrain(ThreadId thread_id, size_t drain_id) {
+    Coroutine<std::suspend_never> CoroDrain(ThreadId thread_id, size_t drain_id) {
       auto result = plex_.pipes[drain_id].second.value()(thread_id);
       if (result->IsPipeYield()) {
         co_yield OperatorResult::PipeYield();
@@ -697,10 +642,9 @@ class CoroPipelineTask {
 
     struct ThreadLocalState {
       std::vector<size_t> drains;
+      Coroutine<std::suspend_always> coroutine;
     };
     std::vector<ThreadLocalState> local_states_;
-    std::vector<CoroutineRun> coros_;
-    CoroutineRun coro_;
     std::atomic_bool cancelled = false;
   };
 
@@ -2054,7 +1998,7 @@ TEST(PipelineTest, OddQuadroStagePipeline) {
 }
 
 TEST(ControlFlowTest, OneToOne) {
-  size_t dop = 1;
+  size_t dop = 8;
   MemorySource source({{1}});
   IdentityPipe pipe;
   MemorySink sink;
@@ -2062,7 +2006,7 @@ TEST(ControlFlowTest, OneToOne) {
   folly::CPUThreadPoolExecutor cpu_executor(4);
   folly::IOThreadPoolExecutor io_executor(1);
   FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
-  Driver<CoroPipelineTask, FollyFutureDoublePoolScheduler> driver(CoroPipelineTask::Make,
+  Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(SyncPipelineTask::Make,
                                                                   &scheduler);
   auto result = driver.Run(dop, {pipeline});
   ASSERT_OK(result);
