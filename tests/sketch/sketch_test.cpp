@@ -548,7 +548,7 @@ class CoroPipelineTask {
    private:
     Coroutine<std::suspend_always> CoroRun(ThreadId thread_id) {
       bool source_done = false;
-      while (source_done) {
+      while (!source_done) {
         if (cancelled) {
           co_return OperatorResult::Cancelled();
         }
@@ -581,7 +581,7 @@ class CoroPipelineTask {
       for (size_t i = 0; i < local_states_[thread_id].drains.size(); ++i) {
         auto drain_id = local_states_[thread_id].drains[i];
         auto result = co_await CoroDrain(thread_id, drain_id);
-        ARRA_DCHECK(result->IsPipeSinkNeedsMore());
+        ARRA_DCHECK(result->IsPipeSinkNeedsMore() || result->IsFinished());
       }
 
       co_return OperatorResult::Finished(std::nullopt);
@@ -2093,28 +2093,28 @@ TYPED_TEST(ControlFlowTest, OneToThreeSource) {
 
 TYPED_TEST(ControlFlowTest, AccumulateThree) {
   using PipelineTaskType = typename TestFixture::PipelineTaskType;
-  // {
-  //   size_t dop = 1;
-  //   DistributedMemorySource source(dop, {{1}, {1}, {1}});
-  //   AccumulatePipe pipe(dop, 3);
-  //   MemorySink sink;
-  //   LogicalPipeline pipeline{{{&source, {&pipe}}}, &sink};
-  //   folly::CPUThreadPoolExecutor cpu_executor(4);
-  //   folly::IOThreadPoolExecutor io_executor(1);
-  //   FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
-  //   Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(
-  //       PipelineTaskType::Make, &scheduler);
-  //   auto result = driver.Run(dop, {pipeline});
-  //   ASSERT_OK(result);
-  //   ASSERT_TRUE(result->IsFinished());
-  //   ASSERT_EQ(sink.batches_.size(), dop);
-  //   for (size_t i = 0; i < dop; ++i) {
-  //     ASSERT_EQ(sink.batches_[i], (Batch{1, 1, 1}));
-  //   }
-  // }
-
   {
     size_t dop = 1;
+    DistributedMemorySource source(dop, {{1}, {1}, {1}});
+    AccumulatePipe pipe(dop, 3);
+    MemorySink sink;
+    LogicalPipeline pipeline{{{&source, {&pipe}}}, &sink};
+    folly::CPUThreadPoolExecutor cpu_executor(4);
+    folly::IOThreadPoolExecutor io_executor(1);
+    FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+    Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(
+        PipelineTaskType::Make, &scheduler);
+    auto result = driver.Run(dop, {pipeline});
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsFinished());
+    ASSERT_EQ(sink.batches_.size(), dop);
+    for (size_t i = 0; i < dop; ++i) {
+      ASSERT_EQ(sink.batches_[i], (Batch{1, 1, 1}));
+    }
+  }
+
+  {
+    size_t dop = 8;
     DistributedMemorySource source(dop, {{1}, {1}, {1}, {1}, {1}});
     AccumulatePipe pipe(dop, 3);
     MemorySink sink;
