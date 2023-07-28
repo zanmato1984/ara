@@ -78,3 +78,63 @@ TEST(CoroTest, ContainerOfCoro) {
     }
   }
 }
+
+struct CoroFoo {
+  struct promise_type {
+    using Handle = std::coroutine_handle<promise_type>;
+    CoroFoo get_return_object() { return CoroFoo{Handle::from_promise(*this)}; }
+    std::suspend_always initial_suspend() noexcept { return {}; }
+    std::suspend_always final_suspend() noexcept { return {}; }
+    std::suspend_always yield_value(int value) noexcept {
+      value_ = value;
+      return {};
+    }
+    void return_value(int value) noexcept { value_ = value; }
+    void unhandled_exception() {}
+    int value_;
+  };
+
+  CoroFoo(typename promise_type::Handle handle) : handle_(handle) {}
+  CoroFoo(const CoroFoo&) = delete;
+  CoroFoo(CoroFoo&& coro) : handle_(coro.handle_) {
+    coro.handle_ = nullptr;
+  }
+  ~CoroFoo() {
+    if (handle_) {
+      handle_.destroy();
+    }
+  }
+
+  typename promise_type::Handle handle_;
+};
+
+struct CoroBar {
+  struct promise_type {
+    using Handle = std::coroutine_handle<promise_type>;
+    CoroBar get_return_object() { return CoroBar{Handle::from_promise(*this)}; }
+    std::suspend_never initial_suspend() noexcept { return {}; }
+    std::suspend_always final_suspend() noexcept { return {}; }
+    std::suspend_always yield_value(int value) noexcept {
+      value_ = value;
+      return {};
+    }
+    void return_value(int value) noexcept { value_ = value; }
+    void unhandled_exception() {}
+    std::optional<int> value_;
+  };
+
+  constexpr bool await_ready() const noexcept { return handle_.promise().value_.has_value(); }
+  constexpr void await_suspend(std::coroutine_handle<>) const noexcept {}
+  int await_resume() const noexcept { return handle_.promise().value_; }
+
+  CoroBar(typename promise_type::Handle handle) : handle_(handle) {}
+  CoroBar(const CoroBar&) = delete;
+  CoroBar(CoroBar&& coro) : handle_(coro.handle_) { coro.handle_ = nullptr; }
+  ~CoroBar() {
+    if (handle_) {
+      handle_.destroy();
+    }
+  }
+
+  typename promise_type::Handle handle_;
+};

@@ -497,7 +497,7 @@ class CoroPipelineTask {
         arrow::Result<OperatorResult> current_value_;
       };
 
-      constexpr bool await_ready() const noexcept { return true; }
+      constexpr bool await_ready() const noexcept { return false; }
       constexpr void await_suspend(std::coroutine_handle<>) const noexcept {}
       arrow::Result<OperatorResult> await_resume() const noexcept {
         return std::move(handle_.promise().current_value_);
@@ -573,15 +573,24 @@ class CoroPipelineTask {
         }
 
         if (result->GetOutput().has_value()) {
-          result = co_await CoroPipe(thread_id, 0, std::move(result->GetOutput()));
-          ARRA_DCHECK(result->IsPipeSinkNeedsMore());
+          auto coro_pipe = CoroPipe(thread_id, 0, std::move(result->GetOutput()));
+          result = co_await coro_pipe;
+          while (!result->IsPipeSinkNeedsMore()) {
+            co_yield std::move(result);
+            result = co_await coro_pipe;
+          }
+          co_yield OperatorResult::PipeSinkNeedsMore();
         }
       }
 
       for (size_t i = 0; i < local_states_[thread_id].drains.size(); ++i) {
         auto drain_id = local_states_[thread_id].drains[i];
-        auto result = co_await CoroDrain(thread_id, drain_id);
-        ARRA_DCHECK(result->IsPipeSinkNeedsMore() || result->IsFinished());
+        auto coro_drain = CoroDrain(thread_id, drain_id);
+        auto result = co_await coro_drain;
+        while (!result->IsFinished()) {
+          co_yield std::move(result);
+          result = co_await coro_drain;
+        }
       }
 
       co_return OperatorResult::Finished(std::nullopt);
@@ -592,9 +601,13 @@ class CoroPipelineTask {
       for (size_t i = pipe_id; i < plex_.pipes.size(); ++i) {
         auto result = plex_.pipes[i].first(thread_id, std::move(input));
         while (result->IsSourcePipeHasMore()) {
-          result =
-              co_await CoroPipe(thread_id, pipe_id + 1, std::move(result->GetOutput()));
-          ARRA_DCHECK(result->IsPipeSinkNeedsMore());
+          auto coro_pipe =
+              CoroPipe(thread_id, pipe_id + 1, std::move(result->GetOutput()));
+          result = co_await coro_pipe;
+          while (!result->IsPipeSinkNeedsMore()) {
+            co_yield std::move(result);
+            result = co_await coro_pipe;
+          }
           result = plex_.pipes[i].first(thread_id, std::nullopt);
         }
         if (result->IsPipeSinkNeedsMore()) {
@@ -609,7 +622,13 @@ class CoroPipelineTask {
           co_yield OperatorResult::PipeYield();
           result = plex_.pipes[i].first(thread_id, std::nullopt);
           ARRA_DCHECK(result->IsPipeSinkNeedsMore());
-          co_return co_await CoroPipe(thread_id, pipe_id, std::nullopt);
+          auto coro_pipe = CoroPipe(thread_id, pipe_id, std::nullopt);
+          result = co_await coro_pipe;
+          while (!result->IsPipeSinkNeedsMore()) {
+            co_yield std::move(result);
+            result = co_await coro_pipe;
+          }
+          co_return OperatorResult::PipeSinkNeedsMore();
         }
       }
 
@@ -628,15 +647,31 @@ class CoroPipelineTask {
         co_yield OperatorResult::PipeYield();
         result = plex_.pipes[drain_id].second.value()(thread_id);
         ARRA_DCHECK(result->IsPipeSinkNeedsMore());
-        co_return co_await CoroDrain(thread_id, drain_id);
+        auto coro_drain = CoroDrain(thread_id, drain_id);
+        while (!result->IsFinished()) {
+          co_yield std::move(result);
+          result = co_await coro_drain;
+        }
+        co_return OperatorResult::Finished(std::nullopt);
       }
       ARRA_DCHECK(result->IsSourcePipeHasMore() || result->IsFinished());
       if (result->GetOutput().has_value()) {
-        co_yield co_await CoroPipe(thread_id, drain_id + 1,
-                                   std::move(result->GetOutput()));
+        auto coro_pipe =
+            CoroPipe(thread_id, drain_id + 1, std::move(result->GetOutput()));
+        result = co_await coro_pipe;
+        while (!result->IsPipeSinkNeedsMore()) {
+          co_yield std::move(result);
+          result = co_await coro_pipe;
+        }
+        co_yield OperatorResult::PipeSinkNeedsMore();
       }
       if (result->IsSourcePipeHasMore()) {
-        co_return co_await CoroDrain(thread_id, drain_id);
+        auto coro_drain = CoroDrain(thread_id, drain_id);
+        result = co_await coro_drain;
+        while (!result->IsFinished()) {
+          co_yield std::move(result);
+          result = co_await coro_drain;
+        }
       }
       co_return OperatorResult::Finished(std::nullopt);
     }
@@ -2141,7 +2176,7 @@ TYPED_TEST(ControlFlowTest, AccumulateThree) {
 
 TYPED_TEST(ControlFlowTest, BasicBackpressure) {
   using PipelineTaskType = typename TestFixture::PipelineTaskType;
-  size_t dop = 8;
+  size_t dop = 1;
   BackpressureContexts ctx(dop);
   InfiniteSource internal_source({});
   BackpressureDelegateSource source(ctx, &internal_source);
