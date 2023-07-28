@@ -96,13 +96,16 @@ struct CoroFoo {
 
   CoroFoo(typename promise_type::Handle handle) : handle_(handle) {}
   CoroFoo(const CoroFoo&) = delete;
-  CoroFoo(CoroFoo&& coro) : handle_(coro.handle_) {
-    coro.handle_ = nullptr;
-  }
+  CoroFoo(CoroFoo&& coro) : handle_(coro.handle_) { coro.handle_ = nullptr; }
   ~CoroFoo() {
     if (handle_) {
       handle_.destroy();
     }
+  }
+
+  int Run() {
+    handle_.resume();
+    return handle_.promise().value_;
   }
 
   typename promise_type::Handle handle_;
@@ -112,7 +115,7 @@ struct CoroBar {
   struct promise_type {
     using Handle = std::coroutine_handle<promise_type>;
     CoroBar get_return_object() { return CoroBar{Handle::from_promise(*this)}; }
-    std::suspend_never initial_suspend() noexcept { return {}; }
+    std::suspend_always initial_suspend() noexcept { return {}; }
     std::suspend_always final_suspend() noexcept { return {}; }
     std::suspend_always yield_value(int value) noexcept {
       value_ = value;
@@ -120,11 +123,11 @@ struct CoroBar {
     }
     void return_value(int value) noexcept { value_ = value; }
     void unhandled_exception() {}
-    std::optional<int> value_;
+    int value_;
   };
 
-  constexpr bool await_ready() const noexcept { return handle_.promise().value_.has_value(); }
-  constexpr void await_suspend(std::coroutine_handle<>) const noexcept {}
+  constexpr bool await_ready() const noexcept { return false; }
+  constexpr bool await_suspend(std::coroutine_handle<>) const noexcept { return true; }
   int await_resume() const noexcept { return handle_.promise().value_; }
 
   CoroBar(typename promise_type::Handle handle) : handle_(handle) {}
@@ -136,5 +139,39 @@ struct CoroBar {
     }
   }
 
+  int Run() {
+    handle_.resume();
+    return handle_.promise().value_;
+  }
+
   typename promise_type::Handle handle_;
 };
+
+CoroBar Bar(int n) {
+  co_yield n;
+  co_yield n + 1;
+  co_return n + 2;
+}
+
+CoroFoo Foo(int n) {
+  int i = 0;
+  while (i < n) {
+    auto bar = Bar(i);
+    while (!bar.handle_.done()) {
+      auto temp = bar.Run();
+      co_yield temp;
+    }
+    i += 3;
+  }
+  co_return i;
+}
+
+auto foo = Foo(10);
+
+void Func() { std::cout << foo.Run() << std::endl; }
+
+TEST(CoroTest, YieldInAwait) {
+  while (!foo.handle_.done()) {
+    Func();
+  }
+}
