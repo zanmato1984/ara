@@ -540,6 +540,9 @@ class CoroPipelineTask {
       if (cancelled) {
         return OperatorResult::Cancelled();
       }
+      if (local_states_[thread_id].coroutine.Done()) {
+        return OperatorResult::Finished(std::nullopt);
+      }
       return local_states_[thread_id].coroutine.Run();
     }
 
@@ -2994,3 +2997,5 @@ INSTANTIATE_TEST_SUITE_P(ComplexTest, RecursivePowPlusPolynomialTest,
                               << std::get<2>(param_info.param);
                            return ss.str();
                          });
+
+// TODO: Pipeline task multiplex test.
