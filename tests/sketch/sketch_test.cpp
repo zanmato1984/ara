@@ -602,8 +602,7 @@ class CoroPipelineTask {
           co_return result.status();
         }
         while (result->IsSourcePipeHasMore()) {
-          auto coro_pipe =
-              CoroPipe(thread_id, pipe_id + 1, std::move(result->GetOutput()));
+          auto coro_pipe = CoroPipe(thread_id, i + 1, std::move(result->GetOutput()));
           while (!coro_pipe.Done()) {
             auto result = coro_pipe.Run();
             co_yield std::move(result);
@@ -630,7 +629,8 @@ class CoroPipelineTask {
             co_return result.status();
           }
           ARRA_DCHECK(result->IsPipeSinkNeedsMore());
-          auto coro_pipe = CoroPipe(thread_id, pipe_id, std::nullopt);
+          co_yield OperatorResult::PipeSinkNeedsMore();
+          auto coro_pipe = CoroPipe(thread_id, i, std::nullopt);
           while (true) {
             auto result = coro_pipe.Run();
             if (coro_pipe.Done()) {
@@ -1037,6 +1037,25 @@ class DistributedMemorySource : public SourceOp {
     std::list<Batch> batches_;
   };
   std::vector<ThreadLocal> thread_locals_;
+};
+
+class SlowDelegateSource : public SourceOp {
+ public:
+  SlowDelegateSource(size_t slowness, SourceOp* source)
+      : slowness_(slowness), source_(source) {}
+
+  PipelineTaskSource Source() override {
+    // TODO: Implement.
+    return source_->Source();
+  }
+
+  TaskGroups Frontend() override { return source_->Frontend(); }
+
+  TaskGroups Backend() override { return source_->Backend(); }
+
+ private:
+  size_t slowness_;
+  SourceOp* source_;
 };
 
 class BlackHoleSink : public SinkOp {
@@ -2508,6 +2527,7 @@ TYPED_TEST(ControlFlowTest, DrainYield) {
   ASSERT_EQ(io_thread_info.begin()->second.substr(0, 12), "IOThreadPool");
 }
 
+// TODO: Combination of HasMore/NeedsMore with Drain/Backpressure/Yield.
 TYPED_TEST(ControlFlowTest, ErrorAfterBackpressure) {}
 TYPED_TEST(ControlFlowTest, ErrorAfterDrainBackpressure) {}
 TYPED_TEST(ControlFlowTest, ErrorAfterYield) {}
