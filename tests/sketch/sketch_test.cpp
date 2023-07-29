@@ -694,7 +694,7 @@ class CoroPipelineTask {
           co_yield std::move(result);
         }
       }
-      co_return OperatorResult::Finished(std::nullopt);
+      co_return OperatorResult::PipeSinkNeedsMore();
     }
 
    private:
