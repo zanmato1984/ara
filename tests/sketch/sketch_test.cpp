@@ -659,42 +659,34 @@ class CoroPipelineTask {
     }
 
     Coroutine CoroDrain(ThreadId thread_id, size_t drain_id) {
-      auto result = plex_.pipes[drain_id].second.value()(thread_id);
-      if (!result.ok()) {
-        cancelled = true;
-        co_return result.status();
-      }
-      if (result->IsPipeYield()) {
-        co_yield OperatorResult::PipeYield();
-        result = plex_.pipes[drain_id].second.value()(thread_id);
+      while (true) {
+        auto result = plex_.pipes[drain_id].second.value()(thread_id);
         if (!result.ok()) {
           cancelled = true;
           co_return result.status();
         }
-        ARRA_DCHECK(result->IsPipeSinkNeedsMore());
-        auto coro_drain = CoroDrain(thread_id, drain_id);
-        while (true) {
-          auto result = coro_drain.Run();
-          if (coro_drain.Done()) {
-            co_return std::move(result);
+        if (result->IsPipeYield()) {
+          co_yield OperatorResult::PipeYield();
+          result = plex_.pipes[drain_id].second.value()(thread_id);
+          if (!result.ok()) {
+            cancelled = true;
+            co_return result.status();
           }
-          co_yield std::move(result);
+          ARRA_DCHECK(result->IsPipeSinkNeedsMore());
+          co_yield OperatorResult::PipeSinkNeedsMore();
+          continue;
         }
-      }
-      ARRA_DCHECK(result->IsSourcePipeHasMore() || result->IsFinished());
-      if (result->GetOutput().has_value()) {
-        auto coro_pipe =
-            CoroPipe(thread_id, drain_id + 1, std::move(result->GetOutput()));
-        while (!coro_pipe.Done()) {
-          auto result = coro_pipe.Run();
-          co_yield std::move(result);
+        ARRA_DCHECK(result->IsSourcePipeHasMore() || result->IsFinished());
+        if (result->GetOutput().has_value()) {
+          auto coro_pipe =
+              CoroPipe(thread_id, drain_id + 1, std::move(result->GetOutput()));
+          while (!coro_pipe.Done()) {
+            auto result = coro_pipe.Run();
+            co_yield std::move(result);
+          }
         }
-      }
-      if (result->IsSourcePipeHasMore()) {
-        auto coro_drain = CoroDrain(thread_id, drain_id);
-        while (!coro_drain.Done()) {
-          auto result = coro_drain.Run();
-          co_yield std::move(result);
+        if (result->IsFinished()) {
+          co_return OperatorResult::PipeSinkNeedsMore();
         }
       }
       co_return OperatorResult::PipeSinkNeedsMore();
