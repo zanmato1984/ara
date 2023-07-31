@@ -1617,7 +1617,6 @@ class SpillDelegatePipe : public PipeOp {
         thread_locals_[thread_id].result = std::nullopt;
         return result;
       }
-      ARRA_DCHECK(input.has_value());
       ARRA_ASSIGN_OR_RAISE(thread_locals_[thread_id].result,
                            pipe_->Pipe()(thread_id, std::move(input)));
       thread_locals_[thread_id].spilling = true;
@@ -2602,8 +2601,8 @@ TYPED_TEST(ControlFlowTest, DrainYield) {
 }
 
 TYPED_TEST(ControlFlowTest, NeedsMoreAfterBackpressure) {
-  size_t dop = 8;
   using PipelineTaskType = typename TestFixture::PipelineTaskType;
+  size_t dop = 8;
   DistributedMemorySource source(dop, {{1}, {1}, {1}, {1}});
   AccumulatePipe pipe(dop, 2);
   MemorySink internal_sink;
@@ -2625,9 +2624,75 @@ TYPED_TEST(ControlFlowTest, NeedsMoreAfterBackpressure) {
   }
 }
 
-TYPED_TEST(ControlFlowTest, HasMoreAfterBackpressure) { size_t dop = 8; }
-TYPED_TEST(ControlFlowTest, NeedsMoreAfterYield) { size_t dop = 8; }
-TYPED_TEST(ControlFlowTest, HasMoreAfterYield) { size_t dop = 8; }
+TYPED_TEST(ControlFlowTest, HasMoreAfterBackpressure) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
+  size_t dop = 8;
+  MemorySource source({{1}});
+  PowerSlicedPipe pipe(dop, 42);
+  MemorySink internal_sink;
+  BackpressureContexts ctx(dop);
+  BackpressureDelegateSink sink(dop, ctx, 2, 42, 1000, &internal_sink);
+
+  LogicalPipeline pipeline{{{&source, {&pipe}}}, &sink};
+  folly::CPUThreadPoolExecutor cpu_executor(4);
+  folly::IOThreadPoolExecutor io_executor(1);
+  FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+  Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(PipelineTaskType::Make,
+                                                                  &scheduler);
+  auto result = driver.Run(dop, {pipeline});
+  ASSERT_OK(result);
+  ASSERT_TRUE(result->IsFinished());
+  ASSERT_EQ(internal_sink.batches_.size(), 42);
+  for (const auto& batch : internal_sink.batches_) {
+    ASSERT_EQ(batch, (Batch{1}));
+  }
+}
+
+TYPED_TEST(ControlFlowTest, NeedsMoreAfterYield) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
+  size_t dop = 8;
+  DistributedMemorySource source(dop, {{1}, {1}, {1}, {1}});
+  AccumulatePipe internal_pipe(dop, 2);
+  SpillDelegatePipe pipe(dop, &internal_pipe);
+  MemorySink sink;
+
+  LogicalPipeline pipeline{{{&source, {&pipe}}}, &sink};
+  folly::CPUThreadPoolExecutor cpu_executor(4);
+  folly::IOThreadPoolExecutor io_executor(1);
+  FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+  Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(PipelineTaskType::Make,
+                                                                  &scheduler);
+  auto result = driver.Run(dop, {pipeline});
+  ASSERT_OK(result);
+  ASSERT_TRUE(result->IsFinished());
+  ASSERT_EQ(sink.batches_.size(), dop * 2);
+  for (const auto& batch : sink.batches_) {
+    ASSERT_EQ(batch, (Batch{1, 1}));
+  }
+}
+
+TYPED_TEST(ControlFlowTest, HasMoreAfterYield) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
+  size_t dop = 8;
+  MemorySource source({{1}});
+  PowerSlicedPipe internal_pipe(dop, 42);
+  SpillDelegatePipe pipe(dop, &internal_pipe);
+  MemorySink sink;
+
+  LogicalPipeline pipeline{{{&source, {&pipe}}}, &sink};
+  folly::CPUThreadPoolExecutor cpu_executor(4);
+  folly::IOThreadPoolExecutor io_executor(1);
+  FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+  Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(PipelineTaskType::Make,
+                                                                  &scheduler);
+  auto result = driver.Run(dop, {pipeline});
+  ASSERT_OK(result);
+  ASSERT_TRUE(result->IsFinished());
+  ASSERT_EQ(sink.batches_.size(), 42);
+  for (const auto& batch : sink.batches_) {
+    ASSERT_EQ(batch, (Batch{1}));
+  }
+}
 
 TYPED_TEST(ControlFlowTest, ErrorAfterBackpressure) {}
 TYPED_TEST(ControlFlowTest, ErrorAfterDrainBackpressure) {}
