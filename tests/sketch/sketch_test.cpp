@@ -13,8 +13,6 @@
 #define ARRA_RETURN_NOT_OK ARROW_RETURN_NOT_OK
 #define ARRA_ASSIGN_OR_RAISE ARROW_ASSIGN_OR_RAISE
 
-// TODO: Still lots of copying for vector-emplacing code.
-
 namespace arra::sketch {
 
 struct TaskStatus {
@@ -37,23 +35,6 @@ struct TaskStatus {
   bool IsYield() { return code_ == Code::YIELD; }
   bool IsFinished() { return code_ == Code::FINISHED; }
   bool IsCancelled() { return code_ == Code::CANCELLED; }
-
-  std::string ToString() {
-    switch (code_) {
-      case Code::CONTINUE:
-        return "CONTINUE";
-      case Code::BACKPRESSURE:
-        return "BACKPRESSURE";
-      case Code::YIELD:
-        return "YIELD";
-      case Code::FINISHED:
-        return "FINISHED";
-      case Code::CANCELLED:
-        return "CANCELLED";
-      default:
-        return "UNKNOWN";
-    }
-  }
 
  public:
   static TaskStatus Continue() { return TaskStatus(Code::CONTINUE); }
@@ -283,454 +264,433 @@ class PipelineStageBuilder {
       stages_;
 };
 
-class SyncPipelineTask {
- private:
-  class SyncPipelinePlexTask {
-   public:
-    SyncPipelinePlexTask(size_t dop, PhysicalPipelinePlex plex)
-        : dop_(dop), plex_(std::move(plex)), local_states_(dop) {
-      std::vector<size_t> drains;
-      for (size_t i = 0; i < plex_.pipes.size(); ++i) {
-        if (plex_.pipes[i].second.has_value()) {
-          drains.push_back(i);
-        }
+template <typename PipelinePlexTask>
+class PipelineTask {
+ public:
+  static PipelineTask Make(size_t dop, PhysicalPipeline pipeline) {
+    return {dop, std::move(pipeline)};
+  }
+
+  PipelineTask(size_t dop, PhysicalPipeline pipeline) {
+    for (auto& plex : pipeline.plexes) {
+      tasks_.push_back(PipelinePlexTask(dop, std::move(plex)));
+    }
+  }
+
+  arrow::Result<OperatorResult> Run(ThreadId thread_id) {
+    bool all_finished = true;
+    for (auto& task : tasks_) {
+      ARRA_ASSIGN_OR_RAISE(auto result, task.Run(thread_id));
+      if (result.IsFinished()) {
+        ARRA_DCHECK(!result.GetOutput().has_value());
+      } else {
+        all_finished = false;
       }
-      for (size_t i = 0; i < dop; ++i) {
-        local_states_[i].drains = drains;
+      if (!result.IsFinished() && !result.IsSourceNotReady()) {
+        return result;
       }
     }
-
-    SyncPipelinePlexTask(const SyncPipelinePlexTask& other)
-        : SyncPipelinePlexTask(other.dop_, other.plex_) {}
-
-    SyncPipelinePlexTask(SyncPipelinePlexTask&& other)
-        : SyncPipelinePlexTask(other.dop_, std::move(other.plex_)) {}
-
-    arrow::Result<OperatorResult> Run(ThreadId thread_id) {
-      if (cancelled) {
-        return OperatorResult::Cancelled();
-      }
-
-      if (local_states_[thread_id].backpressure) {
-        auto result = plex_.sink(thread_id, std::nullopt);
-        if (!result.ok()) {
-          cancelled = true;
-          return result.status();
-        }
-        ARRA_DCHECK(result->IsPipeSinkNeedsMore() || result->IsSinkBackpressure());
-        if (!result->IsSinkBackpressure()) {
-          local_states_[thread_id].backpressure = false;
-          return OperatorResult::PipeSinkNeedsMore();
-        }
-        return OperatorResult::SinkBackpressure();
-      }
-
-      if (!local_states_[thread_id].pipe_stack.empty()) {
-        auto pipe_id = local_states_[thread_id].pipe_stack.top();
-        local_states_[thread_id].pipe_stack.pop();
-        return Pipe(thread_id, pipe_id, std::nullopt);
-      }
-
-      if (!local_states_[thread_id].source_done) {
-        auto result = plex_.source(thread_id);
-        if (!result.ok()) {
-          cancelled = true;
-          return result.status();
-        }
-        if (result->IsSourceNotReady()) {
-          return OperatorResult::SourceNotReady();
-        } else if (result->IsFinished()) {
-          local_states_[thread_id].source_done = true;
-          if (result->GetOutput().has_value()) {
-            return Pipe(thread_id, 0, std::move(result->GetOutput()));
-          }
-        } else {
-          ARRA_DCHECK(result->IsSourcePipeHasMore());
-          ARRA_DCHECK(result->GetOutput().has_value());
-          return Pipe(thread_id, 0, std::move(result->GetOutput()));
-        }
-      }
-
-      if (local_states_[thread_id].draining >= local_states_[thread_id].drains.size()) {
-        return OperatorResult::Finished(std::nullopt);
-      }
-
-      for (; local_states_[thread_id].draining < local_states_[thread_id].drains.size();
-           ++local_states_[thread_id].draining) {
-        auto drain_id =
-            local_states_[thread_id].drains[local_states_[thread_id].draining];
-        auto result = plex_.pipes[drain_id].second.value()(thread_id);
-        if (!result.ok()) {
-          cancelled = true;
-          return result.status();
-        }
-        if (local_states_[thread_id].yield) {
-          ARRA_DCHECK(result->IsPipeSinkNeedsMore());
-          local_states_[thread_id].yield = false;
-          return OperatorResult::PipeSinkNeedsMore();
-        }
-        if (result->IsPipeYield()) {
-          ARRA_DCHECK(!local_states_[thread_id].yield);
-          local_states_[thread_id].yield = true;
-          return OperatorResult::PipeYield();
-        }
-        ARRA_DCHECK(result->IsSourcePipeHasMore() || result->IsFinished());
-        if (result->GetOutput().has_value()) {
-          if (result->IsFinished()) {
-            ++local_states_[thread_id].draining;
-          }
-          return Pipe(thread_id, drain_id + 1, std::move(result->GetOutput()));
-        }
-      }
-
+    if (all_finished) {
       return OperatorResult::Finished(std::nullopt);
+    } else {
+      return OperatorResult::SourceNotReady();
+    }
+  }
+
+ private:
+  std::vector<PipelinePlexTask> tasks_;
+};
+
+class SyncPipelinePlexTask {
+ public:
+  SyncPipelinePlexTask(size_t dop, PhysicalPipelinePlex plex)
+      : dop_(dop), plex_(std::move(plex)), local_states_(dop) {
+    std::vector<size_t> drains;
+    for (size_t i = 0; i < plex_.pipes.size(); ++i) {
+      if (plex_.pipes[i].second.has_value()) {
+        drains.push_back(i);
+      }
+    }
+    for (size_t i = 0; i < dop; ++i) {
+      local_states_[i].drains = drains;
+    }
+  }
+
+  SyncPipelinePlexTask(const SyncPipelinePlexTask& other)
+      : SyncPipelinePlexTask(other.dop_, other.plex_) {}
+
+  SyncPipelinePlexTask(SyncPipelinePlexTask&& other)
+      : SyncPipelinePlexTask(other.dop_, std::move(other.plex_)) {}
+
+  arrow::Result<OperatorResult> Run(ThreadId thread_id) {
+    if (cancelled) {
+      return OperatorResult::Cancelled();
     }
 
-   private:
-    arrow::Result<OperatorResult> Pipe(ThreadId thread_id, size_t pipe_id,
-                                       std::optional<Batch> input) {
-      for (size_t i = pipe_id; i < plex_.pipes.size(); ++i) {
-        auto result = plex_.pipes[i].first(thread_id, std::move(input));
-        if (!result.ok()) {
-          cancelled = true;
-          return result.status();
-        }
-        if (local_states_[thread_id].yield) {
-          ARRA_DCHECK(result->IsPipeSinkNeedsMore());
-          local_states_[thread_id].pipe_stack.push(i);
-          local_states_[thread_id].yield = false;
-          return OperatorResult::PipeSinkNeedsMore();
-        }
-        if (result->IsPipeYield()) {
-          ARRA_DCHECK(!local_states_[thread_id].yield);
-          local_states_[thread_id].pipe_stack.push(i);
-          local_states_[thread_id].yield = true;
-          return OperatorResult::PipeYield();
-        }
-        ARRA_DCHECK(result->IsPipeSinkNeedsMore() || result->IsPipeEven() ||
-                    result->IsSourcePipeHasMore());
-        if (result->IsPipeEven() || result->IsSourcePipeHasMore()) {
-          if (result->IsSourcePipeHasMore()) {
-            local_states_[thread_id].pipe_stack.push(i);
-          }
-          ARRA_DCHECK(result->GetOutput().has_value());
-          input = std::move(result->GetOutput());
-        } else {
-          return OperatorResult::PipeSinkNeedsMore();
-        }
-      }
-
-      auto result = plex_.sink(thread_id, std::move(input));
+    if (local_states_[thread_id].backpressure) {
+      auto result = plex_.sink(thread_id, std::nullopt);
       if (!result.ok()) {
         cancelled = true;
         return result.status();
       }
       ARRA_DCHECK(result->IsPipeSinkNeedsMore() || result->IsSinkBackpressure());
-      if (result->IsSinkBackpressure()) {
-        local_states_[thread_id].backpressure = true;
-        return OperatorResult::SinkBackpressure();
+      if (!result->IsSinkBackpressure()) {
+        local_states_[thread_id].backpressure = false;
+        return OperatorResult::PipeSinkNeedsMore();
       }
-      return OperatorResult::PipeSinkNeedsMore();
+      return OperatorResult::SinkBackpressure();
     }
 
-   private:
-    size_t dop_;
-    PhysicalPipelinePlex plex_;
-
-    struct ThreadLocalState {
-      std::stack<size_t> pipe_stack;
-      bool source_done = false;
-      std::vector<size_t> drains;
-      size_t draining = 0;
-      bool backpressure = false, yield = false;
-    };
-    std::vector<ThreadLocalState> local_states_;
-    std::atomic_bool cancelled = false;
-  };
-
- public:
-  static SyncPipelineTask Make(size_t dop, PhysicalPipeline pipeline) {
-    return {dop, std::move(pipeline)};
-  }
-
-  SyncPipelineTask(size_t dop, PhysicalPipeline pipeline) {
-    for (auto& plex : pipeline.plexes) {
-      tasks_.push_back(SyncPipelinePlexTask(dop, std::move(plex)));
+    if (!local_states_[thread_id].pipe_stack.empty()) {
+      auto pipe_id = local_states_[thread_id].pipe_stack.top();
+      local_states_[thread_id].pipe_stack.pop();
+      return Pipe(thread_id, pipe_id, std::nullopt);
     }
-  }
 
-  arrow::Result<OperatorResult> Run(ThreadId thread_id) {
-    for (auto& task : tasks_) {
-      ARRA_ASSIGN_OR_RAISE(auto result, task.Run(thread_id));
-      if (result.IsFinished()) {
-        ARRA_DCHECK(!result.GetOutput().has_value());
+    if (!local_states_[thread_id].source_done) {
+      auto result = plex_.source(thread_id);
+      if (!result.ok()) {
+        cancelled = true;
+        return result.status();
       }
-      if (!result.IsFinished() && !result.IsSourceNotReady()) {
-        return result;
+      if (result->IsSourceNotReady()) {
+        return OperatorResult::SourceNotReady();
+      } else if (result->IsFinished()) {
+        local_states_[thread_id].source_done = true;
+        if (result->GetOutput().has_value()) {
+          return Pipe(thread_id, 0, std::move(result->GetOutput()));
+        }
+      } else {
+        ARRA_DCHECK(result->IsSourcePipeHasMore());
+        ARRA_DCHECK(result->GetOutput().has_value());
+        return Pipe(thread_id, 0, std::move(result->GetOutput()));
       }
     }
+
+    if (local_states_[thread_id].draining >= local_states_[thread_id].drains.size()) {
+      return OperatorResult::Finished(std::nullopt);
+    }
+
+    for (; local_states_[thread_id].draining < local_states_[thread_id].drains.size();
+         ++local_states_[thread_id].draining) {
+      auto drain_id = local_states_[thread_id].drains[local_states_[thread_id].draining];
+      auto result = plex_.pipes[drain_id].second.value()(thread_id);
+      if (!result.ok()) {
+        cancelled = true;
+        return result.status();
+      }
+      if (local_states_[thread_id].yield) {
+        ARRA_DCHECK(result->IsPipeSinkNeedsMore());
+        local_states_[thread_id].yield = false;
+        return OperatorResult::PipeSinkNeedsMore();
+      }
+      if (result->IsPipeYield()) {
+        ARRA_DCHECK(!local_states_[thread_id].yield);
+        local_states_[thread_id].yield = true;
+        return OperatorResult::PipeYield();
+      }
+      ARRA_DCHECK(result->IsSourcePipeHasMore() || result->IsFinished());
+      if (result->GetOutput().has_value()) {
+        if (result->IsFinished()) {
+          ++local_states_[thread_id].draining;
+        }
+        return Pipe(thread_id, drain_id + 1, std::move(result->GetOutput()));
+      }
+    }
+
     return OperatorResult::Finished(std::nullopt);
   }
 
  private:
-  std::vector<SyncPipelinePlexTask> tasks_;
-};
-
-class CoroPipelineTask {
- private:
-  struct CoroPipelinePlexTask {
-    struct Coroutine {
-      struct promise_type {
-        using Handle = std::coroutine_handle<promise_type>;
-        Coroutine get_return_object() { return Coroutine{Handle::from_promise(*this)}; }
-        std::suspend_always initial_suspend() noexcept { return {}; }
-        std::suspend_always final_suspend() noexcept { return {}; }
-        std::suspend_always yield_value(arrow::Result<OperatorResult>&& value) noexcept {
-          current_value_ = std::move(value);
-          return {};
-        }
-        void return_value(arrow::Result<OperatorResult>&& value) noexcept {
-          current_value_ = std::move(value);
-        }
-        void unhandled_exception() {}
-        arrow::Result<OperatorResult> current_value_;
-      };
-
-      Coroutine(typename promise_type::Handle handle) : handle_(handle) {}
-      Coroutine(const Coroutine&) = delete;
-      Coroutine(Coroutine&& coro) : handle_(coro.handle_) { coro.handle_ = nullptr; }
-      ~Coroutine() {
-        if (handle_) {
-          handle_.destroy();
-        }
+  arrow::Result<OperatorResult> Pipe(ThreadId thread_id, size_t pipe_id,
+                                     std::optional<Batch> input) {
+    for (size_t i = pipe_id; i < plex_.pipes.size(); ++i) {
+      auto result = plex_.pipes[i].first(thread_id, std::move(input));
+      if (!result.ok()) {
+        cancelled = true;
+        return result.status();
       }
-
-      bool Done() const { return handle_.done(); }
-
-      arrow::Result<OperatorResult> Run() {
-        handle_.resume();
-        return std::move(handle_.promise().current_value_);
+      if (local_states_[thread_id].yield) {
+        ARRA_DCHECK(result->IsPipeSinkNeedsMore());
+        local_states_[thread_id].pipe_stack.push(i);
+        local_states_[thread_id].yield = false;
+        return OperatorResult::PipeSinkNeedsMore();
       }
-
-     private:
-      typename promise_type::Handle handle_;
-    };
-
-   public:
-    CoroPipelinePlexTask(size_t dop, PhysicalPipelinePlex plex)
-        : dop_(dop), plex_(std::move(plex)) {
-      std::vector<size_t> drains;
-      for (size_t i = 0; i < plex_.pipes.size(); ++i) {
-        if (plex_.pipes[i].second.has_value()) {
-          drains.push_back(i);
+      if (result->IsPipeYield()) {
+        ARRA_DCHECK(!local_states_[thread_id].yield);
+        local_states_[thread_id].pipe_stack.push(i);
+        local_states_[thread_id].yield = true;
+        return OperatorResult::PipeYield();
+      }
+      ARRA_DCHECK(result->IsPipeSinkNeedsMore() || result->IsPipeEven() ||
+                  result->IsSourcePipeHasMore());
+      if (result->IsPipeEven() || result->IsSourcePipeHasMore()) {
+        if (result->IsSourcePipeHasMore()) {
+          local_states_[thread_id].pipe_stack.push(i);
         }
-      }
-      for (size_t i = 0; i < dop; ++i) {
-        local_states_.emplace_back(ThreadLocalState{drains, CoroRun(i)});
+        ARRA_DCHECK(result->GetOutput().has_value());
+        input = std::move(result->GetOutput());
+      } else {
+        return OperatorResult::PipeSinkNeedsMore();
       }
     }
 
-    CoroPipelinePlexTask(const CoroPipelinePlexTask& other)
-        : CoroPipelinePlexTask(other.dop_, other.plex_) {}
+    auto result = plex_.sink(thread_id, std::move(input));
+    if (!result.ok()) {
+      cancelled = true;
+      return result.status();
+    }
+    ARRA_DCHECK(result->IsPipeSinkNeedsMore() || result->IsSinkBackpressure());
+    if (result->IsSinkBackpressure()) {
+      local_states_[thread_id].backpressure = true;
+      return OperatorResult::SinkBackpressure();
+    }
+    return OperatorResult::PipeSinkNeedsMore();
+  }
 
-    CoroPipelinePlexTask(CoroPipelinePlexTask&& other)
-        : CoroPipelinePlexTask(other.dop_, std::move(other.plex_)) {}
+ private:
+  size_t dop_;
+  PhysicalPipelinePlex plex_;
 
-    arrow::Result<OperatorResult> Run(ThreadId thread_id) {
-      if (cancelled) {
-        return OperatorResult::Cancelled();
+  struct ThreadLocalState {
+    std::stack<size_t> pipe_stack;
+    bool source_done = false;
+    std::vector<size_t> drains;
+    size_t draining = 0;
+    bool backpressure = false, yield = false;
+  };
+  std::vector<ThreadLocalState> local_states_;
+  std::atomic_bool cancelled = false;
+};
+
+struct CoroPipelinePlexTask {
+  struct Coroutine {
+    struct promise_type {
+      using Handle = std::coroutine_handle<promise_type>;
+      Coroutine get_return_object() { return Coroutine{Handle::from_promise(*this)}; }
+      std::suspend_always initial_suspend() noexcept { return {}; }
+      std::suspend_always final_suspend() noexcept { return {}; }
+      std::suspend_always yield_value(arrow::Result<OperatorResult>&& value) noexcept {
+        current_value_ = std::move(value);
+        return {};
       }
-      if (local_states_[thread_id].coroutine.Done()) {
-        return OperatorResult::Finished(std::nullopt);
+      void return_value(arrow::Result<OperatorResult>&& value) noexcept {
+        current_value_ = std::move(value);
       }
-      return local_states_[thread_id].coroutine.Run();
+      void unhandled_exception() {}
+      arrow::Result<OperatorResult> current_value_;
+    };
+
+    Coroutine(typename promise_type::Handle handle) : handle_(handle) {}
+    Coroutine(const Coroutine&) = delete;
+    Coroutine(Coroutine&& coro) : handle_(coro.handle_) { coro.handle_ = nullptr; }
+    ~Coroutine() {
+      if (handle_) {
+        handle_.destroy();
+      }
+    }
+
+    bool Done() const { return handle_.done(); }
+
+    arrow::Result<OperatorResult> Run() {
+      handle_.resume();
+      return std::move(handle_.promise().current_value_);
     }
 
    private:
-    Coroutine CoroRun(ThreadId thread_id) {
-      bool source_done = false;
-      while (!source_done) {
-        auto result = plex_.source(thread_id);
-        if (!result.ok()) {
-          cancelled = true;
-          co_return result.status();
-        }
-        while (true) {
-          if (result->IsSourceNotReady()) {
-            co_yield OperatorResult::SourceNotReady();
-            result = plex_.source(thread_id);
-            if (!result.ok()) {
-              cancelled = true;
-              co_return result.status();
-            }
-          } else if (result->IsFinished()) {
-            source_done = true;
-            break;
-          } else {
-            ARRA_DCHECK(result->IsSourcePipeHasMore());
-            ARRA_DCHECK(result->GetOutput().has_value());
-            break;
-          }
-        }
+    typename promise_type::Handle handle_;
+  };
 
-        if (result->GetOutput().has_value()) {
-          auto coro_pipe = CoroPipe(thread_id, 0, std::move(result->GetOutput()));
-          while (!coro_pipe.Done()) {
-            auto result = coro_pipe.Run();
-            co_yield std::move(result);
-          }
-        }
+ public:
+  CoroPipelinePlexTask(size_t dop, PhysicalPipelinePlex plex)
+      : dop_(dop), plex_(std::move(plex)) {
+    std::vector<size_t> drains;
+    for (size_t i = 0; i < plex_.pipes.size(); ++i) {
+      if (plex_.pipes[i].second.has_value()) {
+        drains.push_back(i);
       }
-
-      for (size_t i = 0; i < local_states_[thread_id].drains.size(); ++i) {
-        auto drain_id = local_states_[thread_id].drains[i];
-        auto coro_drain = CoroDrain(thread_id, drain_id);
-        while (!coro_drain.Done()) {
-          auto result = coro_drain.Run();
-          co_yield std::move(result);
-        }
-      }
-
-      co_return OperatorResult::Finished(std::nullopt);
     }
+    for (size_t i = 0; i < dop; ++i) {
+      local_states_.emplace_back(ThreadLocalState{drains, CoroRun(i)});
+    }
+  }
 
-    Coroutine CoroPipe(ThreadId thread_id, size_t pipe_id, std::optional<Batch> input) {
-      for (size_t i = pipe_id; i < plex_.pipes.size(); ++i) {
-        auto result = plex_.pipes[i].first(thread_id, std::move(input));
-        if (!result.ok()) {
-          cancelled = true;
-          co_return result.status();
-        }
-        while (result->IsSourcePipeHasMore()) {
-          auto coro_pipe = CoroPipe(thread_id, i + 1, std::move(result->GetOutput()));
-          while (!coro_pipe.Done()) {
-            auto result = coro_pipe.Run();
-            co_yield std::move(result);
-          }
-          result = plex_.pipes[i].first(thread_id, std::nullopt);
-          if (!result.ok()) {
-            cancelled = true;
-            co_return result.status();
-          }
-        }
-        if (result->IsPipeSinkNeedsMore()) {
-          co_return OperatorResult::PipeSinkNeedsMore();
-        }
-        if (result->IsPipeEven()) {
-          ARRA_DCHECK(result->GetOutput().has_value());
-          input = std::move(result->GetOutput());
-          continue;
-        }
-        if (result->IsPipeYield()) {
-          co_yield OperatorResult::PipeYield();
-          result = plex_.pipes[i].first(thread_id, std::nullopt);
-          if (!result.ok()) {
-            cancelled = true;
-            co_return result.status();
-          }
-          ARRA_DCHECK(result->IsPipeSinkNeedsMore());
-          co_yield OperatorResult::PipeSinkNeedsMore();
-          auto coro_pipe = CoroPipe(thread_id, i, std::nullopt);
-          while (true) {
-            auto result = coro_pipe.Run();
-            if (coro_pipe.Done()) {
-              co_return std::move(result);
-            }
-            co_yield std::move(result);
-          }
-        }
-      }
+  CoroPipelinePlexTask(const CoroPipelinePlexTask& other)
+      : CoroPipelinePlexTask(other.dop_, other.plex_) {}
 
-      auto result = plex_.sink(thread_id, std::move(input));
+  CoroPipelinePlexTask(CoroPipelinePlexTask&& other)
+      : CoroPipelinePlexTask(other.dop_, std::move(other.plex_)) {}
+
+  arrow::Result<OperatorResult> Run(ThreadId thread_id) {
+    if (cancelled) {
+      return OperatorResult::Cancelled();
+    }
+    if (local_states_[thread_id].coroutine.Done()) {
+      return OperatorResult::Finished(std::nullopt);
+    }
+    return local_states_[thread_id].coroutine.Run();
+  }
+
+ private:
+  Coroutine CoroRun(ThreadId thread_id) {
+    bool source_done = false;
+    while (!source_done) {
+      auto result = plex_.source(thread_id);
       if (!result.ok()) {
         cancelled = true;
         co_return result.status();
       }
-      while (result->IsSinkBackpressure()) {
-        co_yield OperatorResult::SinkBackpressure();
-        result = plex_.sink(thread_id, std::nullopt);
-        if (!result.ok()) {
-          cancelled = true;
-          co_return result.status();
-        }
-      }
-      ARRA_DCHECK(result->IsPipeSinkNeedsMore());
-      co_return OperatorResult::PipeSinkNeedsMore();
-    }
-
-    Coroutine CoroDrain(ThreadId thread_id, size_t drain_id) {
       while (true) {
-        auto result = plex_.pipes[drain_id].second.value()(thread_id);
-        if (!result.ok()) {
-          cancelled = true;
-          co_return result.status();
-        }
-        if (result->IsPipeYield()) {
-          co_yield OperatorResult::PipeYield();
-          result = plex_.pipes[drain_id].second.value()(thread_id);
+        if (result->IsSourceNotReady()) {
+          co_yield OperatorResult::SourceNotReady();
+          result = plex_.source(thread_id);
           if (!result.ok()) {
             cancelled = true;
             co_return result.status();
           }
-          ARRA_DCHECK(result->IsPipeSinkNeedsMore());
-          co_yield OperatorResult::PipeSinkNeedsMore();
-          continue;
+        } else if (result->IsFinished()) {
+          source_done = true;
+          break;
+        } else {
+          ARRA_DCHECK(result->IsSourcePipeHasMore());
+          ARRA_DCHECK(result->GetOutput().has_value());
+          break;
         }
-        ARRA_DCHECK(result->IsSourcePipeHasMore() || result->IsFinished());
-        if (result->GetOutput().has_value()) {
-          auto coro_pipe =
-              CoroPipe(thread_id, drain_id + 1, std::move(result->GetOutput()));
-          while (!coro_pipe.Done()) {
-            auto result = coro_pipe.Run();
-            co_yield std::move(result);
+      }
+
+      if (result->GetOutput().has_value()) {
+        auto coro_pipe = CoroPipe(thread_id, 0, std::move(result->GetOutput()));
+        while (!coro_pipe.Done()) {
+          auto result = coro_pipe.Run();
+          co_yield std::move(result);
+        }
+      }
+    }
+
+    for (size_t i = 0; i < local_states_[thread_id].drains.size(); ++i) {
+      auto drain_id = local_states_[thread_id].drains[i];
+      auto coro_drain = CoroDrain(thread_id, drain_id);
+      while (!coro_drain.Done()) {
+        auto result = coro_drain.Run();
+        co_yield std::move(result);
+      }
+    }
+
+    co_return OperatorResult::Finished(std::nullopt);
+  }
+
+  Coroutine CoroPipe(ThreadId thread_id, size_t pipe_id, std::optional<Batch> input) {
+    for (size_t i = pipe_id; i < plex_.pipes.size(); ++i) {
+      auto result = plex_.pipes[i].first(thread_id, std::move(input));
+      if (!result.ok()) {
+        cancelled = true;
+        co_return result.status();
+      }
+      while (result->IsSourcePipeHasMore()) {
+        auto coro_pipe = CoroPipe(thread_id, i + 1, std::move(result->GetOutput()));
+        while (!coro_pipe.Done()) {
+          auto result = coro_pipe.Run();
+          co_yield std::move(result);
+        }
+        result = plex_.pipes[i].first(thread_id, std::nullopt);
+        if (!result.ok()) {
+          cancelled = true;
+          co_return result.status();
+        }
+      }
+      if (result->IsPipeSinkNeedsMore()) {
+        co_return OperatorResult::PipeSinkNeedsMore();
+      }
+      if (result->IsPipeEven()) {
+        ARRA_DCHECK(result->GetOutput().has_value());
+        input = std::move(result->GetOutput());
+        continue;
+      }
+      if (result->IsPipeYield()) {
+        co_yield OperatorResult::PipeYield();
+        result = plex_.pipes[i].first(thread_id, std::nullopt);
+        if (!result.ok()) {
+          cancelled = true;
+          co_return result.status();
+        }
+        ARRA_DCHECK(result->IsPipeSinkNeedsMore());
+        co_yield OperatorResult::PipeSinkNeedsMore();
+        auto coro_pipe = CoroPipe(thread_id, i, std::nullopt);
+        while (true) {
+          auto result = coro_pipe.Run();
+          if (coro_pipe.Done()) {
+            co_return std::move(result);
           }
-        }
-        if (result->IsFinished()) {
-          co_return OperatorResult::PipeSinkNeedsMore();
+          co_yield std::move(result);
         }
       }
-      co_return OperatorResult::PipeSinkNeedsMore();
     }
 
-   private:
-    size_t dop_;
-    PhysicalPipelinePlex plex_;
-
-    struct ThreadLocalState {
-      std::vector<size_t> drains;
-      Coroutine coroutine;
-    };
-    std::vector<ThreadLocalState> local_states_;
-    std::atomic_bool cancelled = false;
-  };
-
- public:
-  static CoroPipelineTask Make(size_t dop, PhysicalPipeline pipeline) {
-    return {dop, std::move(pipeline)};
-  }
-
-  CoroPipelineTask(size_t dop, PhysicalPipeline pipeline) {
-    for (auto& plex : pipeline.plexes) {
-      tasks_.push_back(CoroPipelinePlexTask(dop, std::move(plex)));
+    auto result = plex_.sink(thread_id, std::move(input));
+    if (!result.ok()) {
+      cancelled = true;
+      co_return result.status();
     }
-  }
-
-  arrow::Result<OperatorResult> Run(ThreadId thread_id) {
-    for (auto& task : tasks_) {
-      ARRA_ASSIGN_OR_RAISE(auto result, task.Run(thread_id));
-      if (result.IsFinished()) {
-        ARRA_DCHECK(!result.GetOutput().has_value());
-      }
-      if (!result.IsFinished() && !result.IsSourceNotReady()) {
-        return result;
+    while (result->IsSinkBackpressure()) {
+      co_yield OperatorResult::SinkBackpressure();
+      result = plex_.sink(thread_id, std::nullopt);
+      if (!result.ok()) {
+        cancelled = true;
+        co_return result.status();
       }
     }
-    return OperatorResult::Finished(std::nullopt);
+    ARRA_DCHECK(result->IsPipeSinkNeedsMore());
+    co_return OperatorResult::PipeSinkNeedsMore();
+  }
+
+  Coroutine CoroDrain(ThreadId thread_id, size_t drain_id) {
+    while (true) {
+      auto result = plex_.pipes[drain_id].second.value()(thread_id);
+      if (!result.ok()) {
+        cancelled = true;
+        co_return result.status();
+      }
+      if (result->IsPipeYield()) {
+        co_yield OperatorResult::PipeYield();
+        result = plex_.pipes[drain_id].second.value()(thread_id);
+        if (!result.ok()) {
+          cancelled = true;
+          co_return result.status();
+        }
+        ARRA_DCHECK(result->IsPipeSinkNeedsMore());
+        co_yield OperatorResult::PipeSinkNeedsMore();
+        continue;
+      }
+      ARRA_DCHECK(result->IsSourcePipeHasMore() || result->IsFinished());
+      if (result->GetOutput().has_value()) {
+        auto coro_pipe =
+            CoroPipe(thread_id, drain_id + 1, std::move(result->GetOutput()));
+        while (!coro_pipe.Done()) {
+          auto result = coro_pipe.Run();
+          co_yield std::move(result);
+        }
+      }
+      if (result->IsFinished()) {
+        co_return OperatorResult::PipeSinkNeedsMore();
+      }
+    }
+    co_return OperatorResult::PipeSinkNeedsMore();
   }
 
  private:
-  std::vector<CoroPipelinePlexTask> tasks_;
+  size_t dop_;
+  PhysicalPipelinePlex plex_;
+
+  struct ThreadLocalState {
+    std::vector<size_t> drains;
+    Coroutine coroutine;
+  };
+  std::vector<ThreadLocalState> local_states_;
+  std::atomic_bool cancelled = false;
 };
+
+using SyncPipelineTask = PipelineTask<SyncPipelinePlexTask>;
+using CoroPipelineTask = PipelineTask<CoroPipelinePlexTask>;
 
 template <typename PipelineTask, typename Scheduler>
 class Driver {
@@ -1034,11 +994,17 @@ class DistributedMemorySource : public SourceOp {
 class SlowDelegateSource : public SourceOp {
  public:
   SlowDelegateSource(size_t slowness, SourceOp* source)
-      : slowness_(slowness), source_(source) {}
+      : slowness_(slowness), source_(source), counter_(0) {}
 
   PipelineTaskSource Source() override {
-    // TODO: Implement.
-    return source_->Source();
+    return [&](ThreadId thread_id) -> arrow::Result<OperatorResult> {
+      bool being_slow = counter_++ % slowness_ != 0;
+      if (being_slow) {
+        return OperatorResult::SourceNotReady();
+      } else {
+        return source_->Source()(thread_id);
+      }
+    };
   }
 
   TaskGroups Frontend() override { return source_->Frontend(); }
@@ -1048,6 +1014,39 @@ class SlowDelegateSource : public SourceOp {
  private:
   size_t slowness_;
   SourceOp* source_;
+
+  std::atomic<size_t> counter_;
+};
+
+class DistributedSlowDelegateSource : public SourceOp {
+ public:
+  DistributedSlowDelegateSource(size_t dop, size_t slowness, SourceOp* source)
+      : slowness_(slowness), source_(source), thread_locals_(dop) {}
+
+  PipelineTaskSource Source() override {
+    return [&](ThreadId thread_id) -> arrow::Result<OperatorResult> {
+      bool being_slow = thread_locals_[thread_id].counter++ % slowness_ != 0;
+      if (being_slow) {
+        return OperatorResult::SourceNotReady();
+      } else {
+        return source_->Source()(thread_id);
+      }
+    };
+  }
+
+  TaskGroups Frontend() override { return source_->Frontend(); }
+
+  TaskGroups Backend() override { return source_->Backend(); }
+
+ private:
+  size_t dop_;
+  size_t slowness_;
+  SourceOp* source_;
+
+  struct ThreadLocal {
+    size_t counter = 0;
+  };
+  std::vector<ThreadLocal> thread_locals_;
 };
 
 class BlackHoleSink : public SinkOp {
@@ -1082,6 +1081,31 @@ class MemorySink : public SinkOp {
  public:
   std::mutex mutex_;
   std::vector<Batch> batches_;
+};
+
+class DistributedMemorySink : public SinkOp {
+ public:
+  DistributedMemorySink(size_t dop) : thread_locals_(dop) {}
+
+  PipelineTaskSink Sink() override {
+    return [&](ThreadId thread_id,
+               std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+      if (input.has_value()) {
+        thread_locals_[thread_id].batches.push_back(std::move(input.value()));
+      }
+      return OperatorResult::PipeSinkNeedsMore();
+    };
+  }
+
+  TaskGroups Frontend() override { return {}; }
+
+  TaskGroups Backend() override { return {}; }
+
+ public:
+  struct ThreadLocal {
+    std::vector<Batch> batches;
+  };
+  std::vector<ThreadLocal> thread_locals_;
 };
 
 class IdentityPipe : public PipeOp {
@@ -2207,6 +2231,64 @@ TYPED_TEST(ControlFlowTest, AccumulateThree) {
   }
 }
 
+TYPED_TEST(ControlFlowTest, BasicSourceNotReady) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
+  size_t dop = 1;
+  MemorySource internal_source_1({{1}, {1}, {1}}), internal_source_2({{2}, {2}, {2}});
+  SlowDelegateSource source_1(3, &internal_source_1), source_2(2, &internal_source_2);
+  MemorySink sink;
+  LogicalPipeline pipeline{{{&source_1, {}}, {&source_2, {}}}, &sink};
+  folly::CPUThreadPoolExecutor cpu_executor(4);
+  folly::IOThreadPoolExecutor io_executor(1);
+  FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+  Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(PipelineTaskType::Make,
+                                                                  &scheduler);
+  auto result = driver.Run(dop, {pipeline});
+  ASSERT_OK(result);
+  ASSERT_TRUE(result->IsFinished());
+  ASSERT_EQ(sink.batches_.size(), 6);
+  std::vector<Batch> batches_exp;
+  if (sink.batches_[0][0] == 1) {
+    batches_exp = {{1}, {2}, {1}, {2}, {1}, {2}};
+  } else {
+    batches_exp = {{2}, {1}, {2}, {2}, {1}, {1}};
+  }
+  for (size_t i = 0; i < 6; ++i) {
+    ASSERT_EQ(sink.batches_[i], batches_exp[i]);
+  }
+}
+
+TYPED_TEST(ControlFlowTest, DistributedSourceNotReady) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
+  size_t dop = 8;
+  DistributedMemorySource internal_source_1(dop, {{1}, {1}, {1}}),
+      internal_source_2(dop, {{2}, {2}, {2}});
+  DistributedSlowDelegateSource source_1(dop, 3, &internal_source_1),
+      source_2(dop, 2, &internal_source_2);
+  DistributedMemorySink sink(dop);
+  LogicalPipeline pipeline{{{&source_1, {}}, {&source_2, {}}}, &sink};
+  folly::CPUThreadPoolExecutor cpu_executor(4);
+  folly::IOThreadPoolExecutor io_executor(1);
+  FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+  Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(PipelineTaskType::Make,
+                                                                  &scheduler);
+  auto result = driver.Run(dop, {pipeline});
+  ASSERT_OK(result);
+  ASSERT_TRUE(result->IsFinished());
+  for (size_t i = 0; i < dop; ++i) {
+    ASSERT_EQ(sink.thread_locals_[i].batches.size(), 6);
+    std::vector<Batch> batches_exp;
+    if (sink.thread_locals_[i].batches[0][0] == 1) {
+      batches_exp = {{1}, {2}, {1}, {2}, {1}, {2}};
+    } else {
+      batches_exp = {{2}, {1}, {2}, {2}, {1}, {1}};
+    }
+    for (size_t j = 0; j < 6; ++j) {
+      ASSERT_EQ(sink.thread_locals_[i].batches[j], batches_exp[j]);
+    }
+  }
+}
+
 TYPED_TEST(ControlFlowTest, BasicBackpressure) {
   using PipelineTaskType = typename TestFixture::PipelineTaskType;
   size_t dop = 8;
@@ -3056,5 +3138,3 @@ INSTANTIATE_TEST_SUITE_P(ComplexTest, DeepHasMoreTest,
                               << std::get<1>(param_info.param);
                            return ss.str();
                          });
-
-// TODO: Pipeline task multiplex test.
