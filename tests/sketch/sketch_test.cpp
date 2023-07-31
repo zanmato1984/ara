@@ -2601,7 +2601,34 @@ TYPED_TEST(ControlFlowTest, DrainYield) {
   ASSERT_EQ(io_thread_info.begin()->second.substr(0, 12), "IOThreadPool");
 }
 
-// TODO: Combination of HasMore/NeedsMore with Drain/Backpressure/Yield.
+TYPED_TEST(ControlFlowTest, NeedsMoreAfterBackpressure) {
+  size_t dop = 8;
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
+  DistributedMemorySource source(dop, {{1}, {1}, {1}, {1}});
+  AccumulatePipe pipe(dop, 2);
+  MemorySink internal_sink;
+  BackpressureContexts ctx(dop);
+  BackpressureDelegateSink sink(dop, ctx, 2, 42, 1000, &internal_sink);
+
+  LogicalPipeline pipeline{{{&source, {&pipe}}}, &sink};
+  folly::CPUThreadPoolExecutor cpu_executor(4);
+  folly::IOThreadPoolExecutor io_executor(1);
+  FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+  Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(PipelineTaskType::Make,
+                                                                  &scheduler);
+  auto result = driver.Run(dop, {pipeline});
+  ASSERT_OK(result);
+  ASSERT_TRUE(result->IsFinished());
+  ASSERT_EQ(internal_sink.batches_.size(), dop * 2);
+  for (const auto& batch : internal_sink.batches_) {
+    ASSERT_EQ(batch, (Batch{1, 1}));
+  }
+}
+
+TYPED_TEST(ControlFlowTest, HasMoreAfterBackpressure) { size_t dop = 8; }
+TYPED_TEST(ControlFlowTest, NeedsMoreAfterYield) { size_t dop = 8; }
+TYPED_TEST(ControlFlowTest, HasMoreAfterYield) { size_t dop = 8; }
+
 TYPED_TEST(ControlFlowTest, ErrorAfterBackpressure) {}
 TYPED_TEST(ControlFlowTest, ErrorAfterDrainBackpressure) {}
 TYPED_TEST(ControlFlowTest, ErrorAfterYield) {}
@@ -3008,58 +3035,58 @@ class RecursivePowPlusPolynomialTest
     }
   }
 
-  template <typename T>
+  template <typename PipelineTask>
   void TopDeep() {
     auto [a, b, c] = GetParam();
-    Polynomial<SimpleTerm, T>(
+    Polynomial<SimpleTerm, PipelineTask>(
         a, b, c, [&](auto& term) { return this->MakeTopDeepPipelinePlexes(term); });
-    Polynomial<DrainOnlyTerm, T>(
+    Polynomial<DrainOnlyTerm, PipelineTask>(
         a, b, c, [&](auto& term) { return this->MakeTopDeepPipelinePlexes(term); });
-    Polynomial<YieldTerm, T>(
+    Polynomial<YieldTerm, PipelineTask>(
         a, b, c, [&](auto& term) { return this->MakeTopDeepPipelinePlexes(term); });
-    Polynomial<DrainOnlyPowYieldPlusTerm, T>(
+    Polynomial<DrainOnlyPowYieldPlusTerm, PipelineTask>(
         a, b, c, [&](auto& term) { return this->MakeTopDeepPipelinePlexes(term); });
-    Polynomial<YieldPowDrainOnlyPlusTerm, T>(
+    Polynomial<YieldPowDrainOnlyPlusTerm, PipelineTask>(
         a, b, c, [&](auto& term) { return this->MakeTopDeepPipelinePlexes(term); });
   }
 
-  template <typename T>
+  template <typename PipelineTask>
   void BottomDeep() {
     auto [a, b, c] = GetParam();
-    Polynomial<SimpleTerm, T>(
+    Polynomial<SimpleTerm, PipelineTask>(
         a, b, c, [&](auto& term) { return this->MakeBottomDeepPipelinePlexes(term); });
-    Polynomial<DrainOnlyTerm, T>(
+    Polynomial<DrainOnlyTerm, PipelineTask>(
         a, b, c, [&](auto& term) { return this->MakeBottomDeepPipelinePlexes(term); });
-    Polynomial<YieldTerm, T>(
+    Polynomial<YieldTerm, PipelineTask>(
         a, b, c, [&](auto& term) { return this->MakeBottomDeepPipelinePlexes(term); });
-    Polynomial<DrainOnlyPowYieldPlusTerm, T>(
+    Polynomial<DrainOnlyPowYieldPlusTerm, PipelineTask>(
         a, b, c, [&](auto& term) { return this->MakeBottomDeepPipelinePlexes(term); });
-    Polynomial<YieldPowDrainOnlyPlusTerm, T>(
+    Polynomial<YieldPowDrainOnlyPlusTerm, PipelineTask>(
         a, b, c, [&](auto& term) { return this->MakeBottomDeepPipelinePlexes(term); });
   }
 
-  template <typename T>
+  template <typename PipelineTask>
   void Bushy() {
     auto [a, b, c] = GetParam();
-    Polynomial<SimpleTerm, T>(
+    Polynomial<SimpleTerm, PipelineTask>(
         a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, true); });
-    Polynomial<SimpleTerm, T>(
+    Polynomial<SimpleTerm, PipelineTask>(
         a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, false); });
-    Polynomial<DrainOnlyTerm, T>(
+    Polynomial<DrainOnlyTerm, PipelineTask>(
         a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, true); });
-    Polynomial<DrainOnlyTerm, T>(
+    Polynomial<DrainOnlyTerm, PipelineTask>(
         a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, false); });
-    Polynomial<YieldTerm, T>(
+    Polynomial<YieldTerm, PipelineTask>(
         a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, true); });
-    Polynomial<YieldTerm, T>(
+    Polynomial<YieldTerm, PipelineTask>(
         a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, false); });
-    Polynomial<DrainOnlyPowYieldPlusTerm, T>(
+    Polynomial<DrainOnlyPowYieldPlusTerm, PipelineTask>(
         a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, true); });
-    Polynomial<DrainOnlyPowYieldPlusTerm, T>(
+    Polynomial<DrainOnlyPowYieldPlusTerm, PipelineTask>(
         a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, false); });
-    Polynomial<YieldPowDrainOnlyPlusTerm, T>(
+    Polynomial<YieldPowDrainOnlyPlusTerm, PipelineTask>(
         a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, true); });
-    Polynomial<YieldPowDrainOnlyPlusTerm, T>(
+    Polynomial<YieldPowDrainOnlyPlusTerm, PipelineTask>(
         a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, false); });
   }
 };
