@@ -6,6 +6,7 @@
 #include <folly/executors/IOThreadPoolExecutor.h>
 #include <folly/futures/Future.h>
 #include <gtest/gtest.h>
+#include <coroutine>
 #include <stack>
 
 #define ARRA_DCHECK ARROW_DCHECK
@@ -34,23 +35,6 @@ struct TaskStatus {
   bool IsYield() { return code_ == Code::YIELD; }
   bool IsFinished() { return code_ == Code::FINISHED; }
   bool IsCancelled() { return code_ == Code::CANCELLED; }
-
-  std::string ToString() {
-    switch (code_) {
-      case Code::CONTINUE:
-        return "CONTINUE";
-      case Code::BACKPRESSURE:
-        return "BACKPRESSURE";
-      case Code::YIELD:
-        return "YIELD";
-      case Code::FINISHED:
-        return "FINISHED";
-      case Code::CANCELLED:
-        return "CANCELLED";
-      default:
-        return "UNKNOWN";
-    }
-  }
 
  public:
   static TaskStatus Continue() { return TaskStatus(Code::CONTINUE); }
@@ -280,198 +264,433 @@ class PipelineStageBuilder {
       stages_;
 };
 
-class SyncPipelineTask {
- private:
-  class PipelinePlexTask {
-   public:
-    PipelinePlexTask(size_t dop, PhysicalPipelinePlex plex)
-        : dop_(dop), plex_(std::move(plex)), local_states_(dop) {
-      std::vector<size_t> drains;
-      for (size_t i = 0; i < plex_.pipes.size(); ++i) {
-        if (plex_.pipes[i].second.has_value()) {
-          drains.push_back(i);
-        }
-      }
-      for (size_t i = 0; i < dop; ++i) {
-        local_states_[i].drains = drains;
-      }
-    }
-
-    PipelinePlexTask(const PipelinePlexTask& other)
-        : PipelinePlexTask(other.dop_, other.plex_) {}
-
-    PipelinePlexTask(PipelinePlexTask&& other)
-        : PipelinePlexTask(other.dop_, std::move(other.plex_)) {}
-
-    arrow::Result<OperatorResult> Run(ThreadId thread_id) {
-      if (cancelled) {
-        return OperatorResult::Cancelled();
-      }
-
-      if (local_states_[thread_id].backpressure) {
-        auto result = plex_.sink(thread_id, std::nullopt);
-        if (!result.ok()) {
-          cancelled = true;
-          return result.status();
-        }
-        ARRA_DCHECK(result->IsPipeSinkNeedsMore() || result->IsSinkBackpressure());
-        if (!result->IsSinkBackpressure()) {
-          local_states_[thread_id].backpressure = false;
-          return OperatorResult::PipeSinkNeedsMore();
-        }
-        return OperatorResult::SinkBackpressure();
-      }
-
-      if (!local_states_[thread_id].pipe_stack.empty()) {
-        auto pipe_id = local_states_[thread_id].pipe_stack.top();
-        local_states_[thread_id].pipe_stack.pop();
-        return Pipe(thread_id, pipe_id, std::nullopt);
-      }
-
-      if (!local_states_[thread_id].source_done) {
-        auto result = plex_.source(thread_id);
-        if (!result.ok()) {
-          cancelled = true;
-          return result.status();
-        }
-        if (result->IsSourceNotReady()) {
-          return OperatorResult::SourceNotReady();
-        } else if (result->IsFinished()) {
-          local_states_[thread_id].source_done = true;
-          if (result->GetOutput().has_value()) {
-            return Pipe(thread_id, 0, std::move(result->GetOutput()));
-          }
-        } else {
-          ARRA_DCHECK(result->IsSourcePipeHasMore());
-          ARRA_DCHECK(result->GetOutput().has_value());
-          return Pipe(thread_id, 0, std::move(result->GetOutput()));
-        }
-      }
-
-      if (local_states_[thread_id].draining >= local_states_[thread_id].drains.size()) {
-        return OperatorResult::Finished(std::nullopt);
-      }
-
-      for (; local_states_[thread_id].draining < local_states_[thread_id].drains.size();
-           ++local_states_[thread_id].draining) {
-        auto drain_id =
-            local_states_[thread_id].drains[local_states_[thread_id].draining];
-        auto result = plex_.pipes[drain_id].second.value()(thread_id);
-        if (!result.ok()) {
-          cancelled = true;
-          return result.status();
-        }
-        if (local_states_[thread_id].yield) {
-          ARRA_DCHECK(result->IsPipeSinkNeedsMore());
-          local_states_[thread_id].yield = false;
-          return OperatorResult::PipeSinkNeedsMore();
-        }
-        if (result->IsPipeYield()) {
-          ARRA_DCHECK(!local_states_[thread_id].yield);
-          local_states_[thread_id].yield = true;
-          return OperatorResult::PipeYield();
-        }
-        ARRA_DCHECK(result->IsSourcePipeHasMore() || result->IsFinished());
-        if (result->GetOutput().has_value()) {
-          if (result->IsFinished()) {
-            ++local_states_[thread_id].draining;
-          }
-          return Pipe(thread_id, drain_id + 1, std::move(result->GetOutput()));
-        }
-      }
-
-      return OperatorResult::Finished(std::nullopt);
-    }
-
-   private:
-    arrow::Result<OperatorResult> Pipe(ThreadId thread_id, size_t pipe_id,
-                                       std::optional<Batch> input) {
-      for (size_t i = pipe_id; i < plex_.pipes.size(); i++) {
-        auto result = plex_.pipes[i].first(thread_id, std::move(input));
-        if (!result.ok()) {
-          cancelled = true;
-          return result.status();
-        }
-        if (local_states_[thread_id].yield) {
-          ARRA_DCHECK(result->IsPipeSinkNeedsMore());
-          local_states_[thread_id].pipe_stack.push(i);
-          local_states_[thread_id].yield = false;
-          return OperatorResult::PipeSinkNeedsMore();
-        }
-        if (result->IsPipeYield()) {
-          ARRA_DCHECK(!local_states_[thread_id].yield);
-          local_states_[thread_id].pipe_stack.push(i);
-          local_states_[thread_id].yield = true;
-          return OperatorResult::PipeYield();
-        }
-        ARRA_DCHECK(result->IsPipeSinkNeedsMore() || result->IsPipeEven() ||
-                    result->IsSourcePipeHasMore());
-        if (result->IsPipeEven() || result->IsSourcePipeHasMore()) {
-          if (result->IsSourcePipeHasMore()) {
-            local_states_[thread_id].pipe_stack.push(i);
-          }
-          ARRA_DCHECK(result->GetOutput().has_value());
-          input = std::move(result->GetOutput());
-        } else {
-          return OperatorResult::PipeSinkNeedsMore();
-        }
-      }
-
-      auto result = plex_.sink(thread_id, std::move(input));
-      if (!result.ok()) {
-        cancelled = true;
-        return result.status();
-      }
-      ARRA_DCHECK(result->IsPipeSinkNeedsMore() || result->IsSinkBackpressure());
-      if (result->IsSinkBackpressure()) {
-        local_states_[thread_id].backpressure = true;
-        return OperatorResult::SinkBackpressure();
-      }
-      return OperatorResult::PipeSinkNeedsMore();
-    }
-
-   private:
-    size_t dop_;
-    PhysicalPipelinePlex plex_;
-
-    struct ThreadLocalState {
-      std::stack<size_t> pipe_stack;
-      bool source_done = false;
-      std::vector<size_t> drains;
-      size_t draining = 0;
-      bool backpressure = false, yield = false;
-    };
-    std::vector<ThreadLocalState> local_states_;
-    std::atomic_bool cancelled = false;
-  };
-
+template <typename PipelinePlexTask>
+class PipelineTask {
  public:
-  static SyncPipelineTask Make(size_t dop, PhysicalPipeline pipeline) {
+  static PipelineTask Make(size_t dop, PhysicalPipeline pipeline) {
     return {dop, std::move(pipeline)};
   }
 
-  SyncPipelineTask(size_t dop, PhysicalPipeline pipeline) {
+  PipelineTask(size_t dop, PhysicalPipeline pipeline) {
     for (auto& plex : pipeline.plexes) {
       tasks_.push_back(PipelinePlexTask(dop, std::move(plex)));
     }
   }
 
   arrow::Result<OperatorResult> Run(ThreadId thread_id) {
+    bool all_finished = true;
     for (auto& task : tasks_) {
       ARRA_ASSIGN_OR_RAISE(auto result, task.Run(thread_id));
       if (result.IsFinished()) {
         ARRA_DCHECK(!result.GetOutput().has_value());
+      } else {
+        all_finished = false;
       }
       if (!result.IsFinished() && !result.IsSourceNotReady()) {
         return result;
       }
     }
-    return OperatorResult::Finished(std::nullopt);
+    if (all_finished) {
+      return OperatorResult::Finished(std::nullopt);
+    } else {
+      return OperatorResult::SourceNotReady();
+    }
   }
 
  private:
   std::vector<PipelinePlexTask> tasks_;
 };
+
+class SyncPipelinePlexTask {
+ public:
+  SyncPipelinePlexTask(size_t dop, PhysicalPipelinePlex plex)
+      : dop_(dop), plex_(std::move(plex)), local_states_(dop) {
+    std::vector<size_t> drains;
+    for (size_t i = 0; i < plex_.pipes.size(); ++i) {
+      if (plex_.pipes[i].second.has_value()) {
+        drains.push_back(i);
+      }
+    }
+    for (size_t i = 0; i < dop; ++i) {
+      local_states_[i].drains = drains;
+    }
+  }
+
+  SyncPipelinePlexTask(const SyncPipelinePlexTask& other)
+      : SyncPipelinePlexTask(other.dop_, other.plex_) {}
+
+  SyncPipelinePlexTask(SyncPipelinePlexTask&& other)
+      : SyncPipelinePlexTask(other.dop_, std::move(other.plex_)) {}
+
+  arrow::Result<OperatorResult> Run(ThreadId thread_id) {
+    if (cancelled) {
+      return OperatorResult::Cancelled();
+    }
+
+    if (local_states_[thread_id].backpressure) {
+      auto result = plex_.sink(thread_id, std::nullopt);
+      if (!result.ok()) {
+        cancelled = true;
+        return result.status();
+      }
+      ARRA_DCHECK(result->IsPipeSinkNeedsMore() || result->IsSinkBackpressure());
+      if (!result->IsSinkBackpressure()) {
+        local_states_[thread_id].backpressure = false;
+        return OperatorResult::PipeSinkNeedsMore();
+      }
+      return OperatorResult::SinkBackpressure();
+    }
+
+    if (!local_states_[thread_id].pipe_stack.empty()) {
+      auto pipe_id = local_states_[thread_id].pipe_stack.top();
+      local_states_[thread_id].pipe_stack.pop();
+      return Pipe(thread_id, pipe_id, std::nullopt);
+    }
+
+    if (!local_states_[thread_id].source_done) {
+      auto result = plex_.source(thread_id);
+      if (!result.ok()) {
+        cancelled = true;
+        return result.status();
+      }
+      if (result->IsSourceNotReady()) {
+        return OperatorResult::SourceNotReady();
+      } else if (result->IsFinished()) {
+        local_states_[thread_id].source_done = true;
+        if (result->GetOutput().has_value()) {
+          return Pipe(thread_id, 0, std::move(result->GetOutput()));
+        }
+      } else {
+        ARRA_DCHECK(result->IsSourcePipeHasMore());
+        ARRA_DCHECK(result->GetOutput().has_value());
+        return Pipe(thread_id, 0, std::move(result->GetOutput()));
+      }
+    }
+
+    if (local_states_[thread_id].draining >= local_states_[thread_id].drains.size()) {
+      return OperatorResult::Finished(std::nullopt);
+    }
+
+    for (; local_states_[thread_id].draining < local_states_[thread_id].drains.size();
+         ++local_states_[thread_id].draining) {
+      auto drain_id = local_states_[thread_id].drains[local_states_[thread_id].draining];
+      auto result = plex_.pipes[drain_id].second.value()(thread_id);
+      if (!result.ok()) {
+        cancelled = true;
+        return result.status();
+      }
+      if (local_states_[thread_id].yield) {
+        ARRA_DCHECK(result->IsPipeSinkNeedsMore());
+        local_states_[thread_id].yield = false;
+        return OperatorResult::PipeSinkNeedsMore();
+      }
+      if (result->IsPipeYield()) {
+        ARRA_DCHECK(!local_states_[thread_id].yield);
+        local_states_[thread_id].yield = true;
+        return OperatorResult::PipeYield();
+      }
+      ARRA_DCHECK(result->IsSourcePipeHasMore() || result->IsFinished());
+      if (result->GetOutput().has_value()) {
+        if (result->IsFinished()) {
+          ++local_states_[thread_id].draining;
+        }
+        return Pipe(thread_id, drain_id + 1, std::move(result->GetOutput()));
+      }
+    }
+
+    return OperatorResult::Finished(std::nullopt);
+  }
+
+ private:
+  arrow::Result<OperatorResult> Pipe(ThreadId thread_id, size_t pipe_id,
+                                     std::optional<Batch> input) {
+    for (size_t i = pipe_id; i < plex_.pipes.size(); ++i) {
+      auto result = plex_.pipes[i].first(thread_id, std::move(input));
+      if (!result.ok()) {
+        cancelled = true;
+        return result.status();
+      }
+      if (local_states_[thread_id].yield) {
+        ARRA_DCHECK(result->IsPipeSinkNeedsMore());
+        local_states_[thread_id].pipe_stack.push(i);
+        local_states_[thread_id].yield = false;
+        return OperatorResult::PipeSinkNeedsMore();
+      }
+      if (result->IsPipeYield()) {
+        ARRA_DCHECK(!local_states_[thread_id].yield);
+        local_states_[thread_id].pipe_stack.push(i);
+        local_states_[thread_id].yield = true;
+        return OperatorResult::PipeYield();
+      }
+      ARRA_DCHECK(result->IsPipeSinkNeedsMore() || result->IsPipeEven() ||
+                  result->IsSourcePipeHasMore());
+      if (result->IsPipeEven() || result->IsSourcePipeHasMore()) {
+        if (result->IsSourcePipeHasMore()) {
+          local_states_[thread_id].pipe_stack.push(i);
+        }
+        ARRA_DCHECK(result->GetOutput().has_value());
+        input = std::move(result->GetOutput());
+      } else {
+        return OperatorResult::PipeSinkNeedsMore();
+      }
+    }
+
+    auto result = plex_.sink(thread_id, std::move(input));
+    if (!result.ok()) {
+      cancelled = true;
+      return result.status();
+    }
+    ARRA_DCHECK(result->IsPipeSinkNeedsMore() || result->IsSinkBackpressure());
+    if (result->IsSinkBackpressure()) {
+      local_states_[thread_id].backpressure = true;
+      return OperatorResult::SinkBackpressure();
+    }
+    return OperatorResult::PipeSinkNeedsMore();
+  }
+
+ private:
+  size_t dop_;
+  PhysicalPipelinePlex plex_;
+
+  struct ThreadLocalState {
+    std::stack<size_t> pipe_stack;
+    bool source_done = false;
+    std::vector<size_t> drains;
+    size_t draining = 0;
+    bool backpressure = false, yield = false;
+  };
+  std::vector<ThreadLocalState> local_states_;
+  std::atomic_bool cancelled = false;
+};
+
+struct CoroPipelinePlexTask {
+  struct Coroutine {
+    struct promise_type {
+      using Handle = std::coroutine_handle<promise_type>;
+      Coroutine get_return_object() { return Coroutine{Handle::from_promise(*this)}; }
+      std::suspend_always initial_suspend() noexcept { return {}; }
+      std::suspend_always final_suspend() noexcept { return {}; }
+      std::suspend_always yield_value(arrow::Result<OperatorResult>&& value) noexcept {
+        current_value_ = std::move(value);
+        return {};
+      }
+      void return_value(arrow::Result<OperatorResult>&& value) noexcept {
+        current_value_ = std::move(value);
+      }
+      void unhandled_exception() {}
+      arrow::Result<OperatorResult> current_value_;
+    };
+
+    Coroutine(typename promise_type::Handle handle) : handle_(handle) {}
+    Coroutine(const Coroutine&) = delete;
+    Coroutine(Coroutine&& coro) : handle_(coro.handle_) { coro.handle_ = nullptr; }
+    ~Coroutine() {
+      if (handle_) {
+        handle_.destroy();
+      }
+    }
+
+    bool Done() const { return handle_.done(); }
+
+    arrow::Result<OperatorResult> Run() {
+      handle_.resume();
+      return std::move(handle_.promise().current_value_);
+    }
+
+   private:
+    typename promise_type::Handle handle_;
+  };
+
+ public:
+  CoroPipelinePlexTask(size_t dop, PhysicalPipelinePlex plex)
+      : dop_(dop), plex_(std::move(plex)) {
+    std::vector<size_t> drains;
+    for (size_t i = 0; i < plex_.pipes.size(); ++i) {
+      if (plex_.pipes[i].second.has_value()) {
+        drains.push_back(i);
+      }
+    }
+    for (size_t i = 0; i < dop; ++i) {
+      local_states_.emplace_back(ThreadLocalState{drains, CoroRun(i)});
+    }
+  }
+
+  CoroPipelinePlexTask(const CoroPipelinePlexTask& other)
+      : CoroPipelinePlexTask(other.dop_, other.plex_) {}
+
+  CoroPipelinePlexTask(CoroPipelinePlexTask&& other)
+      : CoroPipelinePlexTask(other.dop_, std::move(other.plex_)) {}
+
+  arrow::Result<OperatorResult> Run(ThreadId thread_id) {
+    if (cancelled) {
+      return OperatorResult::Cancelled();
+    }
+    if (local_states_[thread_id].coroutine.Done()) {
+      return OperatorResult::Finished(std::nullopt);
+    }
+    return local_states_[thread_id].coroutine.Run();
+  }
+
+ private:
+  Coroutine CoroRun(ThreadId thread_id) {
+    bool source_done = false;
+    while (!source_done) {
+      auto result = plex_.source(thread_id);
+      if (!result.ok()) {
+        cancelled = true;
+        co_return result.status();
+      }
+      while (true) {
+        if (result->IsSourceNotReady()) {
+          co_yield OperatorResult::SourceNotReady();
+          result = plex_.source(thread_id);
+          if (!result.ok()) {
+            cancelled = true;
+            co_return result.status();
+          }
+        } else if (result->IsFinished()) {
+          source_done = true;
+          break;
+        } else {
+          ARRA_DCHECK(result->IsSourcePipeHasMore());
+          ARRA_DCHECK(result->GetOutput().has_value());
+          break;
+        }
+      }
+
+      if (result->GetOutput().has_value()) {
+        auto coro_pipe = CoroPipe(thread_id, 0, std::move(result->GetOutput()));
+        while (!coro_pipe.Done()) {
+          auto result = coro_pipe.Run();
+          co_yield std::move(result);
+        }
+      }
+    }
+
+    for (size_t i = 0; i < local_states_[thread_id].drains.size(); ++i) {
+      auto drain_id = local_states_[thread_id].drains[i];
+      auto coro_drain = CoroDrain(thread_id, drain_id);
+      while (!coro_drain.Done()) {
+        auto result = coro_drain.Run();
+        co_yield std::move(result);
+      }
+    }
+
+    co_return OperatorResult::Finished(std::nullopt);
+  }
+
+  Coroutine CoroPipe(ThreadId thread_id, size_t pipe_id, std::optional<Batch> input) {
+    for (size_t i = pipe_id; i < plex_.pipes.size(); ++i) {
+      auto result = plex_.pipes[i].first(thread_id, std::move(input));
+      if (!result.ok()) {
+        cancelled = true;
+        co_return result.status();
+      }
+      while (result->IsSourcePipeHasMore()) {
+        auto coro_pipe = CoroPipe(thread_id, i + 1, std::move(result->GetOutput()));
+        while (!coro_pipe.Done()) {
+          auto result = coro_pipe.Run();
+          co_yield std::move(result);
+        }
+        result = plex_.pipes[i].first(thread_id, std::nullopt);
+        if (!result.ok()) {
+          cancelled = true;
+          co_return result.status();
+        }
+      }
+      if (result->IsPipeSinkNeedsMore()) {
+        co_return OperatorResult::PipeSinkNeedsMore();
+      }
+      if (result->IsPipeEven()) {
+        ARRA_DCHECK(result->GetOutput().has_value());
+        input = std::move(result->GetOutput());
+        continue;
+      }
+      if (result->IsPipeYield()) {
+        co_yield OperatorResult::PipeYield();
+        result = plex_.pipes[i].first(thread_id, std::nullopt);
+        if (!result.ok()) {
+          cancelled = true;
+          co_return result.status();
+        }
+        ARRA_DCHECK(result->IsPipeSinkNeedsMore());
+        co_yield OperatorResult::PipeSinkNeedsMore();
+        auto coro_pipe = CoroPipe(thread_id, i, std::nullopt);
+        while (true) {
+          auto result = coro_pipe.Run();
+          if (coro_pipe.Done()) {
+            co_return std::move(result);
+          }
+          co_yield std::move(result);
+        }
+      }
+    }
+
+    auto result = plex_.sink(thread_id, std::move(input));
+    if (!result.ok()) {
+      cancelled = true;
+      co_return result.status();
+    }
+    while (result->IsSinkBackpressure()) {
+      co_yield OperatorResult::SinkBackpressure();
+      result = plex_.sink(thread_id, std::nullopt);
+      if (!result.ok()) {
+        cancelled = true;
+        co_return result.status();
+      }
+    }
+    ARRA_DCHECK(result->IsPipeSinkNeedsMore());
+    co_return OperatorResult::PipeSinkNeedsMore();
+  }
+
+  Coroutine CoroDrain(ThreadId thread_id, size_t drain_id) {
+    while (true) {
+      auto result = plex_.pipes[drain_id].second.value()(thread_id);
+      if (!result.ok()) {
+        cancelled = true;
+        co_return result.status();
+      }
+      if (result->IsPipeYield()) {
+        co_yield OperatorResult::PipeYield();
+        result = plex_.pipes[drain_id].second.value()(thread_id);
+        if (!result.ok()) {
+          cancelled = true;
+          co_return result.status();
+        }
+        ARRA_DCHECK(result->IsPipeSinkNeedsMore());
+        co_yield OperatorResult::PipeSinkNeedsMore();
+        continue;
+      }
+      ARRA_DCHECK(result->IsSourcePipeHasMore() || result->IsFinished());
+      if (result->GetOutput().has_value()) {
+        auto coro_pipe =
+            CoroPipe(thread_id, drain_id + 1, std::move(result->GetOutput()));
+        while (!coro_pipe.Done()) {
+          auto result = coro_pipe.Run();
+          co_yield std::move(result);
+        }
+      }
+      if (result->IsFinished()) {
+        co_return OperatorResult::PipeSinkNeedsMore();
+      }
+    }
+    co_return OperatorResult::PipeSinkNeedsMore();
+  }
+
+ private:
+  size_t dop_;
+  PhysicalPipelinePlex plex_;
+
+  struct ThreadLocalState {
+    std::vector<size_t> drains;
+    Coroutine coroutine;
+  };
+  std::vector<ThreadLocalState> local_states_;
+  std::atomic_bool cancelled = false;
+};
+
+using SyncPipelineTask = PipelineTask<SyncPipelinePlexTask>;
+using CoroPipelineTask = PipelineTask<CoroPipelinePlexTask>;
 
 template <typename PipelineTask, typename Scheduler>
 class Driver {
@@ -685,8 +904,6 @@ class FollyFutureDoublePoolScheduler {
   TaskObserver* observer_;
 };
 
-// TODO: Maybe a C++20 coroutine-based scheduler.
-
 class InfiniteSource : public SourceOp {
  public:
   InfiniteSource(Batch batch) : batch_(std::move(batch)) {}
@@ -774,6 +991,64 @@ class DistributedMemorySource : public SourceOp {
   std::vector<ThreadLocal> thread_locals_;
 };
 
+class SlowDelegateSource : public SourceOp {
+ public:
+  SlowDelegateSource(size_t slowness, SourceOp* source)
+      : slowness_(slowness), source_(source), counter_(0) {}
+
+  PipelineTaskSource Source() override {
+    return [&](ThreadId thread_id) -> arrow::Result<OperatorResult> {
+      bool being_slow = counter_++ % slowness_ != 0;
+      if (being_slow) {
+        return OperatorResult::SourceNotReady();
+      } else {
+        return source_->Source()(thread_id);
+      }
+    };
+  }
+
+  TaskGroups Frontend() override { return source_->Frontend(); }
+
+  TaskGroups Backend() override { return source_->Backend(); }
+
+ private:
+  size_t slowness_;
+  SourceOp* source_;
+
+  std::atomic<size_t> counter_;
+};
+
+class DistributedSlowDelegateSource : public SourceOp {
+ public:
+  DistributedSlowDelegateSource(size_t dop, size_t slowness, SourceOp* source)
+      : slowness_(slowness), source_(source), thread_locals_(dop) {}
+
+  PipelineTaskSource Source() override {
+    return [&](ThreadId thread_id) -> arrow::Result<OperatorResult> {
+      bool being_slow = thread_locals_[thread_id].counter++ % slowness_ != 0;
+      if (being_slow) {
+        return OperatorResult::SourceNotReady();
+      } else {
+        return source_->Source()(thread_id);
+      }
+    };
+  }
+
+  TaskGroups Frontend() override { return source_->Frontend(); }
+
+  TaskGroups Backend() override { return source_->Backend(); }
+
+ private:
+  size_t dop_;
+  size_t slowness_;
+  SourceOp* source_;
+
+  struct ThreadLocal {
+    size_t counter = 0;
+  };
+  std::vector<ThreadLocal> thread_locals_;
+};
+
 class BlackHoleSink : public SinkOp {
  public:
   PipelineTaskSink Sink() override {
@@ -806,6 +1081,31 @@ class MemorySink : public SinkOp {
  public:
   std::mutex mutex_;
   std::vector<Batch> batches_;
+};
+
+class DistributedMemorySink : public SinkOp {
+ public:
+  DistributedMemorySink(size_t dop) : thread_locals_(dop) {}
+
+  PipelineTaskSink Sink() override {
+    return [&](ThreadId thread_id,
+               std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+      if (input.has_value()) {
+        thread_locals_[thread_id].batches.push_back(std::move(input.value()));
+      }
+      return OperatorResult::PipeSinkNeedsMore();
+    };
+  }
+
+  TaskGroups Frontend() override { return {}; }
+
+  TaskGroups Backend() override { return {}; }
+
+ public:
+  struct ThreadLocal {
+    std::vector<Batch> batches;
+  };
+  std::vector<ThreadLocal> thread_locals_;
 };
 
 class IdentityPipe : public PipeOp {
@@ -980,7 +1280,7 @@ class AccumulatePipe : public PipeOp {
       thread_locals_[thread_id].batch =
           Batch(thread_locals_[thread_id].batch.begin() + n_,
                 thread_locals_[thread_id].batch.end());
-      if (thread_locals_[thread_id].batch.size() > n_) {
+      if (thread_locals_[thread_id].batch.size() > 0) {
         return OperatorResult::SourcePipeHasMore(std::move(output));
       } else {
         return OperatorResult::PipeEven(std::move(output));
@@ -1794,7 +2094,17 @@ TEST(PipelineTest, OddQuadroStagePipeline) {
   ASSERT_EQ(stages[3].pipeline.plexes.size(), 1);
 }
 
-TEST(ControlFlowTest, OneToOne) {
+template <typename T>
+class ControlFlowTest : public testing::Test {
+ protected:
+  using PipelineTaskType = T;
+};
+
+using PipelineTaskTypes = ::testing::Types<SyncPipelineTask, CoroPipelineTask>;
+TYPED_TEST_SUITE(ControlFlowTest, PipelineTaskTypes);
+
+TYPED_TEST(ControlFlowTest, OneToOne) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
   size_t dop = 8;
   MemorySource source({{1}});
   IdentityPipe pipe;
@@ -1803,7 +2113,7 @@ TEST(ControlFlowTest, OneToOne) {
   folly::CPUThreadPoolExecutor cpu_executor(4);
   folly::IOThreadPoolExecutor io_executor(1);
   FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
-  Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(SyncPipelineTask::Make,
+  Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(PipelineTaskType::Make,
                                                                   &scheduler);
   auto result = driver.Run(dop, {pipeline});
   ASSERT_OK(result);
@@ -1812,7 +2122,8 @@ TEST(ControlFlowTest, OneToOne) {
   ASSERT_EQ(sink.batches_[0], (Batch{1}));
 }
 
-TEST(ControlFlowTest, OneToThreeFlat) {
+TYPED_TEST(ControlFlowTest, OneToThreeFlat) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
   size_t dop = 8;
   MemorySource source({{1}});
   PowerFlatPipe pipe(3);
@@ -1821,7 +2132,7 @@ TEST(ControlFlowTest, OneToThreeFlat) {
   folly::CPUThreadPoolExecutor cpu_executor(4);
   folly::IOThreadPoolExecutor io_executor(1);
   FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
-  Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(SyncPipelineTask::Make,
+  Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(PipelineTaskType::Make,
                                                                   &scheduler);
   auto result = driver.Run(dop, {pipeline});
   ASSERT_OK(result);
@@ -1830,7 +2141,8 @@ TEST(ControlFlowTest, OneToThreeFlat) {
   ASSERT_EQ(sink.batches_[0], (Batch{1, 1, 1}));
 }
 
-TEST(ControlFlowTest, OneToThreeSliced) {
+TYPED_TEST(ControlFlowTest, OneToThreeSliced) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
   size_t dop = 8;
   MemorySource source({{1}});
   PowerSlicedPipe pipe(dop, 3);
@@ -1839,7 +2151,7 @@ TEST(ControlFlowTest, OneToThreeSliced) {
   folly::CPUThreadPoolExecutor cpu_executor(4);
   folly::IOThreadPoolExecutor io_executor(1);
   FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
-  Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(SyncPipelineTask::Make,
+  Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(PipelineTaskType::Make,
                                                                   &scheduler);
   auto result = driver.Run(dop, {pipeline});
   ASSERT_OK(result);
@@ -1850,7 +2162,8 @@ TEST(ControlFlowTest, OneToThreeSliced) {
   }
 }
 
-TEST(ControlFlowTest, OneToThreeSource) {
+TYPED_TEST(ControlFlowTest, OneToThreeSource) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
   size_t dop = 8;
   MemorySource source({{1}});
   PowerSourcePipe pipe(3);
@@ -1859,7 +2172,7 @@ TEST(ControlFlowTest, OneToThreeSource) {
   folly::CPUThreadPoolExecutor cpu_executor(4);
   folly::IOThreadPoolExecutor io_executor(1);
   FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
-  Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(SyncPipelineTask::Make,
+  Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(PipelineTaskType::Make,
                                                                   &scheduler);
   auto result = driver.Run(dop, {pipeline});
   ASSERT_OK(result);
@@ -1870,7 +2183,8 @@ TEST(ControlFlowTest, OneToThreeSource) {
   }
 }
 
-TEST(ControlFlowTest, AccumulateThree) {
+TYPED_TEST(ControlFlowTest, AccumulateThree) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
   {
     size_t dop = 1;
     DistributedMemorySource source(dop, {{1}, {1}, {1}});
@@ -1880,8 +2194,8 @@ TEST(ControlFlowTest, AccumulateThree) {
     folly::CPUThreadPoolExecutor cpu_executor(4);
     folly::IOThreadPoolExecutor io_executor(1);
     FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
-    Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(
-        SyncPipelineTask::Make, &scheduler);
+    Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(
+        PipelineTaskType::Make, &scheduler);
     auto result = driver.Run(dop, {pipeline});
     ASSERT_OK(result);
     ASSERT_TRUE(result->IsFinished());
@@ -1900,8 +2214,8 @@ TEST(ControlFlowTest, AccumulateThree) {
     folly::CPUThreadPoolExecutor cpu_executor(4);
     folly::IOThreadPoolExecutor io_executor(1);
     FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
-    Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(
-        SyncPipelineTask::Make, &scheduler);
+    Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(
+        PipelineTaskType::Make, &scheduler);
     auto result = driver.Run(dop, {pipeline});
     ASSERT_OK(result);
     ASSERT_TRUE(result->IsFinished());
@@ -1917,7 +2231,66 @@ TEST(ControlFlowTest, AccumulateThree) {
   }
 }
 
-TEST(ControlFlowTest, BasicBackpressure) {
+TYPED_TEST(ControlFlowTest, BasicSourceNotReady) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
+  size_t dop = 1;
+  MemorySource internal_source_1({{1}, {1}, {1}}), internal_source_2({{2}, {2}, {2}});
+  SlowDelegateSource source_1(3, &internal_source_1), source_2(2, &internal_source_2);
+  MemorySink sink;
+  LogicalPipeline pipeline{{{&source_1, {}}, {&source_2, {}}}, &sink};
+  folly::CPUThreadPoolExecutor cpu_executor(4);
+  folly::IOThreadPoolExecutor io_executor(1);
+  FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+  Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(PipelineTaskType::Make,
+                                                                  &scheduler);
+  auto result = driver.Run(dop, {pipeline});
+  ASSERT_OK(result);
+  ASSERT_TRUE(result->IsFinished());
+  ASSERT_EQ(sink.batches_.size(), 6);
+  std::vector<Batch> batches_exp;
+  if (sink.batches_[0][0] == 1) {
+    batches_exp = {{1}, {2}, {1}, {2}, {1}, {2}};
+  } else {
+    batches_exp = {{2}, {1}, {2}, {2}, {1}, {1}};
+  }
+  for (size_t i = 0; i < 6; ++i) {
+    ASSERT_EQ(sink.batches_[i], batches_exp[i]);
+  }
+}
+
+TYPED_TEST(ControlFlowTest, DistributedSourceNotReady) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
+  size_t dop = 8;
+  DistributedMemorySource internal_source_1(dop, {{1}, {1}, {1}}),
+      internal_source_2(dop, {{2}, {2}, {2}});
+  DistributedSlowDelegateSource source_1(dop, 3, &internal_source_1),
+      source_2(dop, 2, &internal_source_2);
+  DistributedMemorySink sink(dop);
+  LogicalPipeline pipeline{{{&source_1, {}}, {&source_2, {}}}, &sink};
+  folly::CPUThreadPoolExecutor cpu_executor(4);
+  folly::IOThreadPoolExecutor io_executor(1);
+  FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+  Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(PipelineTaskType::Make,
+                                                                  &scheduler);
+  auto result = driver.Run(dop, {pipeline});
+  ASSERT_OK(result);
+  ASSERT_TRUE(result->IsFinished());
+  for (size_t i = 0; i < dop; ++i) {
+    ASSERT_EQ(sink.thread_locals_[i].batches.size(), 6);
+    std::vector<Batch> batches_exp;
+    if (sink.thread_locals_[i].batches[0][0] == 1) {
+      batches_exp = {{1}, {2}, {1}, {2}, {1}, {2}};
+    } else {
+      batches_exp = {{2}, {1}, {2}, {2}, {1}, {1}};
+    }
+    for (size_t j = 0; j < 6; ++j) {
+      ASSERT_EQ(sink.thread_locals_[i].batches[j], batches_exp[j]);
+    }
+  }
+}
+
+TYPED_TEST(ControlFlowTest, BasicBackpressure) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
   size_t dop = 8;
   BackpressureContexts ctx(dop);
   InfiniteSource internal_source({});
@@ -1930,7 +2303,7 @@ TEST(ControlFlowTest, BasicBackpressure) {
   folly::CPUThreadPoolExecutor cpu_executor(4);
   folly::IOThreadPoolExecutor io_executor(1);
   FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
-  Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(SyncPipelineTask::Make,
+  Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(PipelineTaskType::Make,
                                                                   &scheduler);
   auto result = driver.Run(dop, {pipeline});
   ASSERT_OK(result);
@@ -1945,7 +2318,8 @@ TEST(ControlFlowTest, BasicBackpressure) {
   }
 }
 
-TEST(ControlFlowTest, BasicError) {
+TYPED_TEST(ControlFlowTest, BasicError) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
   {
     size_t dop = 8;
     InfiniteSource source(Batch{});
@@ -1957,8 +2331,8 @@ TEST(ControlFlowTest, BasicError) {
     folly::CPUThreadPoolExecutor cpu_executor(4);
     folly::IOThreadPoolExecutor io_executor(1);
     FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
-    Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(
-        SyncPipelineTask::Make, &scheduler);
+    Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(
+        PipelineTaskType::Make, &scheduler);
     auto result = driver.Run(dop, {pipeline});
     ASSERT_NOT_OK(result);
     ASSERT_TRUE(result.status().IsInvalid());
@@ -1976,8 +2350,8 @@ TEST(ControlFlowTest, BasicError) {
     folly::CPUThreadPoolExecutor cpu_executor(4);
     folly::IOThreadPoolExecutor io_executor(1);
     FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
-    Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(
-        SyncPipelineTask::Make, &scheduler);
+    Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(
+        PipelineTaskType::Make, &scheduler);
     auto result = driver.Run(dop, {pipeline});
     ASSERT_NOT_OK(result);
     ASSERT_TRUE(result.status().IsInvalid());
@@ -1995,8 +2369,8 @@ TEST(ControlFlowTest, BasicError) {
     folly::CPUThreadPoolExecutor cpu_executor(4);
     folly::IOThreadPoolExecutor io_executor(1);
     FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
-    Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(
-        SyncPipelineTask::Make, &scheduler);
+    Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(
+        PipelineTaskType::Make, &scheduler);
     auto result = driver.Run(dop, {pipeline});
     ASSERT_NOT_OK(result);
     ASSERT_TRUE(result.status().IsInvalid());
@@ -2024,7 +2398,8 @@ class TaskObserver : public FollyFutureDoublePoolScheduler::TaskObserver {
   std::vector<std::unordered_set<std::pair<ThreadId, std::string>>> io_thread_infos_;
 };
 
-TEST(ControlFlowTest, BasicYield) {
+TYPED_TEST(ControlFlowTest, BasicYield) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
   {
     size_t dop = 8;
     MemorySource source({{1}, {1}, {1}});
@@ -2035,8 +2410,8 @@ TEST(ControlFlowTest, BasicYield) {
     folly::CPUThreadPoolExecutor cpu_executor(4);
     folly::IOThreadPoolExecutor io_executor(1);
     FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
-    Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(
-        SyncPipelineTask::Make, &scheduler);
+    Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(
+        PipelineTaskType::Make, &scheduler);
     auto result = driver.Run(dop, {pipeline});
     ASSERT_OK(result);
     ASSERT_EQ(sink.batches_.size(), 3);
@@ -2055,8 +2430,8 @@ TEST(ControlFlowTest, BasicYield) {
     folly::CPUThreadPoolExecutor cpu_executor(4);
     folly::IOThreadPoolExecutor io_executor(1);
     FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
-    Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(
-        SyncPipelineTask::Make, &scheduler);
+    Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(
+        PipelineTaskType::Make, &scheduler);
     auto result = driver.Run(dop, {pipeline});
     ASSERT_OK(result);
     ASSERT_EQ(sink.batches_.size(), 3);
@@ -2079,8 +2454,8 @@ TEST(ControlFlowTest, BasicYield) {
     TaskObserver observer(dop);
     FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor, &observer);
 
-    Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(
-        SyncPipelineTask::Make, &scheduler);
+    Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(
+        PipelineTaskType::Make, &scheduler);
     auto result = driver.Run(dop, {pipeline});
     ASSERT_OK(result);
     ASSERT_EQ(sink.batches_.size(), 4);
@@ -2098,7 +2473,8 @@ TEST(ControlFlowTest, BasicYield) {
   }
 }
 
-TEST(ControlFlowTest, Drain) {
+TYPED_TEST(ControlFlowTest, Drain) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
   size_t dop = 2;
   MemorySource source({{1}, {1}, {1}, {1}});
   DrainOnlyPipe pipe(dop);
@@ -2109,7 +2485,7 @@ TEST(ControlFlowTest, Drain) {
   folly::IOThreadPoolExecutor io_executor(1);
   FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
 
-  Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(SyncPipelineTask::Make,
+  Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(PipelineTaskType::Make,
                                                                   &scheduler);
   auto result = driver.Run(dop, {pipeline});
   ASSERT_OK(result);
@@ -2119,7 +2495,8 @@ TEST(ControlFlowTest, Drain) {
   }
 }
 
-TEST(ControlFlowTest, MultiDrain) {
+TYPED_TEST(ControlFlowTest, MultiDrain) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
   size_t dop = 2;
   MemorySource source({{1}, {1}, {1}, {1}});
   DrainOnlyPipe pipe_1(dop);
@@ -2132,7 +2509,7 @@ TEST(ControlFlowTest, MultiDrain) {
   folly::IOThreadPoolExecutor io_executor(1);
   FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
 
-  Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(SyncPipelineTask::Make,
+  Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(PipelineTaskType::Make,
                                                                   &scheduler);
   auto result = driver.Run(dop, {pipeline});
   ASSERT_OK(result);
@@ -2142,7 +2519,8 @@ TEST(ControlFlowTest, MultiDrain) {
   }
 }
 
-TEST(ControlFlowTest, DrainBackpressure) {
+TYPED_TEST(ControlFlowTest, DrainBackpressure) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
   size_t dop = 1;
   BackpressureContexts ctx(dop);
   DistributedMemorySource source(dop, {{1}, {1}, {1}, {1}});
@@ -2154,7 +2532,7 @@ TEST(ControlFlowTest, DrainBackpressure) {
   folly::CPUThreadPoolExecutor cpu_executor(4);
   folly::IOThreadPoolExecutor io_executor(1);
   FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
-  Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(SyncPipelineTask::Make,
+  Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(PipelineTaskType::Make,
                                                                   &scheduler);
   auto result = driver.Run(dop, {pipeline});
   ASSERT_OK(result);
@@ -2169,7 +2547,8 @@ TEST(ControlFlowTest, DrainBackpressure) {
   }
 }
 
-TEST(ControlFlowTest, DrainError) {
+TYPED_TEST(ControlFlowTest, DrainError) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
   size_t dop = 2;
   MemorySource source({{1}, {1}, {1}, {1}, {1}, {1}, {1}, {1}});
   ErrorGenerator err_gen(7);
@@ -2181,7 +2560,7 @@ TEST(ControlFlowTest, DrainError) {
   folly::IOThreadPoolExecutor io_executor(1);
   FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
 
-  Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(SyncPipelineTask::Make,
+  Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(PipelineTaskType::Make,
                                                                   &scheduler);
   auto result = driver.Run(dop, {pipeline});
   ASSERT_NOT_OK(result);
@@ -2189,7 +2568,8 @@ TEST(ControlFlowTest, DrainError) {
   ASSERT_EQ(result.status().message(), "7");
 }
 
-TEST(ControlFlowTest, DrainYield) {
+TYPED_TEST(ControlFlowTest, DrainYield) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
   size_t dop = 8;
   MemorySource source({{1}, {1}, {1}, {1}});
   DrainOnlyPipe internal_pipe(dop);
@@ -2203,7 +2583,7 @@ TEST(ControlFlowTest, DrainYield) {
   TaskObserver observer(dop);
   FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor, &observer);
 
-  Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(SyncPipelineTask::Make,
+  Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(PipelineTaskType::Make,
                                                                   &scheduler);
   auto result = driver.Run(dop, {pipeline});
   ASSERT_OK(result);
@@ -2221,17 +2601,19 @@ TEST(ControlFlowTest, DrainYield) {
   ASSERT_EQ(io_thread_info.begin()->second.substr(0, 12), "IOThreadPool");
 }
 
-TEST(ControlFlowTest, ErrorAfterBackpressure) {}
-TEST(ControlFlowTest, ErrorAfterDrainBackpressure) {}
-TEST(ControlFlowTest, ErrorAfterYield) {}
-TEST(ControlFlowTest, ErrorAfterDrainYield) {}
-TEST(ControlFlowTest, BackpressureAfterYield) {}
-TEST(ControlFlowTest, BackpressureAfterDrainYield) {}
-TEST(ControlFlowTest, YieldAfterBackpressure) {}
-TEST(ControlFlowTest, YieldAfterDrainBackpressure) {}
+// TODO: Combination of HasMore/NeedsMore with Drain/Backpressure/Yield.
+TYPED_TEST(ControlFlowTest, ErrorAfterBackpressure) {}
+TYPED_TEST(ControlFlowTest, ErrorAfterDrainBackpressure) {}
+TYPED_TEST(ControlFlowTest, ErrorAfterYield) {}
+TYPED_TEST(ControlFlowTest, ErrorAfterDrainYield) {}
+TYPED_TEST(ControlFlowTest, BackpressureAfterYield) {}
+TYPED_TEST(ControlFlowTest, BackpressureAfterDrainYield) {}
+TYPED_TEST(ControlFlowTest, YieldAfterBackpressure) {}
+TYPED_TEST(ControlFlowTest, YieldAfterDrainBackpressure) {}
 
 class SortTest : public testing::TestWithParam<size_t> {
  protected:
+  template <typename T>
   void Sort(const std::vector<PipeOp*>& pipes) {
     size_t dop = GetParam();
     DistributedMemorySource source(dop, {{1, 10, 100}, {2, 20, 200}, {3, 30, 300}});
@@ -2242,8 +2624,7 @@ class SortTest : public testing::TestWithParam<size_t> {
     folly::IOThreadPoolExecutor io_executor(1);
     FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
 
-    Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(
-        SyncPipelineTask::Make, &scheduler);
+    Driver<T, FollyFutureDoublePoolScheduler> driver(T::Make, &scheduler);
     auto result = driver.Run(dop, {pipeline});
     ASSERT_OK(result);
     ASSERT_TRUE(result->IsFinished());
@@ -2255,24 +2636,42 @@ class SortTest : public testing::TestWithParam<size_t> {
       }
     }
   }
+
+  template <typename T>
+  void PlainSort() {
+    auto dop = GetParam();
+    Sort<T>({});
+  }
+
+  template <typename T>
+  void SortWithDrain() {
+    auto dop = GetParam();
+    DrainOnlyPipe pipe(dop);
+    Sort<T>({&pipe});
+  }
+
+  template <typename T>
+  void SortWithYield() {
+    auto dop = GetParam();
+    IdentityPipe internal_pipe;
+    SpillDelegatePipe pipe(dop, &internal_pipe);
+    Sort<T>({&pipe});
+  }
 };
 
 TEST_P(SortTest, PlainSort) {
-  auto dop = GetParam();
-  Sort({});
+  PlainSort<SyncPipelineTask>();
+  PlainSort<CoroPipelineTask>();
 }
 
 TEST_P(SortTest, SortWithDrain) {
-  auto dop = GetParam();
-  DrainOnlyPipe pipe(dop);
-  Sort({&pipe});
+  SortWithDrain<SyncPipelineTask>();
+  SortWithDrain<CoroPipelineTask>();
 }
 
 TEST_P(SortTest, SortWithYield) {
-  auto dop = GetParam();
-  IdentityPipe internal_pipe;
-  SpillDelegatePipe pipe(dop, &internal_pipe);
-  Sort({&pipe});
+  SortWithYield<SyncPipelineTask>();
+  SortWithYield<CoroPipelineTask>();
 }
 
 INSTANTIATE_TEST_SUITE_P(OperatorTest, SortTest, testing::Range(size_t(1), size_t(43)),
@@ -2283,6 +2682,7 @@ INSTANTIATE_TEST_SUITE_P(OperatorTest, SortTest, testing::Range(size_t(1), size_
 
 class FibonacciTest : public testing::TestWithParam<size_t> {
  protected:
+  template <typename T>
   void Fibonacci(size_t dop, const std::vector<PipeOp*>& pipes) {
     FibonacciSource source_1, source_2;
     MemorySink sink;
@@ -2292,8 +2692,7 @@ class FibonacciTest : public testing::TestWithParam<size_t> {
     folly::IOThreadPoolExecutor io_executor(1);
     FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
 
-    Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(
-        SyncPipelineTask::Make, &scheduler);
+    Driver<T, FollyFutureDoublePoolScheduler> driver(T::Make, &scheduler);
     auto result = driver.Run(dop, {pipeline});
     ASSERT_OK(result);
     ASSERT_TRUE(result->IsFinished());
@@ -2315,52 +2714,70 @@ class FibonacciTest : public testing::TestWithParam<size_t> {
 
     ASSERT_EQ(act, exp);
   }
+
+  template <typename T>
+  void PlainFibonacci() {
+    size_t dop = 8;
+    auto n = GetParam();
+    std::vector<FibonacciPipe> pipe_objs(n - 2);
+    std::vector<PipeOp*> pipes(n - 2);
+    if (n > 2) {
+      std::transform(pipe_objs.begin(), pipe_objs.end(), pipes.begin(),
+                     [](auto& pipe_obj) { return &pipe_obj; });
+    }
+    Fibonacci<T>(dop, pipes);
+  }
+
+  template <typename T>
+  void FibonacciWithDrain() {
+    size_t dop = 8;
+    auto n = GetParam();
+    std::vector<FibonacciPipe> fibonacci_pipe_objs(n - 2);
+    std::vector<DrainOnlyPipe> drain_pipe_objs;
+    for (size_t i = 0; i < n - 2; ++i) {
+      drain_pipe_objs.emplace_back(dop);
+    }
+    std::vector<PipeOp*> pipes(2 * (n - 2));
+    if (n > 2) {
+      for (size_t i = 0; i < n - 2; ++i) {
+        pipes[2 * i] = static_cast<PipeOp*>(&fibonacci_pipe_objs[i]);
+        pipes[2 * i + 1] = static_cast<PipeOp*>(&drain_pipe_objs[i]);
+      }
+    }
+    Fibonacci<T>(dop, pipes);
+  }
+
+  template <typename T>
+  void FibonacciWithYield() {
+    size_t dop = 8;
+    auto n = GetParam();
+    std::vector<FibonacciPipe> fibonacci_pipe_objs(n - 2);
+    std::vector<SpillDelegatePipe> spill_pipe_objs;
+    for (size_t i = 0; i < n - 2; ++i) {
+      spill_pipe_objs.emplace_back(dop, &fibonacci_pipe_objs[i]);
+    }
+    std::vector<PipeOp*> pipes(n - 2);
+    if (n > 2) {
+      std::transform(spill_pipe_objs.begin(), spill_pipe_objs.end(), pipes.begin(),
+                     [](auto& pipe_obj) { return &pipe_obj; });
+    }
+    Fibonacci<T>(dop, pipes);
+  }
 };
 
 TEST_P(FibonacciTest, PlainFibonacci) {
-  size_t dop = 8;
-  auto n = GetParam();
-  std::vector<FibonacciPipe> pipe_objs(n - 2);
-  std::vector<PipeOp*> pipes(n - 2);
-  if (n > 2) {
-    std::transform(pipe_objs.begin(), pipe_objs.end(), pipes.begin(),
-                   [](auto& pipe_obj) { return &pipe_obj; });
-  }
-  Fibonacci(dop, pipes);
+  PlainFibonacci<SyncPipelineTask>();
+  PlainFibonacci<CoroPipelineTask>();
 }
 
 TEST_P(FibonacciTest, FibonacciWithDrain) {
-  size_t dop = 8;
-  auto n = GetParam();
-  std::vector<FibonacciPipe> fibonacci_pipe_objs(n - 2);
-  std::vector<DrainOnlyPipe> drain_pipe_objs;
-  for (size_t i = 0; i < n - 2; ++i) {
-    drain_pipe_objs.emplace_back(dop);
-  }
-  std::vector<PipeOp*> pipes(2 * (n - 2));
-  if (n > 2) {
-    for (size_t i = 0; i < n - 2; ++i) {
-      pipes[2 * i] = static_cast<PipeOp*>(&fibonacci_pipe_objs[i]);
-      pipes[2 * i + 1] = static_cast<PipeOp*>(&drain_pipe_objs[i]);
-    }
-  }
-  Fibonacci(dop, pipes);
+  FibonacciWithDrain<SyncPipelineTask>();
+  FibonacciWithDrain<CoroPipelineTask>();
 }
 
 TEST_P(FibonacciTest, FibonacciWithYield) {
-  size_t dop = 8;
-  auto n = GetParam();
-  std::vector<FibonacciPipe> fibonacci_pipe_objs(n - 2);
-  std::vector<SpillDelegatePipe> spill_pipe_objs;
-  for (size_t i = 0; i < n - 2; ++i) {
-    spill_pipe_objs.emplace_back(dop, &fibonacci_pipe_objs[i]);
-  }
-  std::vector<PipeOp*> pipes(n - 2);
-  if (n > 2) {
-    std::transform(spill_pipe_objs.begin(), spill_pipe_objs.end(), pipes.begin(),
-                   [](auto& pipe_obj) { return &pipe_obj; });
-  }
-  Fibonacci(dop, pipes);
+  FibonacciWithYield<SyncPipelineTask>();
+  FibonacciWithYield<CoroPipelineTask>();
 }
 
 INSTANTIATE_TEST_SUITE_P(ComplexTest, FibonacciTest,
@@ -2548,7 +2965,7 @@ class RecursivePowPlusPolynomialTest
         term->indeterminate);
   }
 
-  template <typename Term>
+  template <typename Term, typename PipelineTask>
   void Polynomial(
       size_t a, size_t b, size_t c,
       std::function<std::list<LogicalPipelinePlex>(std::unique_ptr<Term>&)> make_plexes) {
@@ -2569,8 +2986,8 @@ class RecursivePowPlusPolynomialTest
       folly::IOThreadPoolExecutor io_executor(1);
       FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
 
-      Driver<SyncPipelineTask, FollyFutureDoublePoolScheduler> driver(
-          SyncPipelineTask::Make, &scheduler);
+      Driver<PipelineTask, FollyFutureDoublePoolScheduler> driver(PipelineTask::Make,
+                                                                  &scheduler);
       auto result = driver.Run(dop, {pipeline});
       ASSERT_OK(result);
       ASSERT_TRUE(result->IsFinished());
@@ -2590,58 +3007,76 @@ class RecursivePowPlusPolynomialTest
       }
     }
   }
+
+  template <typename T>
+  void TopDeep() {
+    auto [a, b, c] = GetParam();
+    Polynomial<SimpleTerm, T>(
+        a, b, c, [&](auto& term) { return this->MakeTopDeepPipelinePlexes(term); });
+    Polynomial<DrainOnlyTerm, T>(
+        a, b, c, [&](auto& term) { return this->MakeTopDeepPipelinePlexes(term); });
+    Polynomial<YieldTerm, T>(
+        a, b, c, [&](auto& term) { return this->MakeTopDeepPipelinePlexes(term); });
+    Polynomial<DrainOnlyPowYieldPlusTerm, T>(
+        a, b, c, [&](auto& term) { return this->MakeTopDeepPipelinePlexes(term); });
+    Polynomial<YieldPowDrainOnlyPlusTerm, T>(
+        a, b, c, [&](auto& term) { return this->MakeTopDeepPipelinePlexes(term); });
+  }
+
+  template <typename T>
+  void BottomDeep() {
+    auto [a, b, c] = GetParam();
+    Polynomial<SimpleTerm, T>(
+        a, b, c, [&](auto& term) { return this->MakeBottomDeepPipelinePlexes(term); });
+    Polynomial<DrainOnlyTerm, T>(
+        a, b, c, [&](auto& term) { return this->MakeBottomDeepPipelinePlexes(term); });
+    Polynomial<YieldTerm, T>(
+        a, b, c, [&](auto& term) { return this->MakeBottomDeepPipelinePlexes(term); });
+    Polynomial<DrainOnlyPowYieldPlusTerm, T>(
+        a, b, c, [&](auto& term) { return this->MakeBottomDeepPipelinePlexes(term); });
+    Polynomial<YieldPowDrainOnlyPlusTerm, T>(
+        a, b, c, [&](auto& term) { return this->MakeBottomDeepPipelinePlexes(term); });
+  }
+
+  template <typename T>
+  void Bushy() {
+    auto [a, b, c] = GetParam();
+    Polynomial<SimpleTerm, T>(
+        a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, true); });
+    Polynomial<SimpleTerm, T>(
+        a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, false); });
+    Polynomial<DrainOnlyTerm, T>(
+        a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, true); });
+    Polynomial<DrainOnlyTerm, T>(
+        a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, false); });
+    Polynomial<YieldTerm, T>(
+        a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, true); });
+    Polynomial<YieldTerm, T>(
+        a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, false); });
+    Polynomial<DrainOnlyPowYieldPlusTerm, T>(
+        a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, true); });
+    Polynomial<DrainOnlyPowYieldPlusTerm, T>(
+        a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, false); });
+    Polynomial<YieldPowDrainOnlyPlusTerm, T>(
+        a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, true); });
+    Polynomial<YieldPowDrainOnlyPlusTerm, T>(
+        a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, false); });
+  }
 };
 
 TEST_P(RecursivePowPlusPolynomialTest, TopDeep) {
-  auto [a, b, c] = GetParam();
-  Polynomial<SimpleTerm>(
-      a, b, c, [&](auto& term) { return this->MakeTopDeepPipelinePlexes(term); });
-  Polynomial<DrainOnlyTerm>(
-      a, b, c, [&](auto& term) { return this->MakeTopDeepPipelinePlexes(term); });
-  Polynomial<YieldTerm>(
-      a, b, c, [&](auto& term) { return this->MakeTopDeepPipelinePlexes(term); });
-  Polynomial<DrainOnlyPowYieldPlusTerm>(
-      a, b, c, [&](auto& term) { return this->MakeTopDeepPipelinePlexes(term); });
-  Polynomial<YieldPowDrainOnlyPlusTerm>(
-      a, b, c, [&](auto& term) { return this->MakeTopDeepPipelinePlexes(term); });
+  TopDeep<SyncPipelineTask>();
+  TopDeep<CoroPipelineTask>();
 }
 
 TEST_P(RecursivePowPlusPolynomialTest, BottomDeep) {
-  auto [a, b, c] = GetParam();
-  Polynomial<SimpleTerm>(
-      a, b, c, [&](auto& term) { return this->MakeBottomDeepPipelinePlexes(term); });
-  Polynomial<DrainOnlyTerm>(
-      a, b, c, [&](auto& term) { return this->MakeBottomDeepPipelinePlexes(term); });
-  Polynomial<YieldTerm>(
-      a, b, c, [&](auto& term) { return this->MakeBottomDeepPipelinePlexes(term); });
-  Polynomial<DrainOnlyPowYieldPlusTerm>(
-      a, b, c, [&](auto& term) { return this->MakeBottomDeepPipelinePlexes(term); });
-  Polynomial<YieldPowDrainOnlyPlusTerm>(
-      a, b, c, [&](auto& term) { return this->MakeBottomDeepPipelinePlexes(term); });
+  BottomDeep<SyncPipelineTask>();
+  BottomDeep<CoroPipelineTask>();
 }
 
 TEST_P(RecursivePowPlusPolynomialTest, Bushy) {
-  auto [a, b, c] = GetParam();
-  Polynomial<SimpleTerm>(
-      a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, true); });
-  Polynomial<SimpleTerm>(
-      a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, false); });
-  Polynomial<DrainOnlyTerm>(
-      a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, true); });
-  Polynomial<DrainOnlyTerm>(
-      a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, false); });
-  Polynomial<YieldTerm>(
-      a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, true); });
-  Polynomial<YieldTerm>(
-      a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, false); });
-  Polynomial<DrainOnlyPowYieldPlusTerm>(
-      a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, true); });
-  Polynomial<DrainOnlyPowYieldPlusTerm>(
-      a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, false); });
-  Polynomial<YieldPowDrainOnlyPlusTerm>(
-      a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, true); });
-  Polynomial<YieldPowDrainOnlyPlusTerm>(
-      a, b, c, [&](auto& term) { return this->MakeBushyPipelinePlexes(term, false); });
+  Bushy<SyncPipelineTask>();
+  Bushy<CoroPipelineTask>();
 }
 
 INSTANTIATE_TEST_SUITE_P(ComplexTest, RecursivePowPlusPolynomialTest,
@@ -2654,5 +3089,52 @@ INSTANTIATE_TEST_SUITE_P(ComplexTest, RecursivePowPlusPolynomialTest,
                               << std::get<0>(param_info.param) << "_plus_"
                               << std::get<1>(param_info.param) << "_for_"
                               << std::get<2>(param_info.param);
+                           return ss.str();
+                         });
+
+class DeepHasMoreTest : public testing::TestWithParam<std::tuple<size_t, size_t>> {
+ protected:
+  template <typename PipelineTaskType>
+  void PowXY() {
+    size_t dop = 8;
+    auto [x, y] = GetParam();
+    MemorySource source({{1}});
+    std::vector<PowerSlicedPipe> pipe_objs;
+    for (size_t i = 0; i < y; ++i) {
+      pipe_objs.emplace_back(dop, x);
+    }
+    std::vector<PipeOp*> pipes(y);
+    std::transform(pipe_objs.begin(), pipe_objs.end(), pipes.begin(),
+                   [](auto& pipe_obj) { return &pipe_obj; });
+    MemorySink sink;
+    LogicalPipeline pipeline{{{&source, pipes}}, &sink};
+    folly::CPUThreadPoolExecutor cpu_executor(4);
+    folly::IOThreadPoolExecutor io_executor(1);
+    FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+    Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(
+        PipelineTaskType::Make, &scheduler);
+    auto result = driver.Run(dop, {pipeline});
+    ASSERT_OK(result);
+    size_t num_batches_exp = std::pow(x, y);
+    ASSERT_EQ(sink.batches_.size(), num_batches_exp);
+    for (size_t i = 0; i < num_batches_exp; ++i) {
+      ASSERT_EQ(sink.batches_[i], (Batch{1}));
+    }
+  }
+};
+
+TEST_P(DeepHasMoreTest, PowXY) {
+  PowXY<SyncPipelineTask>();
+  PowXY<CoroPipelineTask>();
+}
+
+INSTANTIATE_TEST_SUITE_P(ComplexTest, DeepHasMoreTest,
+                         testing::Combine(testing::Range(size_t(1), size_t(5)),
+                                          testing::Range(size_t(1), size_t(11))),
+                         [](const auto& param_info) {
+                           std::stringstream ss;
+                           ss << param_info.index << "_x_"
+                              << std::get<0>(param_info.param) << "_y_"
+                              << std::get<1>(param_info.param);
                            return ss.str();
                          });
