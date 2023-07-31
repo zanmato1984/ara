@@ -1376,7 +1376,7 @@ class BackpressureDelegatePipe : public PipeOp {
       } else {
         ctx_[thread_id].pipe_non_backpressure++;
       }
-      return pipe_->Pipe()(thread_id, std::move(input.value()));
+      return pipe_->Pipe()(thread_id, std::move(input));
     };
   }
 
@@ -1472,6 +1472,7 @@ class ErrorGenerator {
  private:
   size_t trigger_;
 
+ public:
   std::atomic<size_t> counter_ = 0;
 };
 
@@ -2336,6 +2337,7 @@ TYPED_TEST(ControlFlowTest, BasicError) {
     ASSERT_NOT_OK(result);
     ASSERT_TRUE(result.status().IsInvalid());
     ASSERT_EQ(result.status().message(), "42");
+    ASSERT_LE(err_gen.counter_, 42 + dop);
   }
 
   {
@@ -2355,6 +2357,7 @@ TYPED_TEST(ControlFlowTest, BasicError) {
     ASSERT_NOT_OK(result);
     ASSERT_TRUE(result.status().IsInvalid());
     ASSERT_EQ(result.status().message(), "42");
+    ASSERT_LE(err_gen.counter_, 42 + dop);
   }
 
   {
@@ -2374,6 +2377,7 @@ TYPED_TEST(ControlFlowTest, BasicError) {
     ASSERT_NOT_OK(result);
     ASSERT_TRUE(result.status().IsInvalid());
     ASSERT_EQ(result.status().message(), "42");
+    ASSERT_LE(err_gen.counter_, 42 + dop);
   }
 }
 
@@ -2565,6 +2569,7 @@ TYPED_TEST(ControlFlowTest, DrainError) {
   ASSERT_NOT_OK(result);
   ASSERT_TRUE(result.status().IsInvalid());
   ASSERT_EQ(result.status().message(), "7");
+  ASSERT_LE(err_gen.counter_, 7 + dop);
 }
 
 TYPED_TEST(ControlFlowTest, DrainYield) {
@@ -2603,10 +2608,12 @@ TYPED_TEST(ControlFlowTest, DrainYield) {
 TYPED_TEST(ControlFlowTest, NeedsMoreAfterBackpressure) {
   using PipelineTaskType = typename TestFixture::PipelineTaskType;
   size_t dop = 8;
-  DistributedMemorySource source(dop, {{1}, {1}, {1}, {1}});
-  AccumulatePipe pipe(dop, 2);
-  MemorySink internal_sink;
   BackpressureContexts ctx(dop);
+  DistributedMemorySource internal_source(dop, {{1}, {1}, {1}, {1}});
+  BackpressureDelegateSource source(ctx, &internal_source);
+  AccumulatePipe internal_pipe(dop, 2);
+  BackpressureDelegatePipe pipe(ctx, &internal_pipe);
+  MemorySink internal_sink;
   BackpressureDelegateSink sink(dop, ctx, 2, 42, 1000, &internal_sink);
 
   LogicalPipeline pipeline{{{&source, {&pipe}}}, &sink};
@@ -2622,15 +2629,24 @@ TYPED_TEST(ControlFlowTest, NeedsMoreAfterBackpressure) {
   for (const auto& batch : internal_sink.batches_) {
     ASSERT_EQ(batch, (Batch{1, 1}));
   }
+  for (const auto& c : ctx) {
+    ASSERT_FALSE(c.backpressure);
+    ASSERT_EQ(c.source_backpressure, 0);
+    ASSERT_EQ(c.source_non_backpressure, 4);
+    ASSERT_EQ(c.pipe_backpressure, 0);
+    ASSERT_EQ(c.pipe_non_backpressure, 5);
+  }
 }
 
 TYPED_TEST(ControlFlowTest, HasMoreAfterBackpressure) {
   using PipelineTaskType = typename TestFixture::PipelineTaskType;
   size_t dop = 8;
-  MemorySource source({{1}});
-  PowerSlicedPipe pipe(dop, 42);
-  MemorySink internal_sink;
   BackpressureContexts ctx(dop);
+  MemorySource internal_source({{1}});
+  BackpressureDelegateSource source(ctx, &internal_source);
+  PowerSlicedPipe internal_pipe(dop, 42);
+  BackpressureDelegatePipe pipe(ctx, &internal_pipe);
+  MemorySink internal_sink;
   BackpressureDelegateSink sink(dop, ctx, 2, 42, 1000, &internal_sink);
 
   LogicalPipeline pipeline{{{&source, {&pipe}}}, &sink};
@@ -2646,6 +2662,11 @@ TYPED_TEST(ControlFlowTest, HasMoreAfterBackpressure) {
   for (const auto& batch : internal_sink.batches_) {
     ASSERT_EQ(batch, (Batch{1}));
   }
+  for (const auto& c : ctx) {
+    ASSERT_FALSE(c.backpressure);
+    ASSERT_EQ(c.source_backpressure, 0);
+    ASSERT_EQ(c.pipe_backpressure, 0);
+  }
 }
 
 TYPED_TEST(ControlFlowTest, NeedsMoreAfterYield) {
@@ -2659,7 +2680,8 @@ TYPED_TEST(ControlFlowTest, NeedsMoreAfterYield) {
   LogicalPipeline pipeline{{{&source, {&pipe}}}, &sink};
   folly::CPUThreadPoolExecutor cpu_executor(4);
   folly::IOThreadPoolExecutor io_executor(1);
-  FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+  TaskObserver observer(dop);
+  FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor, &observer);
   Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(PipelineTaskType::Make,
                                                                   &scheduler);
   auto result = driver.Run(dop, {pipeline});
@@ -2669,6 +2691,14 @@ TYPED_TEST(ControlFlowTest, NeedsMoreAfterYield) {
   for (const auto& batch : sink.batches_) {
     ASSERT_EQ(batch, (Batch{1, 1}));
   }
+
+  std::unordered_set<std::pair<ThreadId, std::string>> io_thread_info;
+  for (size_t i = 0; i < dop; ++i) {
+    std::copy(observer.io_thread_infos_[i].begin(), observer.io_thread_infos_[i].end(),
+              std::inserter(io_thread_info, io_thread_info.end()));
+  }
+  ASSERT_EQ(io_thread_info.size(), 1);
+  ASSERT_EQ(io_thread_info.begin()->second.substr(0, 12), "IOThreadPool");
 }
 
 TYPED_TEST(ControlFlowTest, HasMoreAfterYield) {
@@ -2682,7 +2712,8 @@ TYPED_TEST(ControlFlowTest, HasMoreAfterYield) {
   LogicalPipeline pipeline{{{&source, {&pipe}}}, &sink};
   folly::CPUThreadPoolExecutor cpu_executor(4);
   folly::IOThreadPoolExecutor io_executor(1);
-  FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+  TaskObserver observer(dop);
+  FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor, &observer);
   Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(PipelineTaskType::Make,
                                                                   &scheduler);
   auto result = driver.Run(dop, {pipeline});
@@ -2692,16 +2723,206 @@ TYPED_TEST(ControlFlowTest, HasMoreAfterYield) {
   for (const auto& batch : sink.batches_) {
     ASSERT_EQ(batch, (Batch{1}));
   }
+
+  std::unordered_set<std::pair<ThreadId, std::string>> io_thread_info;
+  for (size_t i = 0; i < dop; ++i) {
+    std::copy(observer.io_thread_infos_[i].begin(), observer.io_thread_infos_[i].end(),
+              std::inserter(io_thread_info, io_thread_info.end()));
+  }
+  ASSERT_EQ(io_thread_info.size(), 1);
+  ASSERT_EQ(io_thread_info.begin()->second.substr(0, 12), "IOThreadPool");
 }
 
-TYPED_TEST(ControlFlowTest, ErrorAfterBackpressure) {}
-TYPED_TEST(ControlFlowTest, ErrorAfterDrainBackpressure) {}
-TYPED_TEST(ControlFlowTest, ErrorAfterYield) {}
-TYPED_TEST(ControlFlowTest, ErrorAfterDrainYield) {}
+TYPED_TEST(ControlFlowTest, ErrorAfterBackpressure) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
+  {
+    size_t dop = 8;
+    BackpressureContexts ctx(dop);
+    InfiniteSource internal_internal_source(Batch{});
+    BackpressureDelegateSource internal_source(ctx, &internal_internal_source);
+    ErrorGenerator err_gen(42);
+    ErrorDelegateSource source(&err_gen, &internal_source);
+    IdentityPipe internal_pipe;
+    BackpressureDelegatePipe pipe(ctx, &internal_pipe);
+    BlackHoleSink internal_sink;
+    BackpressureDelegateSink sink(dop, ctx, 2, 50, 1000, &internal_sink);
+    LogicalPipeline pipeline{{{&source, {&pipe}}}, &sink};
+    folly::CPUThreadPoolExecutor cpu_executor(4);
+    folly::IOThreadPoolExecutor io_executor(1);
+    FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+    Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(
+        PipelineTaskType::Make, &scheduler);
+    auto result = driver.Run(dop, {pipeline});
+    ASSERT_NOT_OK(result);
+    ASSERT_TRUE(result.status().IsInvalid());
+    ASSERT_EQ(result.status().message(), "42");
+    ASSERT_LE(err_gen.counter_, 42 + dop);
+
+    for (const auto& c : ctx) {
+      ASSERT_FALSE(c.backpressure);
+      ASSERT_EQ(c.source_backpressure, 0);
+      ASSERT_EQ(c.pipe_backpressure, 0);
+    }
+  }
+
+  {
+    size_t dop = 8;
+    BackpressureContexts ctx(dop);
+    InfiniteSource internal_source(Batch{});
+    BackpressureDelegateSource source(ctx, &internal_source);
+    IdentityPipe internal_internal_pipe;
+    BackpressureDelegatePipe internal_pipe(ctx, &internal_internal_pipe);
+    ErrorGenerator err_gen(42);
+    ErrorDelegatePipe pipe(&err_gen, &internal_pipe);
+    BlackHoleSink internal_sink;
+    BackpressureDelegateSink sink(dop, ctx, 2, 50, 1000, &internal_sink);
+    LogicalPipeline pipeline{{{&source, {&pipe}}}, &sink};
+    folly::CPUThreadPoolExecutor cpu_executor(4);
+    folly::IOThreadPoolExecutor io_executor(1);
+    FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+    Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(
+        PipelineTaskType::Make, &scheduler);
+    auto result = driver.Run(dop, {pipeline});
+    ASSERT_NOT_OK(result);
+    ASSERT_TRUE(result.status().IsInvalid());
+    ASSERT_EQ(result.status().message(), "42");
+    ASSERT_LE(err_gen.counter_, 42 + dop);
+
+    for (const auto& c : ctx) {
+      ASSERT_FALSE(c.backpressure);
+      ASSERT_EQ(c.source_backpressure, 0);
+      ASSERT_EQ(c.pipe_backpressure, 0);
+    }
+  }
+
+  {
+    size_t dop = 8;
+    BackpressureContexts ctx(dop);
+    InfiniteSource internal_source(Batch{});
+    BackpressureDelegateSource source(ctx, &internal_source);
+    IdentityPipe internal_pipe;
+    BackpressureDelegatePipe pipe(ctx, &internal_pipe);
+    BlackHoleSink internal_internal_sink;
+    BackpressureDelegateSink internal_sink(dop, ctx, 2, 50, 1000,
+                                           &internal_internal_sink);
+    ErrorGenerator err_gen(42);
+    ErrorDelegateSink sink(&err_gen, &internal_sink);
+    LogicalPipeline pipeline{{{&source, {&pipe}}}, &sink};
+    folly::CPUThreadPoolExecutor cpu_executor(4);
+    folly::IOThreadPoolExecutor io_executor(1);
+    FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+    Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(
+        PipelineTaskType::Make, &scheduler);
+    auto result = driver.Run(dop, {pipeline});
+    ASSERT_NOT_OK(result);
+    ASSERT_TRUE(result.status().IsInvalid());
+    ASSERT_EQ(result.status().message(), "42");
+    ASSERT_LE(err_gen.counter_, 42 + dop);
+
+    for (const auto& c : ctx) {
+      ASSERT_TRUE(c.backpressure);
+      ASSERT_EQ(c.source_backpressure, 0);
+      ASSERT_EQ(c.pipe_backpressure, 0);
+    }
+  }
+}
+
+TYPED_TEST(ControlFlowTest, ErrorAfterYield) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
+  {
+    size_t dop = 8;
+    InfiniteSource internal_source(Batch{});
+    ErrorGenerator err_gen(42);
+    ErrorDelegateSource source(&err_gen, &internal_source);
+    IdentityPipe internal_pipe;
+    SpillDelegatePipe pipe(dop, &internal_pipe);
+    BlackHoleSink sink;
+    LogicalPipeline pipeline{{{&source, {&pipe}}}, &sink};
+    folly::CPUThreadPoolExecutor cpu_executor(4);
+    folly::IOThreadPoolExecutor io_executor(1);
+    TaskObserver observer(dop);
+    FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor, &observer);
+    Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(
+        PipelineTaskType::Make, &scheduler);
+    auto result = driver.Run(dop, {pipeline});
+    ASSERT_NOT_OK(result);
+    ASSERT_TRUE(result.status().IsInvalid());
+    ASSERT_EQ(result.status().message(), "42");
+    ASSERT_LE(err_gen.counter_, 42 + dop);
+
+    std::unordered_set<std::pair<ThreadId, std::string>> io_thread_info;
+    for (size_t i = 0; i < dop; ++i) {
+      std::copy(observer.io_thread_infos_[i].begin(), observer.io_thread_infos_[i].end(),
+                std::inserter(io_thread_info, io_thread_info.end()));
+    }
+    ASSERT_EQ(io_thread_info.size(), 1);
+    ASSERT_EQ(io_thread_info.begin()->second.substr(0, 12), "IOThreadPool");
+  }
+
+  {
+    size_t dop = 8;
+    InfiniteSource source(Batch{});
+    IdentityPipe internal_internal_pipe;
+    SpillDelegatePipe internal_pipe(dop, &internal_internal_pipe);
+    ErrorGenerator err_gen(42);
+    ErrorDelegatePipe pipe(&err_gen, &internal_pipe);
+    BlackHoleSink sink;
+    LogicalPipeline pipeline{{{&source, {&pipe}}}, &sink};
+    folly::CPUThreadPoolExecutor cpu_executor(4);
+    folly::IOThreadPoolExecutor io_executor(1);
+    TaskObserver observer(dop);
+    FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor, &observer);
+    Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(
+        PipelineTaskType::Make, &scheduler);
+    auto result = driver.Run(dop, {pipeline});
+    ASSERT_NOT_OK(result);
+    ASSERT_TRUE(result.status().IsInvalid());
+    ASSERT_EQ(result.status().message(), "42");
+    ASSERT_LE(err_gen.counter_, 42 + dop);
+
+    std::unordered_set<std::pair<ThreadId, std::string>> io_thread_info;
+    for (size_t i = 0; i < dop; ++i) {
+      std::copy(observer.io_thread_infos_[i].begin(), observer.io_thread_infos_[i].end(),
+                std::inserter(io_thread_info, io_thread_info.end()));
+    }
+    ASSERT_EQ(io_thread_info.size(), 1);
+    ASSERT_EQ(io_thread_info.begin()->second.substr(0, 12), "IOThreadPool");
+  }
+
+  {
+    size_t dop = 8;
+    InfiniteSource source(Batch{});
+    IdentityPipe internal_pipe;
+    SpillDelegatePipe pipe(dop, &internal_pipe);
+    BlackHoleSink internal_sink;
+    ErrorGenerator err_gen(42);
+    ErrorDelegateSink sink(&err_gen, &internal_sink);
+    LogicalPipeline pipeline{{{&source, {&pipe}}}, &sink};
+    folly::CPUThreadPoolExecutor cpu_executor(4);
+    folly::IOThreadPoolExecutor io_executor(1);
+    TaskObserver observer(dop);
+    FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor, &observer);
+    Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(
+        PipelineTaskType::Make, &scheduler);
+    auto result = driver.Run(dop, {pipeline});
+    ASSERT_NOT_OK(result);
+    ASSERT_TRUE(result.status().IsInvalid());
+    ASSERT_EQ(result.status().message(), "42");
+    ASSERT_LE(err_gen.counter_, 42 + dop);
+
+    std::unordered_set<std::pair<ThreadId, std::string>> io_thread_info;
+    for (size_t i = 0; i < dop; ++i) {
+      std::copy(observer.io_thread_infos_[i].begin(), observer.io_thread_infos_[i].end(),
+                std::inserter(io_thread_info, io_thread_info.end()));
+    }
+    ASSERT_EQ(io_thread_info.size(), 1);
+    ASSERT_EQ(io_thread_info.begin()->second.substr(0, 12), "IOThreadPool");
+  }
+}
+
 TYPED_TEST(ControlFlowTest, BackpressureAfterYield) {}
-TYPED_TEST(ControlFlowTest, BackpressureAfterDrainYield) {}
+
 TYPED_TEST(ControlFlowTest, YieldAfterBackpressure) {}
-TYPED_TEST(ControlFlowTest, YieldAfterDrainBackpressure) {}
 
 class SortTest : public testing::TestWithParam<size_t> {
  protected:
