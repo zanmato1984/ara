@@ -3010,4 +3010,51 @@ INSTANTIATE_TEST_SUITE_P(ComplexTest, RecursivePowPlusPolynomialTest,
                            return ss.str();
                          });
 
+class DeepHasMoreTest : public testing::TestWithParam<std::tuple<size_t, size_t>> {
+ protected:
+  template <typename PipelineTaskType>
+  void PowXY() {
+    size_t dop = 8;
+    auto [x, y] = GetParam();
+    MemorySource source({{1}});
+    std::vector<PowerSlicedPipe> pipe_objs;
+    for (size_t i = 0; i < y; ++i) {
+      pipe_objs.emplace_back(dop, x);
+    }
+    std::vector<PipeOp*> pipes(y);
+    std::transform(pipe_objs.begin(), pipe_objs.end(), pipes.begin(),
+                   [](auto& pipe_obj) { return &pipe_obj; });
+    MemorySink sink;
+    LogicalPipeline pipeline{{{&source, pipes}}, &sink};
+    folly::CPUThreadPoolExecutor cpu_executor(4);
+    folly::IOThreadPoolExecutor io_executor(1);
+    FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+    Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(
+        PipelineTaskType::Make, &scheduler);
+    auto result = driver.Run(dop, {pipeline});
+    ASSERT_OK(result);
+    size_t num_batches_exp = std::pow(x, y);
+    ASSERT_EQ(sink.batches_.size(), num_batches_exp);
+    for (size_t i = 0; i < num_batches_exp; ++i) {
+      ASSERT_EQ(sink.batches_[i], (Batch{1}));
+    }
+  }
+};
+
+TEST_P(DeepHasMoreTest, PowXY) {
+  PowXY<SyncPipelineTask>();
+  PowXY<CoroPipelineTask>();
+}
+
+INSTANTIATE_TEST_SUITE_P(ComplexTest, DeepHasMoreTest,
+                         testing::Combine(testing::Range(size_t(1), size_t(5)),
+                                          testing::Range(size_t(1), size_t(11))),
+                         [](const auto& param_info) {
+                           std::stringstream ss;
+                           ss << param_info.index << "_x_"
+                              << std::get<0>(param_info.param) << "_y_"
+                              << std::get<1>(param_info.param);
+                           return ss.str();
+                         });
+
 // TODO: Pipeline task multiplex test.
