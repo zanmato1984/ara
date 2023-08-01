@@ -2667,6 +2667,16 @@ TYPED_TEST(ControlFlowTest, HasMoreAfterBackpressure) {
     ASSERT_EQ(c.source_backpressure, 0);
     ASSERT_EQ(c.pipe_backpressure, 0);
   }
+  auto source_non_backpressure_act = std::accumulate(
+      ctx.begin(), ctx.end(), 0, [](size_t acc, const BackpressureContext& c) {
+        return acc + c.source_non_backpressure;
+      });
+  auto pipe_non_backpressure_act = std::accumulate(
+      ctx.begin(), ctx.end(), 0, [](size_t acc, const BackpressureContext& c) {
+        return acc + c.pipe_non_backpressure;
+      });
+  ASSERT_EQ(source_non_backpressure_act, 8);
+  ASSERT_EQ(pipe_non_backpressure_act, 42);
 }
 
 TYPED_TEST(ControlFlowTest, NeedsMoreAfterYield) {
@@ -2745,7 +2755,7 @@ TYPED_TEST(ControlFlowTest, ErrorAfterBackpressure) {
     IdentityPipe internal_pipe;
     BackpressureDelegatePipe pipe(ctx, &internal_pipe);
     BlackHoleSink internal_sink;
-    BackpressureDelegateSink sink(dop, ctx, 2, 50, 1000, &internal_sink);
+    BackpressureDelegateSink sink(dop, ctx, 2, 1000, 10000, &internal_sink);
     LogicalPipeline pipeline{{{&source, {&pipe}}}, &sink};
     folly::CPUThreadPoolExecutor cpu_executor(4);
     folly::IOThreadPoolExecutor io_executor(1);
@@ -2759,10 +2769,23 @@ TYPED_TEST(ControlFlowTest, ErrorAfterBackpressure) {
     ASSERT_LE(err_gen.counter_, 42 + dop);
 
     for (const auto& c : ctx) {
-      ASSERT_FALSE(c.backpressure);
       ASSERT_EQ(c.source_backpressure, 0);
       ASSERT_EQ(c.pipe_backpressure, 0);
     }
+    bool backpressure_act = std::accumulate(
+        ctx.begin(), ctx.end(), true,
+        [](bool acc, const BackpressureContext& c) { return acc && c.backpressure; });
+    auto source_non_backpressure_act = std::accumulate(
+        ctx.begin(), ctx.end(), 0, [](size_t acc, const BackpressureContext& c) {
+          return acc + c.source_non_backpressure;
+        });
+    auto pipe_non_backpressure_act = std::accumulate(
+        ctx.begin(), ctx.end(), 0, [](size_t acc, const BackpressureContext& c) {
+          return acc + c.pipe_non_backpressure;
+        });
+    ASSERT_FALSE(backpressure_act);
+    ASSERT_GE(source_non_backpressure_act, 42);
+    ASSERT_GE(pipe_non_backpressure_act, 42);
   }
 
   {
@@ -2775,7 +2798,7 @@ TYPED_TEST(ControlFlowTest, ErrorAfterBackpressure) {
     ErrorGenerator err_gen(42);
     ErrorDelegatePipe pipe(&err_gen, &internal_pipe);
     BlackHoleSink internal_sink;
-    BackpressureDelegateSink sink(dop, ctx, 2, 50, 1000, &internal_sink);
+    BackpressureDelegateSink sink(dop, ctx, 2, 1000, 10000, &internal_sink);
     LogicalPipeline pipeline{{{&source, {&pipe}}}, &sink};
     folly::CPUThreadPoolExecutor cpu_executor(4);
     folly::IOThreadPoolExecutor io_executor(1);
@@ -2789,10 +2812,23 @@ TYPED_TEST(ControlFlowTest, ErrorAfterBackpressure) {
     ASSERT_LE(err_gen.counter_, 42 + dop);
 
     for (const auto& c : ctx) {
-      ASSERT_FALSE(c.backpressure);
       ASSERT_EQ(c.source_backpressure, 0);
       ASSERT_EQ(c.pipe_backpressure, 0);
     }
+    bool backpressure_act = std::accumulate(
+        ctx.begin(), ctx.end(), true,
+        [](bool acc, const BackpressureContext& c) { return acc && c.backpressure; });
+    auto source_non_backpressure_act = std::accumulate(
+        ctx.begin(), ctx.end(), 0, [](size_t acc, const BackpressureContext& c) {
+          return acc + c.source_non_backpressure;
+        });
+    auto pipe_non_backpressure_act = std::accumulate(
+        ctx.begin(), ctx.end(), 0, [](size_t acc, const BackpressureContext& c) {
+          return acc + c.pipe_non_backpressure;
+        });
+    ASSERT_FALSE(backpressure_act);
+    ASSERT_GE(source_non_backpressure_act, 42);
+    ASSERT_GE(pipe_non_backpressure_act, 42);
   }
 
   {
@@ -2803,7 +2839,7 @@ TYPED_TEST(ControlFlowTest, ErrorAfterBackpressure) {
     IdentityPipe internal_pipe;
     BackpressureDelegatePipe pipe(ctx, &internal_pipe);
     BlackHoleSink internal_internal_sink;
-    BackpressureDelegateSink internal_sink(dop, ctx, 2, 50, 1000,
+    BackpressureDelegateSink internal_sink(dop, ctx, 2, 1000, 10000,
                                            &internal_internal_sink);
     ErrorGenerator err_gen(42);
     ErrorDelegateSink sink(&err_gen, &internal_sink);
@@ -2824,6 +2860,16 @@ TYPED_TEST(ControlFlowTest, ErrorAfterBackpressure) {
       ASSERT_EQ(c.source_backpressure, 0);
       ASSERT_EQ(c.pipe_backpressure, 0);
     }
+    auto source_non_backpressure_act = std::accumulate(
+        ctx.begin(), ctx.end(), 0, [](size_t acc, const BackpressureContext& c) {
+          return acc + c.source_non_backpressure;
+        });
+    auto pipe_non_backpressure_act = std::accumulate(
+        ctx.begin(), ctx.end(), 0, [](size_t acc, const BackpressureContext& c) {
+          return acc + c.pipe_non_backpressure;
+        });
+    ASSERT_EQ(source_non_backpressure_act, dop * 2);
+    ASSERT_LE(pipe_non_backpressure_act, dop * 2);
   }
 }
 
@@ -2920,9 +2966,50 @@ TYPED_TEST(ControlFlowTest, ErrorAfterYield) {
   }
 }
 
-TYPED_TEST(ControlFlowTest, BackpressureAfterYield) {}
+TYPED_TEST(ControlFlowTest, YieldAroundBackpressure) {
+  using PipelineTaskType = typename TestFixture::PipelineTaskType;
+  size_t dop = 8;
+  BackpressureContexts ctx(dop);
+  DistributedMemorySource internal_source(dop, {{1}, {1}, {1}, {1}});
+  BackpressureDelegateSource source(ctx, &internal_source);
+  IdentityPipe internal_internal_pipe;
+  BackpressureDelegatePipe internal_pipe(ctx, &internal_internal_pipe);
+  SpillDelegatePipe pipe(dop, &internal_pipe);
+  MemorySink internal_sink;
+  BackpressureDelegateSink sink(dop, ctx, 2, 42, 1000, &internal_sink);
 
-TYPED_TEST(ControlFlowTest, YieldAfterBackpressure) {}
+  LogicalPipeline pipeline{{{&source, {&pipe}}}, &sink};
+  folly::CPUThreadPoolExecutor cpu_executor(4);
+  folly::IOThreadPoolExecutor io_executor(1);
+  TaskObserver observer(dop);
+  FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor, &observer);
+  Driver<PipelineTaskType, FollyFutureDoublePoolScheduler> driver(PipelineTaskType::Make,
+                                                                  &scheduler);
+  auto result = driver.Run(dop, {pipeline});
+
+  ASSERT_OK(result);
+  ASSERT_TRUE(result->IsFinished());
+  ASSERT_EQ(internal_sink.batches_.size(), dop * 4);
+  for (const auto& batch : internal_sink.batches_) {
+    ASSERT_EQ(batch, (Batch{1}));
+  }
+
+  for (const auto& c : ctx) {
+    ASSERT_FALSE(c.backpressure);
+    ASSERT_EQ(c.source_backpressure, 0);
+    ASSERT_EQ(c.source_non_backpressure, 4);
+    ASSERT_EQ(c.pipe_backpressure, 0);
+    ASSERT_EQ(c.pipe_non_backpressure, 4);
+  }
+
+  std::unordered_set<std::pair<ThreadId, std::string>> io_thread_info;
+  for (size_t i = 0; i < dop; ++i) {
+    std::copy(observer.io_thread_infos_[i].begin(), observer.io_thread_infos_[i].end(),
+              std::inserter(io_thread_info, io_thread_info.end()));
+  }
+  ASSERT_EQ(io_thread_info.size(), 1);
+  ASSERT_EQ(io_thread_info.begin()->second.substr(0, 12), "IOThreadPool");
+}
 
 class SortTest : public testing::TestWithParam<size_t> {
  protected:
