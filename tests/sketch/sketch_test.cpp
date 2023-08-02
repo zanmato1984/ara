@@ -786,6 +786,10 @@ class Driver {
   Scheduler* scheduler_;
 };
 
+// TODO: C++ async/future (raw std::thread) scheduler.
+
+// TODO: Arrow thread-pool scheduler.
+
 class FollyFutureDoublePoolScheduler {
  private:
   using ConcreteTask = std::pair<folly::Promise<folly::Unit>, folly::Future<TaskResult>>;
