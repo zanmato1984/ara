@@ -4,6 +4,9 @@
 #include <arrow/testing/gtest_util.h>
 #include <arrow/util/logging.h>
 #include <gtest/gtest.h>
+#include <future>
+
+#include "arrow/acero/test_util_internal.h"
 
 #define ARRA_DCHECK ARROW_DCHECK
 #define ARRA_RETURN_IF ARROW_RETURN_IF
@@ -126,11 +129,13 @@ using namespace arrow;
 using namespace arrow::acero;
 using namespace arrow::compute;
 
-class ScalarAggregateOp : public SinkOp {
+class ScalarAggregateSink : public SinkOp {
  public:
   Status Init(QueryContext* ctx, size_t dop, const AggregateNodeOptions& options,
               const std::shared_ptr<Schema>& input_schema) {
-    auto exec_ctx = ctx->exec_context();
+    ctx_ = ctx;
+    dop_ = dop;
+    auto exec_ctx = ctx_->exec_context();
     aggregates_ = options.aggregates;
     target_fieldsets_.resize(aggregates_.size());
     kernels_.resize(aggregates_.size());
@@ -244,6 +249,76 @@ class ScalarAggregateOp : public SinkOp {
 
 }  // namespace detail
 
-using ScalarAggregateOp = detail::ScalarAggregateOp;
+using ScalarAggregateSink = detail::ScalarAggregateSink;
 
 }  // namespace arra::sketch
+
+using namespace arra::sketch;
+
+void AssertBatchesEqual(const arrow::acero::BatchesWithSchema& out,
+                        const arrow::acero::BatchesWithSchema& exp) {
+  ASSERT_OK_AND_ASSIGN(auto out_table,
+                       arrow::acero::TableFromExecBatches(out.schema, out.batches));
+  ASSERT_OK_AND_ASSIGN(auto exp_table,
+                       arrow::acero::TableFromExecBatches(exp.schema, exp.batches));
+
+  std::vector<arrow::compute::SortKey> sort_keys;
+  for (auto&& f : exp.schema->fields()) {
+    sort_keys.emplace_back(f->name());
+  }
+  ASSERT_OK_AND_ASSIGN(
+      auto exp_table_sort_ids,
+      arrow::compute::SortIndices(exp_table, arrow::compute::SortOptions(sort_keys)));
+  ASSERT_OK_AND_ASSIGN(auto exp_table_sorted,
+                       arrow::compute::Take(exp_table, exp_table_sort_ids));
+  ASSERT_OK_AND_ASSIGN(
+      auto out_table_sort_ids,
+      arrow::compute::SortIndices(out_table, arrow::compute::SortOptions(sort_keys)));
+  ASSERT_OK_AND_ASSIGN(auto out_table_sorted,
+                       arrow::compute::Take(out_table, out_table_sort_ids));
+
+  AssertTablesEqual(*exp_table_sorted.table(), *out_table_sorted.table(),
+                    /*same_chunk_layout=*/false, /*flatten=*/true);
+}
+
+TEST(ScalarAggregate, Basic) {
+  size_t dop = 8;
+  std::unique_ptr<arrow::acero::QueryContext> query_ctx =
+      std::make_unique<arrow::acero::QueryContext>(arrow::acero::QueryOptions{},
+                                                   arrow::compute::ExecContext());
+  ASSERT_OK(query_ctx->Init(8, nullptr));
+
+  arrow::compute::Aggregate agg("count", nullptr, std::vector<arrow::FieldRef>{{0}}, "count");
+  arrow::acero::AggregateNodeOptions options({std::move(agg)});
+  auto input_schema = arrow::schema({arrow::field("l_i32", arrow::int32())});
+
+  ScalarAggregateSink sink_op;
+  ASSERT_OK(sink_op.Init(query_ctx.get(), dop, options, input_schema));
+  auto sink = sink_op.Sink();
+  std::vector<std::future<arrow::Result<OperatorResult>>> handles;
+  for (size_t i = 0; i < dop; ++i) {
+    handles.emplace_back(std::async(std::launch::async, [&, i]() {
+      auto batch = arrow::acero::ExecBatchFromJSON(
+          {arrow::int32()}, "[[1], [2], [3], [4], [5], [6], [7], [8], [9], [10]]");
+      return sink(i, std::move(batch));
+    }));
+  }
+  for (auto& handle : handles) {
+    auto result = handle.get();
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsPipeSinkNeedsMore());
+  }
+  auto fe = sink_op.Frontend();
+  auto result = std::get<0>(fe[0])(0);
+  ASSERT_OK(result);
+  ASSERT_TRUE(result->IsFinished());
+
+  auto act_data = sink_op.GetOutputData();
+  auto act_batch = arrow::acero::BatchesWithSchema{{std::move(act_data)}, sink_op.OutputSchema()};
+
+  auto exp_schema = arrow::schema({arrow::field("count", arrow::int64())});
+  auto exp_data = arrow::acero::ExecBatchFromJSON({arrow::int64()}, "[[80]]");
+  auto exp_batch = arrow::acero::BatchesWithSchema{{std::move(exp_data)}, exp_schema};
+
+  AssertBatchesEqual(act_batch, exp_batch);
+}
