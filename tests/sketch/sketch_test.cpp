@@ -786,15 +786,73 @@ class Driver {
   Scheduler* scheduler_;
 };
 
+class StdThreadScheduler {
+ private:
+  using ConcreteTask = std::future<TaskResult>;
+
+ public:
+  using TaskGroupHandle = ConcreteTask;
+  using TaskGroupsHandle = ConcreteTask;
+
+  TaskGroupHandle ScheduleTaskGroup(const TaskGroup& group) {
+    auto& task = std::get<0>(group);
+    auto num_tasks = std::get<1>(group);
+    auto& task_cont = std::get<2>(group);
+    std::vector<ConcreteTask> tasks;
+    for (size_t i = 0; i < num_tasks; ++i) {
+      tasks.push_back(MakeTask(task, i));
+    }
+    return std::async(std::launch::async,
+                      [&, tasks = std::move(tasks)]() mutable -> TaskResult {
+                        std::vector<TaskResult> results;
+                        for (auto& task : tasks) {
+                          results.push_back(task.get());
+                        }
+                        for (auto& result : results) {
+                          ARRA_RETURN_NOT_OK(result);
+                        }
+                        if (task_cont.has_value()) {
+                          return task_cont.value()();
+                        }
+                        return TaskStatus::Finished();
+                      });
+  }
+
+  TaskGroupsHandle ScheduleTaskGroups(const TaskGroups& groups) {
+    return std::async(std::launch::async, [&]() -> TaskResult {
+      for (auto& group : groups) {
+        auto handle = ScheduleTaskGroup(group);
+        ARRA_RETURN_NOT_OK(WaitTaskGroup(handle));
+      }
+      return TaskStatus::Finished();
+    });
+  }
+
+  TaskResult WaitTaskGroup(TaskGroupHandle& group) { return group.get(); }
+
+  TaskResult WaitTaskGroups(TaskGroupsHandle& groups) { return groups.get(); }
+
+ private:
+  ConcreteTask MakeTask(const Task& task, TaskId task_id) {
+    return std::async(std::launch::async, [&, task_id]() -> TaskResult {
+      TaskResult result = TaskStatus::Continue();
+      while (!result->IsFinished() && !result->IsCancelled()) {
+        ARRA_ASSIGN_OR_RAISE(result, task(task_id));
+      }
+      return result;
+    });
+  }
+};
+
+// TODO: Arrow thread-pool scheduler.
+
 class FollyFutureDoublePoolScheduler {
  private:
   using ConcreteTask = std::pair<folly::Promise<folly::Unit>, folly::Future<TaskResult>>;
   using TaskGroupPayload = std::vector<TaskResult>;
 
  public:
-  using TaskGroupHandle =
-      std::pair<std::pair<folly::Promise<folly::Unit>, folly::Future<TaskResult>>,
-                TaskGroupPayload>;
+  using TaskGroupHandle = std::pair<ConcreteTask, TaskGroupPayload>;
   using TaskGroupsHandle = std::vector<TaskGroupHandle>;
 
   class TaskObserver {
@@ -3013,18 +3071,14 @@ TYPED_TEST(ControlFlowTest, YieldAroundBackpressure) {
 
 class SortTest : public testing::TestWithParam<size_t> {
  protected:
-  template <typename T>
-  void Sort(const std::vector<PipeOp*>& pipes) {
+  template <typename PipelineTaskT, typename SchedulerT>
+  void Sort(const std::vector<PipeOp*>& pipes, SchedulerT* scheduler) {
     size_t dop = GetParam();
     DistributedMemorySource source(dop, {{1, 10, 100}, {2, 20, 200}, {3, 30, 300}});
     SortSink sink(dop);
     LogicalPipeline pipeline{{{&source, pipes}}, &sink};
 
-    folly::CPUThreadPoolExecutor cpu_executor(8);
-    folly::IOThreadPoolExecutor io_executor(1);
-    FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
-
-    Driver<T, FollyFutureDoublePoolScheduler> driver(T::Make, &scheduler);
+    Driver<PipelineTaskT, SchedulerT> driver(PipelineTaskT::Make, scheduler);
     auto result = driver.Run(dop, {pipeline});
     ASSERT_OK(result);
     ASSERT_TRUE(result->IsFinished());
@@ -3037,41 +3091,73 @@ class SortTest : public testing::TestWithParam<size_t> {
     }
   }
 
-  template <typename T>
-  void PlainSort() {
-    auto dop = GetParam();
-    Sort<T>({});
+  template <typename PipelineTaskT, typename SchedulerT>
+  void PlainSort(SchedulerT* scheduler) {
+    Sort<PipelineTaskT>({}, scheduler);
   }
 
-  template <typename T>
-  void SortWithDrain() {
+  template <typename PipelineTaskT, typename SchedulerT>
+  void SortWithDrain(SchedulerT* scheduler) {
     auto dop = GetParam();
     DrainOnlyPipe pipe(dop);
-    Sort<T>({&pipe});
+    Sort<PipelineTaskT>({&pipe}, scheduler);
   }
 
-  template <typename T>
-  void SortWithYield() {
+  template <typename PipelineTaskT, typename SchedulerT>
+  void SortWithYield(SchedulerT* scheduler) {
     auto dop = GetParam();
     IdentityPipe internal_pipe;
     SpillDelegatePipe pipe(dop, &internal_pipe);
-    Sort<T>({&pipe});
+    Sort<PipelineTaskT>({&pipe}, scheduler);
   }
 };
 
 TEST_P(SortTest, PlainSort) {
-  PlainSort<SyncPipelineTask>();
-  PlainSort<CoroPipelineTask>();
+  {
+    folly::CPUThreadPoolExecutor cpu_executor(4);
+    folly::IOThreadPoolExecutor io_executor(1);
+    FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+    PlainSort<SyncPipelineTask>(&scheduler);
+    PlainSort<CoroPipelineTask>(&scheduler);
+  }
+
+  {
+    StdThreadScheduler scheduler;
+    PlainSort<SyncPipelineTask>(&scheduler);
+    PlainSort<CoroPipelineTask>(&scheduler);
+  }
 }
 
 TEST_P(SortTest, SortWithDrain) {
-  SortWithDrain<SyncPipelineTask>();
-  SortWithDrain<CoroPipelineTask>();
+  {
+    folly::CPUThreadPoolExecutor cpu_executor(4);
+    folly::IOThreadPoolExecutor io_executor(1);
+    FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+    SortWithDrain<SyncPipelineTask>(&scheduler);
+    SortWithDrain<CoroPipelineTask>(&scheduler);
+  }
+
+  {
+    StdThreadScheduler scheduler;
+    SortWithDrain<SyncPipelineTask>(&scheduler);
+    SortWithDrain<CoroPipelineTask>(&scheduler);
+  }
 }
 
 TEST_P(SortTest, SortWithYield) {
-  SortWithYield<SyncPipelineTask>();
-  SortWithYield<CoroPipelineTask>();
+  {
+    folly::CPUThreadPoolExecutor cpu_executor(4);
+    folly::IOThreadPoolExecutor io_executor(1);
+    FollyFutureDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+    SortWithYield<SyncPipelineTask>(&scheduler);
+    SortWithYield<CoroPipelineTask>(&scheduler);
+  }
+
+  {
+    StdThreadScheduler scheduler;
+    SortWithYield<SyncPipelineTask>(&scheduler);
+    SortWithYield<CoroPipelineTask>(&scheduler);
+  }
 }
 
 INSTANTIATE_TEST_SUITE_P(OperatorTest, SortTest, testing::Range(size_t(1), size_t(43)),

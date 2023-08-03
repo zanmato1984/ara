@@ -42,3 +42,7 @@ configure_test(sketch_result_and_status_test "${SKETCH_RESULT_AND_STATUS_TEST_SR
 set(SKETCH_CORO_TEST_SRC
         "${CMAKE_CURRENT_SOURCE_DIR}/sketch_coro_test.cpp")
 configure_test(sketch_coro_test "${SKETCH_CORO_TEST_SRC}")
+
+set(SKETCH_AGGREGATION_TEST_SRC
+        "${CMAKE_CURRENT_SOURCE_DIR}/sketch_aggregation_test.cpp")
+configure_test(sketch_aggregation_test "${SKETCH_AGGREGATION_TEST_SRC}")
