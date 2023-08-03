@@ -288,7 +288,8 @@ TEST(ScalarAggregate, Basic) {
                                                    arrow::compute::ExecContext());
   ASSERT_OK(query_ctx->Init(8, nullptr));
 
-  arrow::compute::Aggregate agg("count", nullptr, std::vector<arrow::FieldRef>{{0}}, "count");
+  arrow::compute::Aggregate agg("count", nullptr, std::vector<arrow::FieldRef>{{0}},
+                                "count");
   arrow::acero::AggregateNodeOptions options({std::move(agg)});
   auto input_schema = arrow::schema({arrow::field("l_i32", arrow::int32())});
 
@@ -314,7 +315,8 @@ TEST(ScalarAggregate, Basic) {
   ASSERT_TRUE(result->IsFinished());
 
   auto act_data = sink_op.GetOutputData();
-  auto act_batch = arrow::acero::BatchesWithSchema{{std::move(act_data)}, sink_op.OutputSchema()};
+  auto act_batch =
+      arrow::acero::BatchesWithSchema{{std::move(act_data)}, sink_op.OutputSchema()};
 
   auto exp_schema = arrow::schema({arrow::field("count", arrow::int64())});
   auto exp_data = arrow::acero::ExecBatchFromJSON({arrow::int64()}, "[[80]]");
