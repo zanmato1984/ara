@@ -667,7 +667,7 @@ TEST(HashAggregate, Basic) {
   auto exp_schema = arrow::schema(
       {arrow::field("key_i32", arrow::int64()), arrow::field("count", arrow::int64())});
   auto exp_data = arrow::acero::ExecBatchFromJSON({arrow::int32(), arrow::int64()},
-                                                  "[[1, 4], [2, 3], [3, 2], [4, 1]]");
+                                                  "[[1, 32], [2, 24], [3, 16], [4, 8]]");
   auto exp_batch = arrow::acero::BatchesWithSchema{{std::move(exp_data)}, exp_schema};
 
   AssertBatchesEqual(act_batch, exp_batch);
