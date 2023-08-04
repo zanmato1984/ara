@@ -2,4 +2,8 @@
 
 #include "ara/op/op_output.h"
 
-void bar() { ara::foo(); }
+namespace ara::op {
+
+Batch foo() { return ara::foo(); }
+
+}  // namespace ara::op

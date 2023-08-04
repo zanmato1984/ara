@@ -1,3 +1,7 @@
 #include <ara/common/foo.h>
 
-void bar() { ara::foo(); }
+namespace ara::pipeline {
+
+Batch foo() { return ara::foo(); }
+
+}  // namespace ara::pipeline

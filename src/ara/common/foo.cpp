@@ -3,6 +3,6 @@
 
 namespace ara {
 
-void foo() {}
+Batch foo() { return Batch(); }
 
 }  // namespace ara

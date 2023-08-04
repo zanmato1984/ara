@@ -4,4 +4,4 @@ namespace ara {
 
 using Batch = arrow::compute::ExecBatch;
 
-}
+}  // namespace ara

@@ -2,4 +2,8 @@
 
 #include "ara/util/util.h"
 
-void bar() { ara::foo(); }
+namespace ara::util {
+
+Batch foo() { return ara::foo(); }
+
+}  // namespace ara::util

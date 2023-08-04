@@ -1,5 +1,7 @@
+#include "ara/common/batch.h"
+
 namespace ara {
 
-void foo();
+Batch foo();
 
-}
+}  // namespace ara

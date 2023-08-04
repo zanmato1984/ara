@@ -2,4 +2,8 @@
 
 #include "ara/task/task_status.h"
 
-void bar() { ara::foo(); }
+namespace ara::task {
+
+Batch foo() { return ara::foo(); }
+
+}  // namespace ara::task
