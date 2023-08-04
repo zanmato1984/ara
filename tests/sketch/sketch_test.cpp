@@ -9,11 +9,11 @@
 #include <coroutine>
 #include <stack>
 
-#define ARRA_DCHECK ARROW_DCHECK
-#define ARRA_RETURN_NOT_OK ARROW_RETURN_NOT_OK
-#define ARRA_ASSIGN_OR_RAISE ARROW_ASSIGN_OR_RAISE
+#define ARA_DCHECK ARROW_DCHECK
+#define ARA_RETURN_NOT_OK ARROW_RETURN_NOT_OK
+#define ARA_ASSIGN_OR_RAISE ARROW_ASSIGN_OR_RAISE
 
-namespace arra::sketch {
+namespace ara::sketch {
 
 struct TaskStatus {
  private:
@@ -83,7 +83,7 @@ struct OperatorResult {
   bool IsCancelled() { return code_ == Code::CANCELLED; }
 
   std::optional<Batch>& GetOutput() {
-    ARRA_DCHECK(IsPipeEven() || IsSourcePipeHasMore() || IsFinished());
+    ARA_DCHECK(IsPipeEven() || IsSourcePipeHasMore() || IsFinished());
     return output_;
   }
 
@@ -280,9 +280,9 @@ class PipelineTask {
   arrow::Result<OperatorResult> Run(ThreadId thread_id) {
     bool all_finished = true;
     for (auto& task : tasks_) {
-      ARRA_ASSIGN_OR_RAISE(auto result, task.Run(thread_id));
+      ARA_ASSIGN_OR_RAISE(auto result, task.Run(thread_id));
       if (result.IsFinished()) {
-        ARRA_DCHECK(!result.GetOutput().has_value());
+        ARA_DCHECK(!result.GetOutput().has_value());
       } else {
         all_finished = false;
       }
@@ -333,7 +333,7 @@ class SyncPipelinePlexTask {
         cancelled = true;
         return result.status();
       }
-      ARRA_DCHECK(result->IsPipeSinkNeedsMore() || result->IsSinkBackpressure());
+      ARA_DCHECK(result->IsPipeSinkNeedsMore() || result->IsSinkBackpressure());
       if (!result->IsSinkBackpressure()) {
         local_states_[thread_id].backpressure = false;
         return OperatorResult::PipeSinkNeedsMore();
@@ -361,8 +361,8 @@ class SyncPipelinePlexTask {
           return Pipe(thread_id, 0, std::move(result->GetOutput()));
         }
       } else {
-        ARRA_DCHECK(result->IsSourcePipeHasMore());
-        ARRA_DCHECK(result->GetOutput().has_value());
+        ARA_DCHECK(result->IsSourcePipeHasMore());
+        ARA_DCHECK(result->GetOutput().has_value());
         return Pipe(thread_id, 0, std::move(result->GetOutput()));
       }
     }
@@ -380,16 +380,16 @@ class SyncPipelinePlexTask {
         return result.status();
       }
       if (local_states_[thread_id].yield) {
-        ARRA_DCHECK(result->IsPipeSinkNeedsMore());
+        ARA_DCHECK(result->IsPipeSinkNeedsMore());
         local_states_[thread_id].yield = false;
         return OperatorResult::PipeSinkNeedsMore();
       }
       if (result->IsPipeYield()) {
-        ARRA_DCHECK(!local_states_[thread_id].yield);
+        ARA_DCHECK(!local_states_[thread_id].yield);
         local_states_[thread_id].yield = true;
         return OperatorResult::PipeYield();
       }
-      ARRA_DCHECK(result->IsSourcePipeHasMore() || result->IsFinished());
+      ARA_DCHECK(result->IsSourcePipeHasMore() || result->IsFinished());
       if (result->GetOutput().has_value()) {
         if (result->IsFinished()) {
           ++local_states_[thread_id].draining;
@@ -411,24 +411,24 @@ class SyncPipelinePlexTask {
         return result.status();
       }
       if (local_states_[thread_id].yield) {
-        ARRA_DCHECK(result->IsPipeSinkNeedsMore());
+        ARA_DCHECK(result->IsPipeSinkNeedsMore());
         local_states_[thread_id].pipe_stack.push(i);
         local_states_[thread_id].yield = false;
         return OperatorResult::PipeSinkNeedsMore();
       }
       if (result->IsPipeYield()) {
-        ARRA_DCHECK(!local_states_[thread_id].yield);
+        ARA_DCHECK(!local_states_[thread_id].yield);
         local_states_[thread_id].pipe_stack.push(i);
         local_states_[thread_id].yield = true;
         return OperatorResult::PipeYield();
       }
-      ARRA_DCHECK(result->IsPipeSinkNeedsMore() || result->IsPipeEven() ||
+      ARA_DCHECK(result->IsPipeSinkNeedsMore() || result->IsPipeEven() ||
                   result->IsSourcePipeHasMore());
       if (result->IsPipeEven() || result->IsSourcePipeHasMore()) {
         if (result->IsSourcePipeHasMore()) {
           local_states_[thread_id].pipe_stack.push(i);
         }
-        ARRA_DCHECK(result->GetOutput().has_value());
+        ARA_DCHECK(result->GetOutput().has_value());
         input = std::move(result->GetOutput());
       } else {
         return OperatorResult::PipeSinkNeedsMore();
@@ -440,7 +440,7 @@ class SyncPipelinePlexTask {
       cancelled = true;
       return result.status();
     }
-    ARRA_DCHECK(result->IsPipeSinkNeedsMore() || result->IsSinkBackpressure());
+    ARA_DCHECK(result->IsPipeSinkNeedsMore() || result->IsSinkBackpressure());
     if (result->IsSinkBackpressure()) {
       local_states_[thread_id].backpressure = true;
       return OperatorResult::SinkBackpressure();
@@ -552,8 +552,8 @@ struct CoroPipelinePlexTask {
           source_done = true;
           break;
         } else {
-          ARRA_DCHECK(result->IsSourcePipeHasMore());
-          ARRA_DCHECK(result->GetOutput().has_value());
+          ARA_DCHECK(result->IsSourcePipeHasMore());
+          ARA_DCHECK(result->GetOutput().has_value());
           break;
         }
       }
@@ -602,7 +602,7 @@ struct CoroPipelinePlexTask {
         co_return OperatorResult::PipeSinkNeedsMore();
       }
       if (result->IsPipeEven()) {
-        ARRA_DCHECK(result->GetOutput().has_value());
+        ARA_DCHECK(result->GetOutput().has_value());
         input = std::move(result->GetOutput());
         continue;
       }
@@ -613,7 +613,7 @@ struct CoroPipelinePlexTask {
           cancelled = true;
           co_return result.status();
         }
-        ARRA_DCHECK(result->IsPipeSinkNeedsMore());
+        ARA_DCHECK(result->IsPipeSinkNeedsMore());
         co_yield OperatorResult::PipeSinkNeedsMore();
         auto coro_pipe = CoroPipe(thread_id, i, std::nullopt);
         while (true) {
@@ -639,7 +639,7 @@ struct CoroPipelinePlexTask {
         co_return result.status();
       }
     }
-    ARRA_DCHECK(result->IsPipeSinkNeedsMore());
+    ARA_DCHECK(result->IsPipeSinkNeedsMore());
     co_return OperatorResult::PipeSinkNeedsMore();
   }
 
@@ -657,11 +657,11 @@ struct CoroPipelinePlexTask {
           cancelled = true;
           co_return result.status();
         }
-        ARRA_DCHECK(result->IsPipeSinkNeedsMore());
+        ARA_DCHECK(result->IsPipeSinkNeedsMore());
         co_yield OperatorResult::PipeSinkNeedsMore();
         continue;
       }
-      ARRA_DCHECK(result->IsSourcePipeHasMore() || result->IsFinished());
+      ARA_DCHECK(result->IsSourcePipeHasMore() || result->IsFinished());
       if (result->GetOutput().has_value()) {
         auto coro_pipe =
             CoroPipe(thread_id, drain_id + 1, std::move(result->GetOutput()));
@@ -703,8 +703,8 @@ class Driver {
   // TODO: Inter-pipeline dependencies.
   TaskResult Run(size_t dop, std::vector<LogicalPipeline> pipelines) {
     for (const auto& pipeline : pipelines) {
-      ARRA_ASSIGN_OR_RAISE(auto result, RunPipeline(dop, pipeline));
-      ARRA_DCHECK(result.IsFinished());
+      ARA_ASSIGN_OR_RAISE(auto result, RunPipeline(dop, pipeline));
+      ARA_DCHECK(result.IsFinished());
     }
     return TaskStatus::Finished();
   }
@@ -719,17 +719,17 @@ class Driver {
     auto sink_be_handle = scheduler_->ScheduleTaskGroups(sink_be);
 
     for (auto& stage : stages) {
-      ARRA_ASSIGN_OR_RAISE(auto result, RunStage(dop, stage));
-      ARRA_DCHECK(result.IsFinished());
+      ARA_ASSIGN_OR_RAISE(auto result, RunStage(dop, stage));
+      ARA_DCHECK(result.IsFinished());
     }
 
     auto sink_fe = sink->Frontend();
     auto sink_fe_handle = scheduler_->ScheduleTaskGroups(sink_fe);
-    ARRA_ASSIGN_OR_RAISE(auto result, scheduler_->WaitTaskGroups(sink_fe_handle));
-    ARRA_DCHECK(result.IsFinished());
+    ARA_ASSIGN_OR_RAISE(auto result, scheduler_->WaitTaskGroups(sink_fe_handle));
+    ARA_DCHECK(result.IsFinished());
 
-    ARRA_ASSIGN_OR_RAISE(result, scheduler_->WaitTaskGroups(sink_be_handle));
-    ARRA_DCHECK(result.IsFinished());
+    ARA_ASSIGN_OR_RAISE(result, scheduler_->WaitTaskGroups(sink_be_handle));
+    ARA_DCHECK(result.IsFinished());
 
     return TaskStatus::Finished();
   }
@@ -745,13 +745,13 @@ class Driver {
     for (auto& source : stage.sources) {
       auto source_fe = source->Frontend();
       auto source_fe_handle = scheduler_->ScheduleTaskGroups(source_fe);
-      ARRA_ASSIGN_OR_RAISE(auto result, scheduler_->WaitTaskGroups(source_fe_handle));
-      ARRA_DCHECK(result.IsFinished());
+      ARA_ASSIGN_OR_RAISE(auto result, scheduler_->WaitTaskGroups(source_fe_handle));
+      ARA_DCHECK(result.IsFinished());
     }
 
     auto pipeline_task = factory_(dop, stage.pipeline);
     TaskGroup pipeline_task_group{[&](ThreadId thread_id) -> TaskResult {
-                                    ARRA_ASSIGN_OR_RAISE(auto result,
+                                    ARA_ASSIGN_OR_RAISE(auto result,
                                                          pipeline_task.Run(thread_id));
                                     if (result.IsSinkBackpressure()) {
                                       return TaskStatus::Backpressure();
@@ -769,13 +769,13 @@ class Driver {
                                   },
                                   dop, std::nullopt};
     auto pipeline_task_group_handle = scheduler_->ScheduleTaskGroup(pipeline_task_group);
-    ARRA_ASSIGN_OR_RAISE(auto result,
+    ARA_ASSIGN_OR_RAISE(auto result,
                          scheduler_->WaitTaskGroup(pipeline_task_group_handle));
-    ARRA_DCHECK(result.IsFinished());
+    ARA_DCHECK(result.IsFinished());
 
     for (auto& source_be_handle : source_be_handles) {
-      ARRA_ASSIGN_OR_RAISE(auto result, scheduler_->WaitTaskGroups(source_be_handle));
-      ARRA_DCHECK(result.IsFinished());
+      ARA_ASSIGN_OR_RAISE(auto result, scheduler_->WaitTaskGroups(source_be_handle));
+      ARA_DCHECK(result.IsFinished());
     }
 
     return TaskStatus::Finished();
@@ -809,7 +809,7 @@ class StdThreadScheduler {
                           results.push_back(task.get());
                         }
                         for (auto& result : results) {
-                          ARRA_RETURN_NOT_OK(result);
+                          ARA_RETURN_NOT_OK(result);
                         }
                         if (task_cont.has_value()) {
                           return task_cont.value()();
@@ -822,7 +822,7 @@ class StdThreadScheduler {
     return std::async(std::launch::async, [&]() -> TaskResult {
       for (auto& group : groups) {
         auto handle = ScheduleTaskGroup(group);
-        ARRA_RETURN_NOT_OK(WaitTaskGroup(handle));
+        ARA_RETURN_NOT_OK(WaitTaskGroup(handle));
       }
       return TaskStatus::Finished();
     });
@@ -837,7 +837,7 @@ class StdThreadScheduler {
     return std::async(std::launch::async, [&, task_id]() -> TaskResult {
       TaskResult result = TaskStatus::Continue();
       while (!result->IsFinished() && !result->IsCancelled()) {
-        ARRA_ASSIGN_OR_RAISE(result, task(task_id));
+        ARA_ASSIGN_OR_RAISE(result, task(task_id));
       }
       return result;
     });
@@ -894,9 +894,9 @@ class FollyFutureDoublePoolScheduler {
                             })
                             .thenValue([&task_cont](auto&& try_results) -> TaskResult {
                               for (auto&& try_result : try_results) {
-                                ARRA_DCHECK(try_result.hasValue());
+                                ARA_DCHECK(try_result.hasValue());
                                 auto result = try_result.value();
-                                ARRA_RETURN_NOT_OK(result);
+                                ARA_RETURN_NOT_OK(result);
                               }
                               if (task_cont.has_value()) {
                                 return task_cont.value()();
@@ -923,7 +923,7 @@ class FollyFutureDoublePoolScheduler {
 
   TaskResult WaitTaskGroups(TaskGroupsHandle& groups) {
     for (auto& group : groups) {
-      ARRA_RETURN_NOT_OK(WaitTaskGroup(group));
+      ARA_RETURN_NOT_OK(WaitTaskGroup(group));
     }
     return TaskStatus::Finished();
   }
@@ -1228,12 +1228,12 @@ class PowerSlicedPipe : public PipeOp {
     return [&](ThreadId thread_id,
                std::optional<Batch> input) -> arrow::Result<OperatorResult> {
       if (thread_locals_[thread_id].batches.empty()) {
-        ARRA_DCHECK(input.has_value());
+        ARA_DCHECK(input.has_value());
         for (size_t i = 0; i < n_; i++) {
           thread_locals_[thread_id].batches.push_back(input.value());
         }
       } else {
-        ARRA_DCHECK(!input.has_value());
+        ARA_DCHECK(!input.has_value());
       }
       auto output = std::move(thread_locals_[thread_id].batches.front());
       thread_locals_[thread_id].batches.pop_front();
@@ -1332,7 +1332,7 @@ class AccumulatePipe : public PipeOp {
 
   arrow::Result<OperatorResult> Pipe(ThreadId thread_id, std::optional<Batch> input) {
     if (thread_locals_[thread_id].batch.size() >= n_) {
-      ARRA_DCHECK(!input.has_value());
+      ARA_DCHECK(!input.has_value());
       Batch output(thread_locals_[thread_id].batch.begin(),
                    thread_locals_[thread_id].batch.begin() + n_);
       thread_locals_[thread_id].batch =
@@ -1344,7 +1344,7 @@ class AccumulatePipe : public PipeOp {
         return OperatorResult::PipeEven(std::move(output));
       }
     }
-    ARRA_DCHECK(input.has_value());
+    ARA_DCHECK(input.has_value());
     thread_locals_[thread_id].batch.insert(thread_locals_[thread_id].batch.end(),
                                            input.value().begin(), input.value().end());
     if (thread_locals_[thread_id].batch.size() >= n_) {
@@ -1488,10 +1488,10 @@ class BackpressureDelegateSink : public SinkOp {
         ctx_[thread_id].backpressure = false;
       }
       if (counter > backpressure_start_ && counter <= backpressure_stop_) {
-        ARRA_DCHECK(!input.has_value());
+        ARA_DCHECK(!input.has_value());
       } else {
-        ARRA_DCHECK(input.has_value());
-        ARRA_RETURN_NOT_OK(sink_->Sink()(thread_id, std::move(input.value())));
+        ARA_DCHECK(input.has_value());
+        ARA_RETURN_NOT_OK(sink_->Sink()(thread_id, std::move(input.value())));
       }
       if (counter >= backpressure_start_ && counter < backpressure_stop_) {
         return OperatorResult::SinkBackpressure();
@@ -1664,19 +1664,19 @@ class SpillDelegatePipe : public PipeOp {
     return [&](ThreadId thread_id,
                std::optional<Batch> input) -> arrow::Result<OperatorResult> {
       if (thread_locals_[thread_id].spilling) {
-        ARRA_DCHECK(!input.has_value());
-        ARRA_DCHECK(thread_locals_[thread_id].result.has_value());
+        ARA_DCHECK(!input.has_value());
+        ARA_DCHECK(thread_locals_[thread_id].result.has_value());
         thread_locals_[thread_id].spilling = false;
         return OperatorResult::PipeSinkNeedsMore();
       }
       if (thread_locals_[thread_id].result.has_value()) {
-        ARRA_DCHECK(!input.has_value());
-        ARRA_DCHECK(!thread_locals_[thread_id].spilling);
+        ARA_DCHECK(!input.has_value());
+        ARA_DCHECK(!thread_locals_[thread_id].spilling);
         auto result = std::move(thread_locals_[thread_id].result.value());
         thread_locals_[thread_id].result = std::nullopt;
         return result;
       }
-      ARRA_ASSIGN_OR_RAISE(thread_locals_[thread_id].result,
+      ARA_ASSIGN_OR_RAISE(thread_locals_[thread_id].result,
                            pipe_->Pipe()(thread_id, std::move(input)));
       thread_locals_[thread_id].spilling = true;
       return OperatorResult::PipeYield();
@@ -1704,7 +1704,7 @@ class DrainOnlyPipe : public PipeOp {
   PipelineTaskPipe Pipe() override {
     return [&](ThreadId thread_id,
                std::optional<Batch> input) -> arrow::Result<OperatorResult> {
-      ARRA_DCHECK(input.has_value());
+      ARA_DCHECK(input.has_value());
       thread_locals_[thread_id].batches.push_back(std::move(input.value()));
       return OperatorResult::PipeSinkNeedsMore();
     };
@@ -1741,7 +1741,7 @@ class DrainOnlyDelegatePipe : public PipeOp {
   PipelineTaskPipe Pipe() override {
     return [&](ThreadId thread_id,
                std::optional<Batch> input) -> arrow::Result<OperatorResult> {
-      ARRA_ASSIGN_OR_RAISE(auto result, pipe_->Pipe()(thread_id, std::move(input)));
+      ARA_ASSIGN_OR_RAISE(auto result, pipe_->Pipe()(thread_id, std::move(input)));
       if (!result.IsPipeEven() && !result.IsSourcePipeHasMore() && !result.IsFinished()) {
         return result;
       }
@@ -1754,7 +1754,7 @@ class DrainOnlyDelegatePipe : public PipeOp {
   }
 
   std::optional<PipelineTaskDrain> Drain() override {
-    ARRA_DCHECK(!pipe_->Drain().has_value());
+    ARA_DCHECK(!pipe_->Drain().has_value());
     return [&](ThreadId thread_id) -> arrow::Result<OperatorResult> {
       if (thread_locals_[thread_id].batches.empty()) {
         return OperatorResult::Finished(std::nullopt);
@@ -1804,17 +1804,17 @@ class DrainSpillDelegatePipe : public PipeOp {
     }
     return [&, drain](ThreadId thread_id) -> arrow::Result<OperatorResult> {
       if (thread_locals_[thread_id].spilling) {
-        ARRA_DCHECK(thread_locals_[thread_id].result.has_value());
+        ARA_DCHECK(thread_locals_[thread_id].result.has_value());
         thread_locals_[thread_id].spilling = false;
         return OperatorResult::PipeSinkNeedsMore();
       }
       if (thread_locals_[thread_id].result.has_value()) {
-        ARRA_DCHECK(!thread_locals_[thread_id].spilling);
+        ARA_DCHECK(!thread_locals_[thread_id].spilling);
         auto result = std::move(thread_locals_[thread_id].result.value());
         thread_locals_[thread_id].result = std::nullopt;
         return result;
       }
-      ARRA_ASSIGN_OR_RAISE(thread_locals_[thread_id].result, drain.value()(thread_id));
+      ARA_ASSIGN_OR_RAISE(thread_locals_[thread_id].result, drain.value()(thread_id));
       thread_locals_[thread_id].spilling = true;
       return OperatorResult::PipeYield();
     };
@@ -1880,7 +1880,7 @@ class FibonacciPipe : public PipeOp {
  public:
   PipelineTaskPipe Pipe() override {
     return [&](ThreadId, std::optional<Batch> input) -> arrow::Result<OperatorResult> {
-      ARRA_DCHECK(input.has_value() && input.value().size() == 1);
+      ARA_DCHECK(input.has_value() && input.value().size() == 1);
       std::lock_guard<std::mutex> lock(mutex_);
       if (!first_.has_value()) {
         first_ = input.value()[0];
@@ -1907,7 +1907,7 @@ class FibonacciPipe : public PipeOp {
     PipelineTaskSource Source() override {
       return [&](ThreadId) -> arrow::Result<OperatorResult> {
         std::lock_guard<std::mutex> lock(mutex_);
-        ARRA_DCHECK(first_.has_value() && second_.has_value());
+        ARA_DCHECK(first_.has_value() && second_.has_value());
         if (!done_) {
           done_ = true;
           return OperatorResult::Finished(Batch{first_.value() + second_.value()});
@@ -1967,7 +1967,7 @@ class SortSink : public SinkOp {
       num_payloads = num_tasks;
     }
     task_groups.push_back({[&, num_payloads](ThreadId thread_id) -> TaskResult {
-                             ARRA_DCHECK(thread_id == 0);
+                             ARA_DCHECK(thread_id == 0);
                              return Merge(thread_id, num_payloads);
                            },
                            1,
@@ -2008,9 +2008,9 @@ class SortSink : public SinkOp {
   Batch sorted;
 };
 
-}  // namespace arra::sketch
+}  // namespace ara::sketch
 
-using namespace arra::sketch;
+using namespace ara::sketch;
 
 TEST(PipelineTest, EmptyPipeline) {
   size_t dop = 8;
@@ -3322,7 +3322,7 @@ class RecursivePowPlusPolynomialTest
 
   template <typename Term>
   std::unique_ptr<Term> MakeTerm(size_t dop, size_t a, size_t b, size_t c) {
-    ARRA_DCHECK(a > 0 && b > 0 && c > 0);
+    ARA_DCHECK(a > 0 && b > 0 && c > 0);
     if (c == 1) {
       return std::make_unique<Term>(dop, a, b);
     }

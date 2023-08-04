@@ -1,13 +1,13 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(arra VERSION 0.0.1 LANGUAGES C CXX)
+project(ara VERSION 0.0.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 
-option(ARRA_USE_INTERNAL_ARROW "Use internal Arrow library, usurally for debugging purpose" OFF)
-option(ARRA_BUILD_TESTS "Build the Arra googletest unit tests" OFF)
+option(ARA_USE_INTERNAL_ARROW "Use internal Arrow library, usurally for debugging purpose" OFF)
+option(ARA_BUILD_TESTS "Build the Ara googletest unit tests" OFF)
 
-if(ARRA_USE_INTERNAL_ARROW)
+if(ARA_USE_INTERNAL_ARROW)
   message(STATUS "Using internal Arrow library")
   include(ExternalProject)
   set(ARROW_PREFIX "${CMAKE_CURRENT_BINARY_DIR}/arrow")
@@ -45,26 +45,26 @@ if(ARRA_USE_INTERNAL_ARROW)
   add_library(Arrow::arrow_testing_shared SHARED IMPORTED)
   set_target_properties(Arrow::arrow_testing_shared PROPERTIES IMPORTED_LOCATION "${ARROW_TESTING_SHARED_LIBRARY}" INTERFACE_INCLUDE_DIRECTORIES "${ARROW_PREFIX}/include")
   add_dependencies(Arrow::arrow_testing_shared arrow_ep)
-else(ARRA_USE_INTERNAL_ARROW)
+else(ARA_USE_INTERNAL_ARROW)
   message(STATUS "Using system Arrow library")
   include(cmake/find/arrow.cmake)
-endif(ARRA_USE_INTERNAL_ARROW)
+endif(ARA_USE_INTERNAL_ARROW)
 
 include(cmake/find/folly.cmake)
 include(cmake/find/rapidjson.cmake)
 
-add_library(arra
+add_library(ara
   "${CMAKE_SOURCE_DIR}/src/foo.cpp")
 
-target_include_directories(arra PUBLIC "${CMAKE_SOURCE_DIR}/include" "${RAPIDJSON_INCLUDE_DIRS}")
-target_link_libraries(arra PUBLIC Arrow::arrow_shared ArrowAcero::arrow_acero_shared Folly::folly)
+target_include_directories(ara PUBLIC "${CMAKE_SOURCE_DIR}/include" "${RAPIDJSON_INCLUDE_DIRS}")
+target_link_libraries(ara PUBLIC Arrow::arrow_shared ArrowAcero::arrow_acero_shared Folly::folly)
 
-if(ARRA_BUILD_TESTS)
-  if(NOT ARRA_USE_INTERNAL_ARROW)
-    message(FATAL_ERROR "Can't build Arra tests without internal Arrow library")
-  endif(NOT ARRA_USE_INTERNAL_ARROW)
-  message(STATUS "Building the Arra googletest unit tests")
+if(ARA_BUILD_TESTS)
+  if(NOT ARA_USE_INTERNAL_ARROW)
+    message(FATAL_ERROR "Can't build Ara tests without internal Arrow library")
+  endif(NOT ARA_USE_INTERNAL_ARROW)
+  message(STATUS "Building the Ara googletest unit tests")
   include(cmake/find/gtest.cmake)
   include(cmake/find/gflags.cmake)
   add_subdirectory("${CMAKE_SOURCE_DIR}/tests")
-endif(ARRA_BUILD_TESTS)
+endif(ARA_BUILD_TESTS)

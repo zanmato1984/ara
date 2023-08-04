@@ -8,12 +8,12 @@
 
 #include "arrow/acero/test_util_internal.h"
 
-#define ARRA_DCHECK ARROW_DCHECK
-#define ARRA_RETURN_IF ARROW_RETURN_IF
-#define ARRA_RETURN_NOT_OK ARROW_RETURN_NOT_OK
-#define ARRA_ASSIGN_OR_RAISE ARROW_ASSIGN_OR_RAISE
+#define ARA_DCHECK ARROW_DCHECK
+#define ARA_RETURN_IF ARROW_RETURN_IF
+#define ARA_RETURN_NOT_OK ARROW_RETURN_NOT_OK
+#define ARA_ASSIGN_OR_RAISE ARROW_ASSIGN_OR_RAISE
 
-namespace arra::sketch {
+namespace ara::sketch {
 
 struct TaskStatus {
  private:
@@ -81,7 +81,7 @@ struct OperatorResult {
   bool IsCancelled() { return code_ == Code::CANCELLED; }
 
   std::optional<Batch>& GetOutput() {
-    ARRA_DCHECK(IsPipeEven() || IsSourcePipeHasMore() || IsFinished());
+    ARA_DCHECK(IsPipeEven() || IsSourcePipeHasMore() || IsFinished());
     return output_;
   }
 
@@ -145,11 +145,11 @@ class ScalarAggregateSink : public SinkOp {
     for (size_t i = 0; i < aggregates_.size(); ++i) {
       const auto& target_fieldset = aggregates_[i].target;
       for (const auto& target : target_fieldset) {
-        ARRA_ASSIGN_OR_RAISE(auto match, FieldRef(target).FindOne(*input_schema));
+        ARA_ASSIGN_OR_RAISE(auto match, FieldRef(target).FindOne(*input_schema));
         target_fieldsets_[i].push_back(match[0]);
       }
 
-      ARRA_ASSIGN_OR_RAISE(
+      ARA_ASSIGN_OR_RAISE(
           auto function, exec_ctx->func_registry()->GetFunction(aggregates_[i].function));
       ARROW_RETURN_IF(function->kind() != Function::SCALAR_AGGREGATE,
                       Status::Invalid("The provided function (", aggregates_[i].function,
@@ -159,12 +159,12 @@ class ScalarAggregateSink : public SinkOp {
         in_types.emplace_back(input_schema->field(target)->type().get());
       }
       kernel_intypes_[i] = in_types;
-      ARRA_ASSIGN_OR_RAISE(const Kernel* kernel,
+      ARA_ASSIGN_OR_RAISE(const Kernel* kernel,
                            function->DispatchExact(kernel_intypes_[i]));
       kernels_[i] = static_cast<const ScalarAggregateKernel*>(kernel);
 
       if (aggregates_[i].options == nullptr) {
-        ARRA_DCHECK(!function->doc().options_required);
+        ARA_DCHECK(!function->doc().options_required);
         const auto* default_options = function->default_options();
         if (default_options) {
           aggregates_[i].options = default_options->Copy();
@@ -205,7 +205,7 @@ class ScalarAggregateSink : public SinkOp {
           column_values.push_back(exec_span.values[field]);
         }
         ExecSpan column_batch{std::move(column_values), exec_span.length};
-        ARRA_RETURN_NOT_OK(kernels_[i]->consume(&batch_ctx, column_batch));
+        ARA_RETURN_NOT_OK(kernels_[i]->consume(&batch_ctx, column_batch));
       }
       return OperatorResult::PipeSinkNeedsMore();
     };
@@ -381,12 +381,12 @@ class HashAggregateSink : public SinkOp {
     }
 
     // Construct aggregates
-    ARRA_ASSIGN_OR_RAISE(agg_kernels_, GetKernels(exec_ctx, aggs_, agg_src_types_));
+    ARA_ASSIGN_OR_RAISE(agg_kernels_, GetKernels(exec_ctx, aggs_, agg_src_types_));
 
-    ARRA_ASSIGN_OR_RAISE(auto agg_states,
+    ARA_ASSIGN_OR_RAISE(auto agg_states,
                          InitKernels(agg_kernels_, exec_ctx, aggs_, agg_src_types_));
 
-    ARRA_ASSIGN_OR_RAISE(
+    ARA_ASSIGN_OR_RAISE(
         FieldVector agg_result_fields,
         ResolveKernels(aggs_, agg_kernels_, agg_states, exec_ctx, agg_src_types_));
 
@@ -409,8 +409,8 @@ class HashAggregateSink : public SinkOp {
 
     local_states_.resize(dop_);
     for (size_t i = 0; i < dop_; ++i) {
-      ARRA_ASSIGN_OR_RAISE(local_states_[i].grouper, Grouper::Make(key_types, exec_ctx));
-      ARRA_ASSIGN_OR_RAISE(local_states_[i].agg_states,
+      ARA_ASSIGN_OR_RAISE(local_states_[i].grouper, Grouper::Make(key_types, exec_ctx));
+      ARA_ASSIGN_OR_RAISE(local_states_[i].agg_states,
                            InitKernels(agg_kernels_, exec_ctx, aggs_, agg_src_types_));
     }
     return Status::OK();
@@ -423,15 +423,15 @@ class HashAggregateSink : public SinkOp {
         return OperatorResult::PipeSinkNeedsMore();
       }
       ExecSpan exec_span(batch.value());
-      ARRA_RETURN_NOT_OK(Consume(thread_id, std::move(exec_span)));
+      ARA_RETURN_NOT_OK(Consume(thread_id, std::move(exec_span)));
       return OperatorResult::PipeSinkNeedsMore();
     };
   }
 
   TaskGroups Frontend() override {
     auto merge_and_finalize = [&](TaskId) -> TaskResult {
-      ARRA_RETURN_NOT_OK(Merge());
-      ARRA_ASSIGN_OR_RAISE(output_data_, Finalize());
+      ARA_RETURN_NOT_OK(Merge());
+      ARA_ASSIGN_OR_RAISE(output_data_, Finalize());
       return TaskStatus::Finished();
     };
 
@@ -550,9 +550,9 @@ class HashAggregateSink : public SinkOp {
 using ScalarAggregateSink = detail::ScalarAggregateSink;
 using HashAggregateSink = detail::HashAggregateSink;
 
-}  // namespace arra::sketch
+}  // namespace ara::sketch
 
-using namespace arra::sketch;
+using namespace ara::sketch;
 
 void AssertBatchesEqual(const arrow::acero::BatchesWithSchema& out,
                         const arrow::acero::BatchesWithSchema& exp) {

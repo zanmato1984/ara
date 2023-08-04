@@ -2,7 +2,7 @@
 
 #include "sketch_hash_join.h"
 
-namespace arra::sketch::detail {
+namespace ara::sketch::detail {
 
 Status ValidateHashJoinNodeOptions(const HashJoinNodeOptions& join_options) {
   if (join_options.key_cmp.empty() || join_options.left_keys.empty() ||
@@ -149,7 +149,7 @@ Status BuildProcessor::Build(ThreadId thread_id, TempVectorStack* temp_stack,
     }
   }
 
-  ARRA_SET_AND_RETURN_NOT_OK(
+  ARA_SET_AND_RETURN_NOT_OK(
       hash_table_build_->PushNextBatch(static_cast<int64_t>(thread_id), key_batch,
                                        no_payload ? nullptr : &payload_batch, temp_stack),
       { status = OperatorStatus::Other(__s); });
@@ -267,7 +267,7 @@ Status ProbeProcessor::Drain(ThreadId thread_id, OperatorStatus& status) {
 
   std::optional<ExecBatch> output;
   if (local_states_[thread_id].materialize->num_rows() > 0) {
-    ARRA_SET_AND_RETURN_NOT_OK(
+    ARA_SET_AND_RETURN_NOT_OK(
         local_states_[thread_id].materialize->Flush([&](ExecBatch batch) {
           output.emplace(std::move(batch));
           return Status::OK();
@@ -289,7 +289,7 @@ Status ProbeProcessor::Probe(ThreadId thread_id, std::optional<ExecBatch> input,
   switch (local_states_[thread_id].state) {
     case State::CLEAN: {
       // Some check.
-      ARRA_DCHECK(!local_states_[thread_id].input.has_value());
+      ARA_DCHECK(!local_states_[thread_id].input.has_value());
 
       // Prepare input.
       ExecBatch batch;
@@ -305,7 +305,7 @@ Status ProbeProcessor::Probe(ThreadId thread_id, std::optional<ExecBatch> input,
       }
 
       // Process input.
-      ARRA_SET_AND_RETURN_NOT_OK(
+      ARA_SET_AND_RETURN_NOT_OK(
           join_fn(thread_id, temp_stack, temp_column_arrays, output, state_next),
           { status = OperatorStatus::Other(__s); });
 
@@ -314,10 +314,10 @@ Status ProbeProcessor::Probe(ThreadId thread_id, std::optional<ExecBatch> input,
     case State::MINIBATCH_HAS_MORE:
     case State::MATCH_HAS_MORE: {
       // Some check.
-      ARRA_DCHECK(local_states_[thread_id].input.has_value());
+      ARA_DCHECK(local_states_[thread_id].input.has_value());
 
       // Process input.
-      ARRA_SET_AND_RETURN_NOT_OK(
+      ARA_SET_AND_RETURN_NOT_OK(
           join_fn(thread_id, temp_stack, temp_column_arrays, output, state_next),
           { status = OperatorStatus::Other(__s); });
 
@@ -424,10 +424,10 @@ Status ProbeProcessor::InnerOuter(ThreadId thread_id, TempVectorStack* temp_stac
             kMaxPipeBatchSize - local_states_[thread_id].materialize->num_rows();
         num_matches_next -= rows_appended;
         int ignored;
-        ARRA_RETURN_NOT_OK(local_states_[thread_id].materialize->Append(
+        ARA_RETURN_NOT_OK(local_states_[thread_id].materialize->Append(
             local_states_[thread_id].input->batch, rows_appended, materialize_batch_ids,
             materialize_key_ids, materialize_payload_ids, &ignored));
-        ARRA_RETURN_NOT_OK(
+        ARA_RETURN_NOT_OK(
             local_states_[thread_id].materialize->Flush([&](ExecBatch batch) {
               output.emplace(std::move(batch));
               return Status::OK();
@@ -439,7 +439,7 @@ Status ProbeProcessor::InnerOuter(ThreadId thread_id, TempVectorStack* temp_stac
       // of rows.
       if (num_matches_next > 0) {
         int ignored;
-        ARRA_RETURN_NOT_OK(local_states_[thread_id].materialize->Append(
+        ARA_RETURN_NOT_OK(local_states_[thread_id].materialize->Append(
             local_states_[thread_id].input->batch, num_matches_next,
             materialize_batch_ids + rows_appended, materialize_key_ids + rows_appended,
             materialize_payload_ids + rows_appended, &ignored));
@@ -476,10 +476,10 @@ Status ProbeProcessor::InnerOuter(ThreadId thread_id, TempVectorStack* temp_stac
               kMaxPipeBatchSize - local_states_[thread_id].materialize->num_rows();
           num_passing_ids -= rows_appended;
           int ignored;
-          ARRA_RETURN_NOT_OK(local_states_[thread_id].materialize->AppendProbeOnly(
+          ARA_RETURN_NOT_OK(local_states_[thread_id].materialize->AppendProbeOnly(
               local_states_[thread_id].input->batch, rows_appended,
               local_states_[thread_id].materialize_batch_ids_buf_data(), &ignored));
-          ARRA_RETURN_NOT_OK(
+          ARA_RETURN_NOT_OK(
               local_states_[thread_id].materialize->Flush([&](ExecBatch batch) {
                 output.emplace(std::move(batch));
                 return Status::OK();
@@ -489,7 +489,7 @@ Status ProbeProcessor::InnerOuter(ThreadId thread_id, TempVectorStack* temp_stac
 
         if (num_passing_ids > 0) {
           int ignored;
-          ARRA_RETURN_NOT_OK(local_states_[thread_id].materialize->AppendProbeOnly(
+          ARA_RETURN_NOT_OK(local_states_[thread_id].materialize->AppendProbeOnly(
               local_states_[thread_id].input->batch, num_passing_ids,
               local_states_[thread_id].materialize_batch_ids_buf_data() + rows_appended,
               &ignored));
@@ -562,10 +562,10 @@ Status ProbeProcessor::LeftSemiAnti(ThreadId thread_id, TempVectorStack* temp_st
           kMaxPipeBatchSize - local_states_[thread_id].materialize->num_rows();
       num_passing_ids -= rows_appended;
       int ignored;
-      ARRA_RETURN_NOT_OK(local_states_[thread_id].materialize->AppendProbeOnly(
+      ARA_RETURN_NOT_OK(local_states_[thread_id].materialize->AppendProbeOnly(
           local_states_[thread_id].input->batch, rows_appended,
           local_states_[thread_id].materialize_batch_ids_buf_data(), &ignored));
-      ARRA_RETURN_NOT_OK(
+      ARA_RETURN_NOT_OK(
           local_states_[thread_id].materialize->Flush([&](ExecBatch batch) {
             output.emplace(std::move(batch));
             return Status::OK();
@@ -575,7 +575,7 @@ Status ProbeProcessor::LeftSemiAnti(ThreadId thread_id, TempVectorStack* temp_st
 
     if (num_passing_ids > 0) {
       int ignored;
-      ARRA_RETURN_NOT_OK(local_states_[thread_id].materialize->AppendProbeOnly(
+      ARA_RETURN_NOT_OK(local_states_[thread_id].materialize->AppendProbeOnly(
           local_states_[thread_id].input->batch, num_passing_ids,
           local_states_[thread_id].materialize_batch_ids_buf_data() + rows_appended,
           &ignored));
@@ -683,7 +683,7 @@ Status ScanProcessor::Scan(ThreadId thread_id, TempVectorStack* temp_stack,
   if (start_row >= end_row) {
     std::optional<ExecBatch> output;
     if (local_states_[thread_id].materialize->num_rows() > 0) {
-      ARRA_SET_AND_RETURN_NOT_OK(
+      ARA_SET_AND_RETURN_NOT_OK(
           local_states_[thread_id].materialize->Flush([&](ExecBatch batch) {
             output.emplace(std::move(batch));
             return Status::OK();
@@ -743,13 +743,13 @@ Status ScanProcessor::Scan(ThreadId thread_id, TempVectorStack* temp_stack,
           kMaxPipeBatchSize - local_states_[thread_id].materialize->num_rows();
       num_output_rows -= rows_appended;
       int ignored;
-      ARRA_SET_AND_RETURN_NOT_OK(local_states_[thread_id].materialize->AppendBuildOnly(
+      ARA_SET_AND_RETURN_NOT_OK(local_states_[thread_id].materialize->AppendBuildOnly(
                                      rows_appended, key_ids_buf.mutable_data(),
                                      payload_ids_buf.mutable_data(), &ignored),
                                  { status = OperatorStatus::Other(__s); });
 
       std::optional<ExecBatch> output;
-      ARRA_SET_AND_RETURN_NOT_OK(
+      ARA_SET_AND_RETURN_NOT_OK(
           local_states_[thread_id].materialize->Flush([&](ExecBatch batch) {
             output.emplace(std::move(batch));
             return Status::OK();
@@ -764,7 +764,7 @@ Status ScanProcessor::Scan(ThreadId thread_id, TempVectorStack* temp_stack,
       // values according to the generated list of ids.
       //
       int ignored;
-      ARRA_SET_AND_RETURN_NOT_OK(
+      ARA_SET_AND_RETURN_NOT_OK(
           local_states_[thread_id].materialize->AppendBuildOnly(
               num_output_rows, key_ids_buf.mutable_data() + rows_appended,
               payload_ids_buf.mutable_data() + rows_appended, &ignored),
@@ -792,15 +792,15 @@ Status HashJoin::Init(QueryContext* ctx, size_t dop, const HashJoinNodeOptions& 
   join_type_ = options.join_type;
   key_cmp_ = options.key_cmp;
 
-  ARRA_RETURN_NOT_OK(ValidateHashJoinNodeOptions(options));
+  ARA_RETURN_NOT_OK(ValidateHashJoinNodeOptions(options));
 
   if (options.output_all) {
-    ARRA_RETURN_NOT_OK(schema_mgr_.Init(options.join_type, left_schema, options.left_keys,
+    ARA_RETURN_NOT_OK(schema_mgr_.Init(options.join_type, left_schema, options.left_keys,
                                         right_schema, options.right_keys, options.filter,
                                         options.output_suffix_for_left,
                                         options.output_suffix_for_right));
   } else {
-    ARRA_RETURN_NOT_OK(schema_mgr_.Init(
+    ARA_RETURN_NOT_OK(schema_mgr_.Init(
         options.join_type, left_schema, options.left_keys, options.left_output,
         right_schema, options.right_keys, options.right_output, options.filter,
         options.output_suffix_for_left, options.output_suffix_for_right));
@@ -822,7 +822,7 @@ Status HashJoin::Init(QueryContext* ctx, size_t dop, const HashJoinNodeOptions& 
   for (int i = 0; i < dop_; ++i) {
     materialize[i] = &local_states_[i].materialize;
   }
-  ARRA_RETURN_NOT_OK(probe_processor_.Init(
+  ARA_RETURN_NOT_OK(probe_processor_.Init(
       hardware_flags_, pool_, schema_[0]->num_cols(HashJoinProjection::KEY), schema_[0],
       join_type_, &key_cmp_, &hash_table_, materialize));
 
@@ -838,7 +838,7 @@ std::unique_ptr<SinkOp> HashJoin::BuildSink() {
     materialize[i] = &local_states_[i].materialize;
   }
   std::unique_ptr<HashJoinBuildSink> build_sink = std::make_unique<HashJoinBuildSink>();
-  ARRA_DCHECK_OK(build_sink->Init(ctx_, dop_, hardware_flags_, pool_, schema_[1],
+  ARA_DCHECK_OK(build_sink->Init(ctx_, dop_, hardware_flags_, pool_, schema_[1],
                                   join_type_, &hash_table_build_, &hash_table_,
                                   materialize));
   return build_sink;
@@ -870,7 +870,7 @@ std::unique_ptr<SourceOp> HashJoin::Source() {
   for (int i = 0; i < dop_; ++i) {
     materialize[i] = &local_states_[i].materialize;
   }
-  ARRA_DCHECK_OK(scan_source->Init(ctx_, join_type_, &hash_table_, materialize));
+  ARA_DCHECK_OK(scan_source->Init(ctx_, join_type_, &hash_table_, materialize));
   return scan_source;
 }
 
@@ -902,14 +902,14 @@ PipelineTaskPipe HashJoinBuildSink::Pipe() {
 std::optional<PipelineTaskPipe> HashJoinBuildSink::Drain() { return std::nullopt; }
 
 TaskGroups HashJoinBuildSink::Frontend() {
-  ARRA_DCHECK_OK(build_processor_.StartBuild());
+  ARA_DCHECK_OK(build_processor_.StartBuild());
 
   auto build_task = [&](TaskId task_id, OperatorStatus& status) {
     ARROW_ASSIGN_OR_RAISE(TempVectorStack * temp_stack, ctx_->GetTempStack(task_id));
     return build_processor_.Build(task_id, temp_stack, status);
   };
   auto build_task_cont = [&]() {
-    ARRA_RETURN_NOT_OK(build_processor_.FinishBuild());
+    ARA_RETURN_NOT_OK(build_processor_.FinishBuild());
     return build_processor_.StartMerge();
   };
 
@@ -1009,7 +1009,7 @@ MemorySink::MemorySink(BatchesWithSchema& batches) : batches_(batches) {}
 
 PipelineTaskPipe MemorySink::Pipe() {
   return [&](ThreadId, std::optional<ExecBatch> batch, OperatorStatus& status) {
-    ARRA_DCHECK(batch.has_value());
+    ARA_DCHECK(batch.has_value());
     {
       std::lock_guard<std::mutex> lock(mutex_);
       batches_.batches.push_back(std::move(batch.value()));
@@ -1049,7 +1049,7 @@ Status PipelineTask::Run(ThreadId thread_id, OperatorStatus& status) {
   }
 
   if (!local_states_[thread_id].source_done) {
-    ARRA_RETURN_NOT_OK(source_(thread_id, status));
+    ARA_RETURN_NOT_OK(source_(thread_id, status));
     auto& output = std::get<std::optional<ExecBatch>>(status.payload);
     if (status.code == OperatorStatusCode::FINISHED) {
       local_states_[thread_id].source_done = true;
@@ -1057,7 +1057,7 @@ Status PipelineTask::Run(ThreadId thread_id, OperatorStatus& status) {
         return Pipe(thread_id, status, 0, std::move(output));
       }
     } else {
-      ARRA_DCHECK(output.has_value());
+      ARA_DCHECK(output.has_value());
       return Pipe(thread_id, status, 0, std::move(output));
     }
   }
@@ -1070,7 +1070,7 @@ Status PipelineTask::Run(ThreadId thread_id, OperatorStatus& status) {
   for (; local_states_[thread_id].draining < local_states_[thread_id].drains.size();
        ++local_states_[thread_id].draining) {
     auto drain_id = local_states_[thread_id].drains[local_states_[thread_id].draining];
-    ARRA_RETURN_NOT_OK(pipes_[drain_id].second.value()(thread_id, std::nullopt, status));
+    ARA_RETURN_NOT_OK(pipes_[drain_id].second.value()(thread_id, std::nullopt, status));
     auto& output = std::get<std::optional<ExecBatch>>(status.payload);
     if (output.has_value()) {
       return Pipe(thread_id, status, drain_id + 1, std::move(output));
@@ -1084,7 +1084,7 @@ Status PipelineTask::Run(ThreadId thread_id, OperatorStatus& status) {
 Status PipelineTask::Pipe(ThreadId thread_id, OperatorStatus& status, size_t pipe_id,
                           std::optional<ExecBatch> input) {
   for (size_t i = pipe_id; i < pipes_.size(); i++) {
-    ARRA_RETURN_NOT_OK(pipes_[i].first(thread_id, std::move(input), status));
+    ARA_RETURN_NOT_OK(pipes_[i].first(thread_id, std::move(input), status));
     if (status.code == OperatorStatusCode::HAS_MORE_OUTPUT) {
       local_states_[thread_id].pipe_stack.push(i);
     }
@@ -1171,7 +1171,7 @@ FollyFutureScheduler::SchedulerTask FollyFutureScheduler::MakeTask(const Task& t
                                                                    TaskId task_id) {
   return {OperatorStatus::HasOutput(std::nullopt), [&task, task_id]() {
             OperatorStatus status;
-            ARRA_DCHECK_OK(task(task_id, status));
+            ARA_DCHECK_OK(task(task_id, status));
             return status;
           }};
 }
@@ -1193,4 +1193,4 @@ FollyFutureScheduler::SchedulerTaskHandle FollyFutureScheduler::ScheduleTask(
   return folly::whileDo(pred, thunk);
 }
 
-}  // namespace arra::sketch::detail
+}  // namespace ara::sketch::detail

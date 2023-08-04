@@ -2,7 +2,7 @@
 
 #include <arrow/compute/api.h>
 
-namespace arra {
+namespace ara {
 
 arrow::compute::ExecContext Foo();
 

@@ -3,7 +3,7 @@
 
 #include "arrow/acero/swiss_join_internal.h"
 
-namespace arra {
+namespace ara {
 
     using namespace arrow;
     using namespace arrow::acero;
@@ -514,4 +514,4 @@ class SwissJoin {
 //   return std::move(impl);
 // }
 
-}  // namespace arra
+}  // namespace ara

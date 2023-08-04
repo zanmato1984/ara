@@ -4,7 +4,7 @@
 
 #include "sketch_hash_join.h"
 
-using namespace arra::sketch;
+using namespace ara::sketch;
 
 void AppendBatchesFromString(arrow::acero::BatchesWithSchema& out_batches,
                              const std::vector<std::string_view>& json_strings,

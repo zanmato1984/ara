@@ -5,9 +5,9 @@
 #include <arrow/util/logging.h>
 #include <gtest/gtest.h>
 
-#define ARRA_DCHECK ARROW_DCHECK
+#define ARA_DCHECK ARROW_DCHECK
 
-namespace arra::sketch {
+namespace ara::sketch {
 
 struct OperatorResult {
  private:
@@ -36,7 +36,7 @@ struct OperatorResult {
   bool IsCancelled() { return status_ == OperatorStatus::CANCELLED; }
 
   std::optional<arrow::compute::ExecBatch> GetOutput() {
-    ARRA_DCHECK(IsHasMore() || IsFinished());
+    ARA_DCHECK(IsHasMore() || IsFinished());
     return output_;
   }
 
@@ -56,7 +56,7 @@ struct OperatorResult {
   static OperatorResult CANCELLED() { return OperatorResult{OperatorStatus::CANCELLED}; }
 };
 
-}  // namespace arra::sketch
+}  // namespace ara::sketch
 
 namespace arrow {
 
@@ -66,7 +66,7 @@ namespace arrow {
 
 }  // namespace arrow
 
-using namespace arra::sketch;
+using namespace ara::sketch;
 
 TEST(ResultAndStatusTest, EmitBatch) {
   struct Operator {

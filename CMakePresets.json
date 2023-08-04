@@ -10,16 +10,16 @@
       "name": "dev",
       "hidden": true,
       "cacheVariables": {
-        "ARRA_BUILD_TESTS": "ON",
-        "ARRA_USE_INTERNAL_ARROW": "ON"
+        "ARA_BUILD_TESTS": "ON",
+        "ARA_USE_INTERNAL_ARROW": "ON"
       }
     },
     {
       "name": "build",
       "hidden": true,
       "cacheVariables": {
-        "ARRA_BUILD_TESTS": "OFF",
-        "ARRA_USE_INTERNAL_ARROW": "OFF"
+        "ARA_BUILD_TESTS": "OFF",
+        "ARA_USE_INTERNAL_ARROW": "OFF"
       }
     },
     {

@@ -3,7 +3,7 @@
 #include <arrow/api.h>
 #include <gtest/gtest.h>
 
-using namespace arra;
+using namespace ara;
 
 arrow::Result<std::vector<const arrow::compute::HashAggregateKernel*>> GetKernels(
     arrow::compute::ExecContext* ctx,
@@ -80,7 +80,7 @@ arrow::Result<arrow::FieldVector> ResolveKernels(
 }
 
 TEST(FooTest, Foo) {
-  auto ec = arra::Foo();
+  auto ec = ara::Foo();
   arrow::Int8Builder builder(ec.memory_pool());
   auto res = builder.Append(8);
   ASSERT_TRUE(res.ok());

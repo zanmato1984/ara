@@ -1,7 +1,7 @@
 #include "foo.h"
 
-namespace arra {
+namespace ara {
 
 arrow::compute::ExecContext Foo() { return arrow::compute::ExecContext(); }
 
-}  // namespace arra
+}  // namespace ara
