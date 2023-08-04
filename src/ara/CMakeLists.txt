@@ -30,5 +30,5 @@ add_subdirectory(util)
 
 add_library(ara SHARED $<TARGET_OBJECTS:ara-common> $<TARGET_OBJECTS:ara-operator>)
 target_include_directories(ara PRIVATE "${RAPIDJSON_INCLUDE_DIRS}")
-target_include_directories(ara PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_include_directories(ara PUBLIC "${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(ara PUBLIC ${ARA_DEPENDENCIES})

@@ -4,3 +4,5 @@ set(CMAKE_CXX_STANDARD 20)
 
 add_ara_library(ara-task "foo.cpp")
 add_ara_internal_dependencies(ara-task ara-common)
+
+add_ara_test(ara-task-test "foo_test.cpp")
