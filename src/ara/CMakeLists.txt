@@ -24,11 +24,11 @@ function(add_ara_internal_dependencies ARA_LIB_NAME DEPS)
 endfunction(add_ara_internal_dependencies)
 
 add_subdirectory(common)
-add_subdirectory(operator)
+add_subdirectory(op)
 add_subdirectory(task)
 add_subdirectory(util)
 
-add_library(ara SHARED $<TARGET_OBJECTS:ara-common> $<TARGET_OBJECTS:ara-operator>)
+add_library(ara SHARED $<TARGET_OBJECTS:ara-common> $<TARGET_OBJECTS:ara-op>)
 target_include_directories(ara PRIVATE "${RAPIDJSON_INCLUDE_DIRS}")
 target_include_directories(ara PUBLIC "${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(ara PUBLIC ${ARA_DEPENDENCIES})

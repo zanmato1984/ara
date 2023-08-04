@@ -1,5 +1,5 @@
 #include <ara/common/foo.h>
 
-#include "ara/operator/operator_output.h"
+#include "ara/op/op_output.h"
 
 void bar() { ara::foo(); }
