@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD 20)
 
 option(ARA_USE_INTERNAL_ARROW "Use internal Arrow library, usurally for debugging purpose" OFF)
 option(ARA_BUILD_TESTS "Build the Ara googletest unit tests" OFF)
+option(ARA_CHECK_INTERNAL_DEPENDENCIES "Add extra build targets to check dependencies between different Ara sub-libraries" OFF)
 
 if(ARA_USE_INTERNAL_ARROW)
   message(STATUS "Using internal Arrow library")

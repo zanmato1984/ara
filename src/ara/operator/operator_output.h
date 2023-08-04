@@ -1,4 +1,4 @@
-#include <common/batch.h>
+#include <ara/common/batch.h>
 
 namespace ara::op {
 
@@ -60,8 +60,8 @@ struct OperatorOutput {
   static OperatorOutput Cancelled() { return OperatorOutput{Code::CANCELLED}; }
 };
 
-}
+}  // namespace detail
 
 using OperatorOutput = detail::OperatorOutput<ara::Batch>;
 
-}
+}  // namespace ara::op

@@ -1,0 +1,5 @@
+namespace ara {
+
+void foo();
+
+}
