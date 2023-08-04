@@ -29,4 +29,4 @@ struct TaskStatus {
   static TaskStatus Cancelled() { return TaskStatus{Code::CANCELLED}; }
 };
 
-}
+}  // namespace ara::task
