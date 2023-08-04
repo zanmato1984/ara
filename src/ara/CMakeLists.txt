@@ -24,7 +24,12 @@ function(add_ara_internal_dependencies ARA_LIB_NAME DEPS)
 endfunction(add_ara_internal_dependencies)
 
 add_subdirectory(common)
+add_subdirectory(driver)
+add_subdirectory(executor)
 add_subdirectory(op)
+add_subdirectory(pipeline)
+add_subdirectory(plan)
+add_subdirectory(schedule)
 add_subdirectory(task)
 add_subdirectory(util)
 
