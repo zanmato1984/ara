@@ -53,12 +53,6 @@ endif(ARA_USE_INTERNAL_ARROW)
 include(cmake/find/folly.cmake)
 include(cmake/find/rapidjson.cmake)
 
-add_library(ara
-  "${CMAKE_SOURCE_DIR}/src/foo.cpp")
-
-target_include_directories(ara PUBLIC "${CMAKE_SOURCE_DIR}/include" "${RAPIDJSON_INCLUDE_DIRS}")
-target_link_libraries(ara PUBLIC Arrow::arrow_shared ArrowAcero::arrow_acero_shared Folly::folly)
-
 if(ARA_BUILD_TESTS)
   if(NOT ARA_USE_INTERNAL_ARROW)
     message(FATAL_ERROR "Can't build Ara tests without internal Arrow library")
@@ -66,5 +60,7 @@ if(ARA_BUILD_TESTS)
   message(STATUS "Building the Ara googletest unit tests")
   include(cmake/find/gtest.cmake)
   include(cmake/find/gflags.cmake)
-  add_subdirectory("${CMAKE_SOURCE_DIR}/tests")
+  add_subdirectory("${CMAKE_SOURCE_DIR}/tests/ara")
 endif(ARA_BUILD_TESTS)
+
+add_subdirectory("${CMAKE_SOURCE_DIR}/src/ara")

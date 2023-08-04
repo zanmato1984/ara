@@ -5,7 +5,7 @@ project(ara_tests VERSION 0.0.1 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 
 function(configure_test TEST_NAME TEST_SRC)
-  add_executable(${TEST_NAME} ${TEST_SRC} "${CMAKE_SOURCE_DIR}/tests/arrow/acero/test_util_internal.cc")
+  add_executable(${TEST_NAME} ${TEST_SRC} "${CMAKE_SOURCE_DIR}/tests/ara/arrow/acero/test_util_internal.cc")
   target_link_libraries(${TEST_NAME} ara Arrow::arrow_testing_shared GTest::GTest GTest::Main pthread)
   set_target_properties(${TEST_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/gtests")
   # With OSX and conda, we need to set the correct RPATH so that dependencies
@@ -23,9 +23,5 @@ function(configure_test TEST_NAME TEST_SRC)
 endfunction(configure_test)
 
 include_directories("${CMAKE_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}")
-
-set(FOO_TEST_SRC
-  "${CMAKE_CURRENT_SOURCE_DIR}/foo_test.cpp")
-configure_test(foo_test "${FOO_TEST_SRC}")
 
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/sketch")
