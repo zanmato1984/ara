@@ -333,20 +333,6 @@ class SyncPipelinePlexTask {
       return OperatorResult::Cancelled();
     }
 
-    if (local_states_[thread_id].backpressure) {
-      auto result = plex_.sink(thread_id, std::nullopt);
-      if (!result.ok()) {
-        cancelled = true;
-        return result.status();
-      }
-      ARA_DCHECK(result->IsPipeSinkNeedsMore() || result->IsSinkBackpressure());
-      if (!result->IsSinkBackpressure()) {
-        local_states_[thread_id].backpressure = false;
-        return OperatorResult::PipeSinkNeedsMore();
-      }
-      return OperatorResult::SinkBackpressure();
-    }
-
     if (!local_states_[thread_id].pipe_stack.empty()) {
       auto pipe_id = local_states_[thread_id].pipe_stack.top();
       local_states_[thread_id].pipe_stack.pop();
@@ -447,11 +433,7 @@ class SyncPipelinePlexTask {
       return result.status();
     }
     ARA_DCHECK(result->IsPipeSinkNeedsMore() || result->IsSinkBackpressure());
-    if (result->IsSinkBackpressure()) {
-      local_states_[thread_id].backpressure = true;
-      return OperatorResult::SinkBackpressure();
-    }
-    return OperatorResult::PipeSinkNeedsMore();
+    return result;
   }
 
  private:
@@ -463,7 +445,7 @@ class SyncPipelinePlexTask {
     bool source_done = false;
     std::vector<size_t> drains;
     size_t draining = 0;
-    bool backpressure = false, yield = false;
+    bool yield = false;
   };
   std::vector<ThreadLocalState> local_states_;
   std::atomic_bool cancelled = false;
@@ -650,6 +632,9 @@ class FollyFutureScheduler {
       return result.ok() && !result->IsFinished() && !result->IsCancelled();
     };
     auto thunk = [&, task_id]() {
+      if (result->IsBackpressure()) {
+        // Make promise/future for backpressure callback to use.
+      }
       return folly::via(executor_).then([&, task_id](auto&&) {
         if (observer_) {
           observer_->BeforeTaskRun(task, task_id);
