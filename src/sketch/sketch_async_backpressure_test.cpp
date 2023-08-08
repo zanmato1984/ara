@@ -560,6 +560,8 @@ class FollyFutureScheduler {
     virtual void BeforeTaskRun(const Task& task, TaskId task_id) = 0;
     virtual void AfterTaskRun(const Task& task, TaskId task_id,
                               const TaskResult& result) = 0;
+    virtual void BeforeTaskBackpressure(const Task& task, TaskId task_id) = 0;
+    virtual void AfterTaskBackpressure(const Task& task, TaskId task_id) = 0;
   };
 
   FollyFutureScheduler(folly::Executor* executor, TaskObserver* observer = nullptr)
@@ -636,12 +638,22 @@ class FollyFutureScheduler {
     auto thunk = [&, task_id]() {
       if (result->IsBackpressure()) {
         ARA_DCHECK(task_add_bpcb.has_value());
+        if (observer_) {
+          observer_->BeforeTaskBackpressure(task, task_id);
+        }
         auto [bp_p, bp_f] = folly::makePromiseContract<folly::Unit>(executor_);
-        ARA_DCHECK_OK(task_add_bpcb.value()([bp_p = std::move(bp_p)]() mutable {
-          bp_p.setValue();
-          return arrow::Status::OK();
-        }));
-        return std::move(bp_f);
+        // Workaround that std::function must be copy-constructible.
+        auto bp_p_ptr = std::make_shared<folly::Promise<folly::Unit>>(std::move(bp_p));
+        ARA_DCHECK_OK(
+            task_add_bpcb.value()([&, bp_p_ptr = std::move(bp_p_ptr)]() mutable {
+              bp_p_ptr->setValue();
+              if (observer_) {
+                observer_->AfterTaskBackpressure(task, task_id);
+              }
+              return arrow::Status::OK();
+            }));
+        return std::move(bp_f).thenValue(
+            [&](auto&&) { result = TaskStatus::Continue(); });
       }
       return folly::via(executor_).then([&, task_id](auto&&) {
         if (observer_) {
@@ -665,6 +677,147 @@ class FollyFutureScheduler {
  private:
   folly::Executor* executor_;
   TaskObserver* observer_;
+};
+
+class MemorySource : public SourceOp {
+ public:
+  MemorySource(std::list<Batch> batches) : batches_(std::move(batches)) {}
+
+  MemorySource(const MemorySource& other) : batches_(other.batches_) {}
+
+  MemorySource(MemorySource&& other) : batches_(std::move(other.batches_)) {}
+
+  PipelineTaskSource Source() override {
+    return [&](ThreadId) -> arrow::Result<OperatorResult> {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (batches_.empty()) {
+        return OperatorResult::Finished(std::nullopt);
+      }
+      auto output = std::move(batches_.front());
+      batches_.pop_front();
+      if (batches_.empty()) {
+        return OperatorResult::Finished(std::move(output));
+      } else {
+        return OperatorResult::SourcePipeHasMore(std::move(output));
+      }
+    };
+  }
+
+  TaskGroups Frontend() override { return {}; }
+
+  TaskGroups Backend() override { return {}; }
+
+ public:
+  std::mutex mutex_;
+  std::list<Batch> batches_;
+};
+
+class DistributedMemorySource : public SourceOp {
+ public:
+  DistributedMemorySource(size_t dop, std::list<Batch> batches) : dop_(dop) {
+    thread_locals_.resize(dop_);
+    for (auto& tl : thread_locals_) {
+      tl.batches_ = batches;
+    }
+  }
+
+  PipelineTaskSource Source() override {
+    return [&](ThreadId thread_id) -> arrow::Result<OperatorResult> {
+      if (thread_locals_[thread_id].batches_.empty()) {
+        return OperatorResult::Finished(std::nullopt);
+      }
+      auto output = std::move(thread_locals_[thread_id].batches_.front());
+      thread_locals_[thread_id].batches_.pop_front();
+      if (thread_locals_[thread_id].batches_.empty()) {
+        return OperatorResult::Finished(std::move(output));
+      } else {
+        return OperatorResult::SourcePipeHasMore(std::move(output));
+      }
+    };
+  }
+
+  TaskGroups Frontend() override { return {}; }
+
+  TaskGroups Backend() override { return {}; }
+
+ private:
+  size_t dop_;
+  struct ThreadLocal {
+    std::list<Batch> batches_;
+  };
+  std::vector<ThreadLocal> thread_locals_;
+};
+
+class MemorySink : public SinkOp {
+ public:
+  MemorySink(size_t backpressure_threshold, size_t backend_threshold,
+             size_t finish_threshold)
+      : backpressure_threshold_(backpressure_threshold),
+        backend_threshold_(backend_threshold),
+        finish_threshold_(finish_threshold) {}
+
+  PipelineTaskSink Sink() override {
+    return [&](ThreadId, std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+      if (input.has_value()) {
+        std::lock_guard<std::mutex> lock(staging_batch_mutex_);
+        staging_batches_.push_back(std::move(input.value()));
+        if (staging_batches_.size() >= backpressure_threshold_) {
+          return OperatorResult::SinkBackpressure();
+        }
+      }
+      return OperatorResult::PipeSinkNeedsMore();
+    };
+  }
+
+  TaskGroups Frontend() override { return {}; }
+
+  TaskGroups Backend() override {
+    auto task = [&](TaskId) -> TaskResult {
+      if (total_batches_.size() >= finish_threshold_) {
+        return TaskStatus::Finished();
+      }
+      {
+        std::lock_guard<std::mutex> lock(staging_batch_mutex_);
+        if (staging_batches_.size() >= backend_threshold_) {
+          total_batches_.insert(total_batches_.end(),
+                                std::move_iterator(staging_batches_.begin()),
+                                std::move_iterator(staging_batches_.end()));
+          staging_batches_.clear();
+        }
+      }
+      {
+        std::lock_guard<std::mutex> lock(backpressure_mutex_);
+        if (staging_batches_.size() < backpressure_threshold_) {
+          for (auto& bp : backpressures_) {
+            ARA_RETURN_NOT_OK(bp());
+          }
+        }
+      }
+      return TaskStatus::Continue();
+    };
+    return {{std::move(task), 1, std::nullopt, std::nullopt}};
+  }
+
+  TaskAddBackpressureCallback AddBackpressureCallback() override {
+    return [&](BackpressureCallback&& callback) -> arrow::Status {
+      std::lock_guard<std::mutex> lock(backpressure_mutex_);
+      backpressures_.push_back(std::move(callback));
+      return arrow::Status::OK();
+    };
+  }
+
+ public:
+  size_t backpressure_threshold_;
+  size_t backend_threshold_;
+  size_t finish_threshold_;
+
+  std::mutex staging_batch_mutex_;
+  std::vector<Batch> staging_batches_;
+
+  std::vector<Batch> total_batches_;
+
+  std::mutex backpressure_mutex_;
+  std::vector<BackpressureCallback> backpressures_;
 };
 
 }  // namespace ara::sketch
