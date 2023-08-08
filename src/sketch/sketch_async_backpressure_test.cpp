@@ -484,17 +484,17 @@ class Driver {
 
     auto sink_fe = sink->Frontend();
     auto sink_fe_handle = scheduler_->ScheduleTaskGroups(sink_fe);
-    ARA_ASSIGN_OR_RAISE(auto result, scheduler_->WaitTaskGroups(sink_fe_handle));
+    ARA_ASSIGN_OR_RAISE(auto result, scheduler_->WaitTaskGroup(sink_fe_handle));
     ARA_DCHECK(result.IsFinished());
 
-    ARA_ASSIGN_OR_RAISE(result, scheduler_->WaitTaskGroups(sink_be_handle));
+    ARA_ASSIGN_OR_RAISE(result, scheduler_->WaitTaskGroup(sink_be_handle));
     ARA_DCHECK(result.IsFinished());
 
     return TaskStatus::Finished();
   }
 
   TaskResult RunStage(size_t dop, const PipelineStage& stage) {
-    std::vector<typename Scheduler::TaskGroupsHandle> source_be_handles;
+    std::vector<typename Scheduler::TaskGroupHandle> source_be_handles;
     for (auto& source : stage.sources) {
       auto source_be = source->Backend();
       source_be_handles.push_back(scheduler_->ScheduleTaskGroups(source_be));
@@ -503,7 +503,7 @@ class Driver {
     for (auto& source : stage.sources) {
       auto source_fe = source->Frontend();
       auto source_fe_handle = scheduler_->ScheduleTaskGroups(source_fe);
-      ARA_ASSIGN_OR_RAISE(auto result, scheduler_->WaitTaskGroups(source_fe_handle));
+      ARA_ASSIGN_OR_RAISE(auto result, scheduler_->WaitTaskGroup(source_fe_handle));
       ARA_DCHECK(result.IsFinished());
     }
 
@@ -525,14 +525,17 @@ class Driver {
           }
           return TaskStatus::Continue();
         },
-        dop, std::nullopt, pipeline_task.stage.sink->AddBackpressureCallback()};
+        dop, std::nullopt,
+        [&](BackpressureCallback&& cb) -> arrow::Status {
+          return pipeline_task.AddBackpressureCallback(std::move(cb));
+        }};
     auto pipeline_task_group_handle = scheduler_->ScheduleTaskGroup(pipeline_task_group);
     ARA_ASSIGN_OR_RAISE(auto result,
                         scheduler_->WaitTaskGroup(pipeline_task_group_handle));
     ARA_DCHECK(result.IsFinished());
 
     for (auto& source_be_handle : source_be_handles) {
-      ARA_ASSIGN_OR_RAISE(auto result, scheduler_->WaitTaskGroups(source_be_handle));
+      ARA_ASSIGN_OR_RAISE(auto result, scheduler_->WaitTaskGroup(source_be_handle));
       ARA_DCHECK(result.IsFinished());
     }
 
@@ -551,7 +554,6 @@ class FollyFutureScheduler {
 
  public:
   using TaskGroupHandle = std::pair<ConcreteTask, TaskGroupPayload>;
-  using TaskGroupsHandle = std::vector<TaskGroupHandle>;
 
   class TaskObserver {
    public:
@@ -602,29 +604,25 @@ class FollyFutureScheduler {
                               }
                               return TaskStatus::Finished();
                             });
+    p.setValue();
     return {std::pair<folly::Promise<folly::Unit>, folly::Future<TaskResult>>{
                 std::move(p), std::move(task_group_f)},
             std::move(payload)};
   }
 
-  TaskGroupsHandle ScheduleTaskGroups(const TaskGroups& groups) {
-    TaskGroupsHandle handles;
-    for (const auto& group : groups) {
-      handles.push_back(ScheduleTaskGroup(group));
+  TaskGroupHandle ScheduleTaskGroups(const TaskGroups& groups) {
+    ARA_DCHECK(!groups.empty());
+    auto handle = ScheduleTaskGroup(groups[0]);
+    for (size_t i = 1; i < groups.size(); ++i) {
+      auto result = WaitTaskGroup(handle);
+      ARA_DCHECK(result.ok());
+      handle = ScheduleTaskGroup(groups[i]);
     }
-    return handles;
+    return handle;
   }
 
   TaskResult WaitTaskGroup(TaskGroupHandle& group) {
-    group.first.first.setValue();
     return group.first.second.wait().value();
-  }
-
-  TaskResult WaitTaskGroups(TaskGroupsHandle& groups) {
-    for (auto& group : groups) {
-      ARA_RETURN_NOT_OK(WaitTaskGroup(group));
-    }
-    return TaskStatus::Finished();
   }
 
  private:
@@ -644,14 +642,14 @@ class FollyFutureScheduler {
         auto [bp_p, bp_f] = folly::makePromiseContract<folly::Unit>(executor_);
         // Workaround that std::function must be copy-constructible.
         auto bp_p_ptr = std::make_shared<folly::Promise<folly::Unit>>(std::move(bp_p));
-        ARA_DCHECK_OK(
-            task_add_bpcb.value()([&, bp_p_ptr = std::move(bp_p_ptr)]() mutable {
-              bp_p_ptr->setValue();
-              if (observer_) {
-                observer_->AfterTaskBackpressure(task, task_id);
-              }
-              return arrow::Status::OK();
-            }));
+        auto cb = [&, bp_p_ptr = std::move(bp_p_ptr)]() mutable {
+          bp_p_ptr->setValue();
+          if (observer_) {
+            observer_->AfterTaskBackpressure(task, task_id);
+          }
+          return arrow::Status::OK();
+        };
+        ARA_DCHECK_OK(task_add_bpcb.value()(std::move(cb)));
         return std::move(bp_f).thenValue(
             [&](auto&&) { result = TaskStatus::Continue(); });
       }
@@ -761,7 +759,7 @@ class MemorySink : public SinkOp {
       if (input.has_value()) {
         std::lock_guard<std::mutex> lock(staging_batch_mutex_);
         staging_batches_.push_back(std::move(input.value()));
-        if (staging_batches_.size() >= backpressure_threshold_) {
+        if (staging_batches_.size() > backpressure_threshold_) {
           return OperatorResult::SinkBackpressure();
         }
       }
@@ -821,3 +819,22 @@ class MemorySink : public SinkOp {
 };
 
 }  // namespace ara::sketch
+
+using namespace ara::sketch;
+
+TEST(AsyncBackpressure, Basic) {
+  size_t dop = 4;
+  size_t backpressure_batches = 8;
+  size_t total_batches = 64;
+  MemorySource source(std::list<Batch>(total_batches, Batch{1}));
+  MemorySink sink(backpressure_batches, backpressure_batches + dop, total_batches);
+  LogicalPipeline pipeline{{{&source, {}}}, &sink};
+  folly::CPUThreadPoolExecutor executor(8);
+  FollyFutureScheduler scheduler(&executor);
+  Driver<SyncPipelineTask, FollyFutureScheduler> driver(SyncPipelineTask::Make,
+                                                        &scheduler);
+  auto result = driver.Run(dop, {pipeline});
+  ASSERT_OK(result);
+  ASSERT_TRUE(result->IsFinished());
+  ASSERT_EQ(sink.total_batches_.size(), total_batches);
+}

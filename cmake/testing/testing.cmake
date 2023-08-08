@@ -22,7 +22,7 @@ function(add_ara_test TEST_NAME TEST_SRC)
     set_target_properties(${TEST_NAME}
       PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE
       INSTALL_RPATH_USE_LINK_PATH TRUE
-      INSTALL_RPATH "${EXECUTABLE_OUTPUT_PATH};${ARROW_PREFIX}/lib;$ENV{CONDA_PREFIX}/lib")
+      INSTALL_RPATH "${EXECUTABLE_OUTPUT_PATH};${CMAKE_BINARY_DIR}/src/ara;${ARROW_PREFIX}/lib;$ENV{CONDA_PREFIX}/lib")
   endif()
   add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
 endfunction(add_ara_test)
