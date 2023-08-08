@@ -8,6 +8,7 @@
 #include <stack>
 
 #define ARA_DCHECK ARROW_DCHECK
+#define ARA_DCHECK_OK ARROW_DCHECK_OK
 #define ARA_RETURN_NOT_OK ARROW_RETURN_NOT_OK
 #define ARA_ASSIGN_OR_RAISE ARROW_ASSIGN_OR_RAISE
 
@@ -46,7 +47,10 @@ using ThreadId = size_t;
 using TaskResult = arrow::Result<TaskStatus>;
 using Task = std::function<TaskResult(TaskId)>;
 using TaskCont = std::function<TaskResult()>;
-using TaskGroup = std::tuple<Task, size_t, std::optional<TaskCont>>;
+using BackpressureCallback = std::function<arrow::Status()>;
+using TaskAddBackpressureCallback = std::function<arrow::Status(BackpressureCallback&&)>;
+using TaskGroup = std::tuple<Task, size_t, std::optional<TaskCont>,
+                             std::optional<TaskAddBackpressureCallback>>;
 using TaskGroups = std::vector<TaskGroup>;
 
 using Batch = std::vector<int>;
@@ -112,9 +116,6 @@ using PipelineTaskPipe =
 using PipelineTaskDrain = std::function<arrow::Result<OperatorResult>(ThreadId)>;
 using PipelineTaskSink =
     std::function<arrow::Result<OperatorResult>(ThreadId, std::optional<Batch>)>;
-using BackpressureCallback = std::function<arrow::Status(ThreadId)>;
-using PipelineTaskAddBackpressureCallback =
-    std::function<arrow::Status(BackpressureCallback, ThreadId)>;
 
 class SourceOp {
  public:
@@ -138,7 +139,7 @@ class SinkOp {
   virtual PipelineTaskSink Sink() = 0;
   virtual TaskGroups Frontend() = 0;
   virtual TaskGroups Backend() = 0;
-  virtual PipelineTaskAddBackpressureCallback AddBackpressureCallback() = 0;
+  virtual TaskAddBackpressureCallback AddBackpressureCallback() = 0;
 };
 
 struct PhysicalPipelinePlex {
@@ -149,7 +150,7 @@ struct PhysicalPipelinePlex {
 
 struct PhysicalPipeline {
   std::vector<PhysicalPipelinePlex> plexes;
-  PipelineTaskAddBackpressureCallback add_backpressure_callback;
+  TaskAddBackpressureCallback add_backpressure_callback;
 };
 
 struct LogicalPipeline;
@@ -297,14 +298,13 @@ class PipelineTask {
     }
   }
 
-  arrow::Status AddBackpressureCallback(BackpressureCallback callback,
-                                        ThreadId thread_id) {
-    return add_backpressure_callback_(std::move(callback), thread_id);
+  arrow::Status AddBackpressureCallback(BackpressureCallback&& callback) {
+    return add_backpressure_callback_(std::move(callback));
   }
 
  private:
   std::vector<PipelinePlexTask> tasks_;
-  PipelineTaskAddBackpressureCallback add_backpressure_callback_;
+  TaskAddBackpressureCallback add_backpressure_callback_;
 };
 
 class SyncPipelinePlexTask {
@@ -508,24 +508,24 @@ class Driver {
     }
 
     auto pipeline_task = factory_(dop, stage.pipeline);
-    TaskGroup pipeline_task_group{[&](ThreadId thread_id) -> TaskResult {
-                                    ARA_ASSIGN_OR_RAISE(auto result,
-                                                        pipeline_task.Run(thread_id));
-                                    if (result.IsSinkBackpressure()) {
-                                      return TaskStatus::Backpressure();
-                                    }
-                                    if (result.IsPipeYield()) {
-                                      return TaskStatus::Yield();
-                                    }
-                                    if (result.IsFinished()) {
-                                      return TaskStatus::Finished();
-                                    }
-                                    if (result.IsCancelled()) {
-                                      return TaskStatus::Cancelled();
-                                    }
-                                    return TaskStatus::Continue();
-                                  },
-                                  dop, std::nullopt};
+    TaskGroup pipeline_task_group{
+        [&](ThreadId thread_id) -> TaskResult {
+          ARA_ASSIGN_OR_RAISE(auto result, pipeline_task.Run(thread_id));
+          if (result.IsSinkBackpressure()) {
+            return TaskStatus::Backpressure();
+          }
+          if (result.IsPipeYield()) {
+            return TaskStatus::Yield();
+          }
+          if (result.IsFinished()) {
+            return TaskStatus::Finished();
+          }
+          if (result.IsCancelled()) {
+            return TaskStatus::Cancelled();
+          }
+          return TaskStatus::Continue();
+        },
+        dop, std::nullopt, pipeline_task.stage.sink->AddBackpressureCallback()};
     auto pipeline_task_group_handle = scheduler_->ScheduleTaskGroup(pipeline_task_group);
     ARA_ASSIGN_OR_RAISE(auto result,
                         scheduler_->WaitTaskGroup(pipeline_task_group_handle));
@@ -569,13 +569,14 @@ class FollyFutureScheduler {
     auto& task = std::get<0>(group);
     auto num_tasks = std::get<1>(group);
     auto& task_cont = std::get<2>(group);
+    auto& task_add_bpcb = std::get<3>(group);
 
     auto [p, f] = folly::makePromiseContract<folly::Unit>(executor_);
     std::vector<folly::Promise<folly::Unit>> task_promises;
     std::vector<folly::Future<TaskResult>> tasks;
     TaskGroupPayload payload(num_tasks);
     for (size_t i = 0; i < num_tasks; ++i) {
-      auto [tp, tf] = MakeTask(task, i, payload[i]);
+      auto [tp, tf] = MakeTask(task, i, payload[i], task_add_bpcb);
       task_promises.push_back(std::move(tp));
       tasks.push_back(std::move(tf));
       payload[i] = TaskStatus::Continue();
@@ -625,7 +626,8 @@ class FollyFutureScheduler {
   }
 
  private:
-  ConcreteTask MakeTask(const Task& task, TaskId task_id, TaskResult& result) {
+  ConcreteTask MakeTask(const Task& task, TaskId task_id, TaskResult& result,
+                        const std::optional<TaskAddBackpressureCallback>& task_add_bpcb) {
     auto [p, f] = folly::makePromiseContract<folly::Unit>(executor_);
 
     auto pred = [&]() {
@@ -633,7 +635,13 @@ class FollyFutureScheduler {
     };
     auto thunk = [&, task_id]() {
       if (result->IsBackpressure()) {
-        // Make promise/future for backpressure callback to use.
+        ARA_DCHECK(task_add_bpcb.has_value());
+        auto [bp_p, bp_f] = folly::makePromiseContract<folly::Unit>(executor_);
+        ARA_DCHECK_OK(task_add_bpcb.value()([bp_p = std::move(bp_p)]() mutable {
+          bp_p.setValue();
+          return arrow::Status::OK();
+        }));
+        return std::move(bp_f);
       }
       return folly::via(executor_).then([&, task_id](auto&&) {
         if (observer_) {
