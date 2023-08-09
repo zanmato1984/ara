@@ -775,28 +775,26 @@ class MemorySink : public SinkOp {
 
   TaskGroups Backend() override {
     auto task = [&](TaskId) -> TaskResult {
-      if (total_batches_.size() >= finish_threshold_) {
-        return TaskStatus::Finished();
-      }
+      bool finished = false;
+      size_t current_staging_batches = 0;
       {
         std::lock_guard<std::mutex> lock(staging_batch_mutex_);
-        if (staging_batches_.size() >= backend_threshold_) {
-          total_batches_.insert(total_batches_.end(),
-                                std::move_iterator(staging_batches_.begin()),
-                                std::move_iterator(staging_batches_.end()));
-          staging_batches_.clear();
+        if (staging_batches_.size() + total_batches_.size() >= finish_threshold_) {
+          CommitStagingBatches();
+          finished = true;
         }
+        if (staging_batches_.size() >= backend_threshold_) {
+          CommitStagingBatches();
+        }
+        current_staging_batches = staging_batches_.size();
       }
       {
         std::lock_guard<std::mutex> lock(backpressure_mutex_);
-        if (staging_batches_.size() < backpressure_threshold_) {
-          for (auto& bp : backpressures_) {
-            ARA_RETURN_NOT_OK(bp());
-          }
-          backpressures_.clear();
+        if (current_staging_batches < backpressure_threshold_) {
+          ClearBackpressures();
         }
       }
-      return TaskStatus::Continue();
+      return finished ? TaskStatus::Finished() : TaskStatus::Continue();
     };
     return {{std::move(task), 1, std::nullopt, std::nullopt}};
   }
@@ -807,6 +805,21 @@ class MemorySink : public SinkOp {
       backpressures_.push_back(std::move(callback));
       return arrow::Status::OK();
     };
+  }
+
+ private:
+  void CommitStagingBatches() {
+    total_batches_.insert(total_batches_.end(),
+                          std::move_iterator(staging_batches_.begin()),
+                          std::move_iterator(staging_batches_.end()));
+    staging_batches_.clear();
+  }
+
+  void ClearBackpressures() {
+    for (auto& bp : backpressures_) {
+      ARA_DCHECK_OK(bp());
+    }
+    backpressures_.clear();
   }
 
  public:
