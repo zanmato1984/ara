@@ -27,11 +27,11 @@ struct TaskStatus {
   TaskStatus(Code code) : code_(code) {}
 
  public:
-  bool IsContinue() { return code_ == Code::CONTINUE; }
-  bool IsBackpressure() { return code_ == Code::BACKPRESSURE; }
-  bool IsYield() { return code_ == Code::YIELD; }
-  bool IsFinished() { return code_ == Code::FINISHED; }
-  bool IsCancelled() { return code_ == Code::CANCELLED; }
+  bool IsContinue() const { return code_ == Code::CONTINUE; }
+  bool IsBackpressure() const { return code_ == Code::BACKPRESSURE; }
+  bool IsYield() const { return code_ == Code::YIELD; }
+  bool IsFinished() const { return code_ == Code::FINISHED; }
+  bool IsCancelled() const { return code_ == Code::CANCELLED; }
 
  public:
   static TaskStatus Continue() { return TaskStatus(Code::CONTINUE); }
@@ -73,14 +73,14 @@ struct OperatorResult {
       : code_(code), output_(std::move(output)) {}
 
  public:
-  bool IsSourceNotReady() { return code_ == Code::SOURCE_NOT_READY; }
-  bool IsPipeSinkNeedsMore() { return code_ == Code::PIPE_SINK_NEEDS_MORE; }
-  bool IsPipeEven() { return code_ == Code::PIPE_EVEN; }
-  bool IsSourcePipeHasMore() { return code_ == Code::SOURCE_PIPE_HAS_MORE; }
-  bool IsSinkBackpressure() { return code_ == Code::SINK_BACKPRESSURE; }
-  bool IsPipeYield() { return code_ == Code::PIPE_YIELD; }
-  bool IsFinished() { return code_ == Code::FINISHED; }
-  bool IsCancelled() { return code_ == Code::CANCELLED; }
+  bool IsSourceNotReady() const { return code_ == Code::SOURCE_NOT_READY; }
+  bool IsPipeSinkNeedsMore() const { return code_ == Code::PIPE_SINK_NEEDS_MORE; }
+  bool IsPipeEven() const { return code_ == Code::PIPE_EVEN; }
+  bool IsSourcePipeHasMore() const { return code_ == Code::SOURCE_PIPE_HAS_MORE; }
+  bool IsSinkBackpressure() const { return code_ == Code::SINK_BACKPRESSURE; }
+  bool IsPipeYield() const { return code_ == Code::PIPE_YIELD; }
+  bool IsFinished() const { return code_ == Code::FINISHED; }
+  bool IsCancelled() const { return code_ == Code::CANCELLED; }
 
   std::optional<Batch>& GetOutput() {
     ARA_DCHECK(IsPipeEven() || IsSourcePipeHasMore() || IsFinished());
@@ -646,7 +646,7 @@ class FollyFutureScheduler {
         auto [bp_p, bp_f] = folly::makePromiseContract<folly::Unit>(executor_);
         // Workaround that std::function must be copy-constructible.
         auto bp_p_ptr = std::make_shared<folly::Promise<folly::Unit>>(std::move(bp_p));
-        auto cb = [&, bp_p_ptr = std::move(bp_p_ptr)]() mutable {
+        auto cb = [&, bp_p_ptr = std::move(bp_p_ptr), task, task_id]() mutable {
           bp_p_ptr->setValue();
           if (observer_) {
             observer_->AfterTaskBackpressure(task, task_id);
@@ -855,4 +855,60 @@ TEST(AsyncBackpressure, Basic) {
   ASSERT_OK(result);
   ASSERT_TRUE(result->IsFinished());
   ASSERT_EQ(sink.total_batches_.size(), total_batches);
+}
+
+TEST(AsyncBackpressure, BasicObserved) {
+  struct TaskObserver : public FollyFutureScheduler::TaskObserver {
+    TaskObserver(size_t dop)
+        : backpressure_to_handle_task_ids(dop), backpressure_resolved_task_ids(dop) {
+      for (size_t i = 0; i < dop; ++i) {
+        backpressure_to_handle_task_ids[i] = 0;
+        backpressure_resolved_task_ids[i] = 0;
+      }
+    }
+
+    void BeforeTaskRun(const Task& task, TaskId task_id) override { task_runs++; }
+
+    void AfterTaskRun(const Task& task, TaskId task_id,
+                      const TaskResult& result) override {
+      ARA_DCHECK(result.ok());
+      if (result->IsBackpressure()) {
+        task_hit_backpressures++;
+      }
+    }
+
+    void BeforeTaskBackpressure(const Task& task, TaskId task_id) override {
+      backpressures_to_handle++;
+      backpressure_to_handle_task_ids[task_id]++;
+    }
+
+    void AfterTaskBackpressure(const Task& task, TaskId task_id) override {
+      backpressure_resolved++;
+      backpressure_resolved_task_ids[task_id]++;
+    }
+
+    std::atomic<size_t> task_runs = 0, task_hit_backpressures = 0,
+                        backpressures_to_handle = 0, backpressure_resolved = 0;
+    std::vector<std::atomic<size_t>> backpressure_to_handle_task_ids;
+    std::vector<std::atomic<size_t>> backpressure_resolved_task_ids;
+  };
+
+  size_t dop = 4;
+  size_t backpressure_batches = 8;
+  size_t total_batches = 64;
+  MemorySource source(std::list<Batch>(total_batches, Batch{1}));
+  MemorySink sink(backpressure_batches, backpressure_batches + dop, total_batches);
+  LogicalPipeline pipeline{{{&source, {}}}, &sink};
+  folly::CPUThreadPoolExecutor executor(8);
+  TaskObserver observer(dop);
+  FollyFutureScheduler scheduler(&executor, &observer);
+  Driver<SyncPipelineTask, FollyFutureScheduler> driver(SyncPipelineTask::Make,
+                                                        &scheduler);
+  auto result = driver.Run(dop, {pipeline});
+  ASSERT_OK(result);
+  ASSERT_TRUE(result->IsFinished());
+  ASSERT_EQ(sink.total_batches_.size(), total_batches);
+
+  ASSERT_EQ(observer.task_runs, total_batches);
+  // ASSERT_EQ(observer.task_hit_backpressures, total_batches);
 }
