@@ -553,7 +553,7 @@ class FollyFutureScheduler {
   using TaskGroupPayload = std::vector<TaskResult>;
 
  public:
-  using TaskGroupHandle = std::pair<ConcreteTask, TaskGroupPayload>;
+  using TaskGroupHandle = std::optional<std::pair<ConcreteTask, TaskGroupPayload>>;
 
   class TaskObserver {
    public:
@@ -605,13 +605,14 @@ class FollyFutureScheduler {
                               return TaskStatus::Finished();
                             });
     p.setValue();
-    return {std::pair<folly::Promise<folly::Unit>, folly::Future<TaskResult>>{
-                std::move(p), std::move(task_group_f)},
-            std::move(payload)};
+    return std::make_pair(std::make_pair(std::move(p), std::move(task_group_f)),
+                          std::move(payload));
   }
 
   TaskGroupHandle ScheduleTaskGroups(const TaskGroups& groups) {
-    ARA_DCHECK(!groups.empty());
+    if (groups.empty()) {
+      return std::nullopt;
+    }
     auto handle = ScheduleTaskGroup(groups[0]);
     for (size_t i = 1; i < groups.size(); ++i) {
       auto result = WaitTaskGroup(handle);
@@ -622,7 +623,10 @@ class FollyFutureScheduler {
   }
 
   TaskResult WaitTaskGroup(TaskGroupHandle& group) {
-    return group.first.second.wait().value();
+    if (!group.has_value()) {
+      return TaskStatus::Finished();
+    }
+    return group.value().first.second.wait().value();
   }
 
  private:
@@ -789,6 +793,7 @@ class MemorySink : public SinkOp {
           for (auto& bp : backpressures_) {
             ARA_RETURN_NOT_OK(bp());
           }
+          backpressures_.clear();
         }
       }
       return TaskStatus::Continue();
