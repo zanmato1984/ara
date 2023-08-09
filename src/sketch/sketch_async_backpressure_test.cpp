@@ -773,6 +773,7 @@ class MemorySink : public SinkOp {
 
   TaskGroups Frontend() override { return {}; }
 
+  // TODO: May exit early than all backpressures happen.
   TaskGroups Backend() override {
     auto task = [&](TaskId) -> TaskResult {
       bool finished = false;
@@ -867,7 +868,7 @@ TEST(AsyncBackpressure, BasicObserved) {
       }
     }
 
-    void BeforeTaskRun(const Task& task, TaskId task_id) override { task_runs++; }
+    void BeforeTaskRun(const Task& task, TaskId task_id) override {}
 
     void AfterTaskRun(const Task& task, TaskId task_id,
                       const TaskResult& result) override {
@@ -883,12 +884,12 @@ TEST(AsyncBackpressure, BasicObserved) {
     }
 
     void AfterTaskBackpressure(const Task& task, TaskId task_id) override {
-      backpressure_resolved++;
+      backpressures_resolved++;
       backpressure_resolved_task_ids[task_id]++;
     }
 
-    std::atomic<size_t> task_runs = 0, task_hit_backpressures = 0,
-                        backpressures_to_handle = 0, backpressure_resolved = 0;
+    std::atomic<size_t> task_hit_backpressures = 0, backpressures_to_handle = 0,
+                        backpressures_resolved = 0;
     std::vector<std::atomic<size_t>> backpressure_to_handle_task_ids;
     std::vector<std::atomic<size_t>> backpressure_resolved_task_ids;
   };
@@ -909,6 +910,28 @@ TEST(AsyncBackpressure, BasicObserved) {
   ASSERT_TRUE(result->IsFinished());
   ASSERT_EQ(sink.total_batches_.size(), total_batches);
 
-  ASSERT_EQ(observer.task_runs, total_batches);
-  // ASSERT_EQ(observer.task_hit_backpressures, total_batches);
+  size_t backpressure_division_per_task = total_batches / (backpressure_batches + dop);
+  size_t backpressure_division = backpressure_division_per_task * dop;
+  size_t backpressure_remainder =
+      total_batches % (backpressure_batches + dop) -
+      std::min(total_batches % (backpressure_batches + dop), backpressure_batches);
+
+  size_t backpressures_exp = backpressure_division + backpressure_remainder;
+
+  ASSERT_EQ(observer.task_hit_backpressures, backpressures_exp);
+  ASSERT_EQ(observer.backpressures_to_handle, backpressures_exp);
+  ASSERT_EQ(observer.backpressures_resolved, backpressures_exp);
+
+  size_t backpressures_to_handle_remainder = 0, backpressures_resolved_remainder = 0;
+  for (size_t i = 0; i < dop; ++i) {
+    ASSERT_GE(observer.backpressure_to_handle_task_ids[i],
+              backpressure_division_per_task);
+    ASSERT_GE(observer.backpressure_resolved_task_ids[i], backpressure_division_per_task);
+    backpressures_to_handle_remainder +=
+        observer.backpressure_to_handle_task_ids[i] - backpressure_division_per_task;
+    backpressures_resolved_remainder +=
+        observer.backpressure_resolved_task_ids[i] - backpressure_division_per_task;
+  }
+  ASSERT_EQ(backpressures_to_handle_remainder, backpressure_remainder);
+  ASSERT_EQ(backpressures_resolved_remainder, backpressure_remainder);
 }
