@@ -49,8 +49,10 @@ using Task = std::function<TaskResult(TaskId)>;
 using TaskCont = std::function<TaskResult()>;
 using BackpressureCallback = std::function<arrow::Status()>;
 using TaskAddBackpressureCallback = std::function<arrow::Status(BackpressureCallback&&)>;
+using TaskNotifyFinish = std::function<arrow::Status()>;
 using TaskGroup = std::tuple<Task, size_t, std::optional<TaskCont>,
-                             std::optional<TaskAddBackpressureCallback>>;
+                             std::optional<TaskAddBackpressureCallback>,
+                             std::optional<TaskNotifyFinish>>;
 using TaskGroups = std::vector<TaskGroup>;
 
 using Batch = std::vector<int>;
@@ -487,6 +489,10 @@ class Driver {
     ARA_ASSIGN_OR_RAISE(auto result, scheduler_->WaitTaskGroup(sink_fe_handle));
     ARA_DCHECK(result.IsFinished());
 
+    auto sink_be_notify_finish = std::get<4>(sink_be.back());
+    if (sink_be_notify_finish.has_value()) {
+      ARA_DCHECK(sink_be_notify_finish.value()().ok());
+    }
     ARA_ASSIGN_OR_RAISE(result, scheduler_->WaitTaskGroup(sink_be_handle));
     ARA_DCHECK(result.IsFinished());
 
@@ -528,7 +534,8 @@ class Driver {
         dop, std::nullopt,
         [&](BackpressureCallback&& cb) -> arrow::Status {
           return pipeline_task.AddBackpressureCallback(std::move(cb));
-        }};
+        },
+        std::nullopt};
     auto pipeline_task_group_handle = scheduler_->ScheduleTaskGroup(pipeline_task_group);
     ARA_ASSIGN_OR_RAISE(auto result,
                         scheduler_->WaitTaskGroup(pipeline_task_group_handle));
@@ -615,6 +622,7 @@ class FollyFutureScheduler {
     }
     auto handle = ScheduleTaskGroup(groups[0]);
     for (size_t i = 1; i < groups.size(); ++i) {
+      ARA_DCHECK(!std::get<4>(groups[i]).has_value());
       auto result = WaitTaskGroup(handle);
       ARA_DCHECK(result.ok());
       handle = ScheduleTaskGroup(groups[i]);
@@ -752,11 +760,10 @@ class DistributedMemorySource : public SourceOp {
 
 class MemorySink : public SinkOp {
  public:
-  MemorySink(size_t backpressure_threshold, size_t backend_threshold,
-             size_t finish_threshold)
+  MemorySink(size_t backpressure_threshold, size_t backend_threshold)
       : backpressure_threshold_(backpressure_threshold),
         backend_threshold_(backend_threshold),
-        finish_threshold_(finish_threshold) {}
+        finished_(false) {}
 
   PipelineTaskSink Sink() override {
     return [&](ThreadId, std::optional<Batch> input) -> arrow::Result<OperatorResult> {
@@ -776,28 +783,38 @@ class MemorySink : public SinkOp {
   // TODO: May exit early than all backpressures happen.
   TaskGroups Backend() override {
     auto task = [&](TaskId) -> TaskResult {
-      bool finished = false;
       size_t current_staging_batches = 0;
+
       {
         std::lock_guard<std::mutex> lock(staging_batch_mutex_);
-        if (staging_batches_.size() + total_batches_.size() >= finish_threshold_) {
+        if (finished_) {
           CommitStagingBatches();
-          finished = true;
+          return TaskStatus::Finished();
         }
         if (staging_batches_.size() >= backend_threshold_) {
           CommitStagingBatches();
         }
         current_staging_batches = staging_batches_.size();
       }
+
       {
         std::lock_guard<std::mutex> lock(backpressure_mutex_);
-        if (current_staging_batches < backpressure_threshold_) {
+        if (current_staging_batches < backpressure_threshold_ ||
+            current_staging_batches + backpressures_.size() >= backend_threshold_) {
           ClearBackpressures();
         }
       }
-      return finished ? TaskStatus::Finished() : TaskStatus::Continue();
+
+      return TaskStatus::Continue();
     };
-    return {{std::move(task), 1, std::nullopt, std::nullopt}};
+
+    auto task_notify_finish = [&]() -> arrow::Status {
+      finished_ = true;
+      return arrow::Status::OK();
+    };
+
+    return {
+        {std::move(task), 1, std::nullopt, std::nullopt, std::move(task_notify_finish)}};
   }
 
   TaskAddBackpressureCallback AddBackpressureCallback() override {
@@ -826,7 +843,6 @@ class MemorySink : public SinkOp {
  public:
   size_t backpressure_threshold_;
   size_t backend_threshold_;
-  size_t finish_threshold_;
 
   std::mutex staging_batch_mutex_;
   std::vector<Batch> staging_batches_;
@@ -835,6 +851,8 @@ class MemorySink : public SinkOp {
 
   std::mutex backpressure_mutex_;
   std::vector<BackpressureCallback> backpressures_;
+
+  std::atomic<bool> finished_;
 };
 
 }  // namespace ara::sketch
@@ -846,7 +864,7 @@ TEST(AsyncBackpressure, Basic) {
   size_t backpressure_batches = 8;
   size_t total_batches = 64;
   MemorySource source(std::list<Batch>(total_batches, Batch{1}));
-  MemorySink sink(backpressure_batches, backpressure_batches + dop, total_batches);
+  MemorySink sink(backpressure_batches, backpressure_batches + dop);
   LogicalPipeline pipeline{{{&source, {}}}, &sink};
   folly::CPUThreadPoolExecutor executor(8);
   FollyFutureScheduler scheduler(&executor);
@@ -896,9 +914,9 @@ TEST(AsyncBackpressure, BasicObserved) {
 
   size_t dop = 4;
   size_t backpressure_batches = 8;
-  size_t total_batches = 64;
+  size_t total_batches = 70;
   MemorySource source(std::list<Batch>(total_batches, Batch{1}));
-  MemorySink sink(backpressure_batches, backpressure_batches + dop, total_batches);
+  MemorySink sink(backpressure_batches, backpressure_batches + dop);
   LogicalPipeline pipeline{{{&source, {}}}, &sink};
   folly::CPUThreadPoolExecutor executor(8);
   TaskObserver observer(dop);
