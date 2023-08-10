@@ -770,7 +770,7 @@ class MemorySink : public SinkOp {
   PipelineTaskSink Sink() override {
     return [&](ThreadId, std::optional<Batch> input) -> arrow::Result<OperatorResult> {
       if (input.has_value()) {
-        std::lock_guard<std::mutex> lock(staging_batch_mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
         staging_batches_.push_back(std::move(input.value()));
         if (staging_batches_.size() > backpressure_threshold_) {
           return OperatorResult::SinkBackpressure();
@@ -784,31 +784,24 @@ class MemorySink : public SinkOp {
 
   TaskGroups Backend() override {
     auto task = [&](TaskId) -> TaskResult {
-      size_t current_staging_batches = 0, current_backpressures = 0;
+      std::lock_guard<std::mutex> lock(mutex_);
 
-      {
-        std::lock_guard<std::mutex> lock(staging_batch_mutex_);
-        if (finished_) {
-          CommitStagingBatches();
-          return TaskStatus::Finished();
-        }
-        if (staging_batches_.size() >= backend_threshold_) {
-          CommitStagingBatches();
-        }
-        current_staging_batches = staging_batches_.size();
+      if (finished_) {
+        CommitStagingBatches();
+        return TaskStatus::Finished();
       }
 
-      {
-        std::lock_guard<std::mutex> lock(backpressure_mutex_);
-        if (current_staging_batches < backpressure_threshold_) {
-          ClearBackpressures();
-        }
-        current_backpressures = backpressures_.size();
+      if (staging_batches_.size() == 0 ||
+          backpressures_.size() == backend_threshold_ - backpressure_threshold_) {
+        ClearBackpressures();
+        return TaskStatus::Continue();
       }
 
-      if (current_staging_batches + current_backpressures + total_batches_.size() >=
-          finish_threshold_) {
-        std::lock_guard<std::mutex> lock(staging_batch_mutex_);
+      if (staging_batches_.size() == backend_threshold_) {
+        CommitStagingBatches();
+      }
+
+      if (staging_batches_.size() + total_batches_.size() == finish_threshold_) {
         CommitStagingBatches();
       }
 
@@ -826,7 +819,7 @@ class MemorySink : public SinkOp {
 
   TaskAddBackpressureCallback AddBackpressureCallback() override {
     return [&](BackpressureCallback&& callback) -> arrow::Status {
-      std::lock_guard<std::mutex> lock(backpressure_mutex_);
+      std::lock_guard<std::mutex> lock(mutex_);
       backpressures_.push_back(std::move(callback));
       return arrow::Status::OK();
     };
@@ -852,15 +845,12 @@ class MemorySink : public SinkOp {
   size_t backend_threshold_;
   size_t finish_threshold_;
 
-  std::mutex staging_batch_mutex_;
-  std::vector<Batch> staging_batches_;
-
-  std::vector<Batch> total_batches_;
-
-  std::mutex backpressure_mutex_;
-  std::vector<BackpressureCallback> backpressures_;
-
+  std::mutex mutex_;
   std::atomic<bool> finished_;
+
+  std::vector<Batch> staging_batches_;
+  std::vector<Batch> total_batches_;
+  std::vector<BackpressureCallback> backpressures_;
 };
 
 }  // namespace ara::sketch
@@ -946,6 +936,12 @@ class AsyncBackpressureTest : public testing::TestWithParam<size_t> {
 
     size_t backpressures_exp = backpressure_division + backpressure_remainder;
 
+    if (observer.task_hit_backpressures != backpressures_exp) {
+      std::cout << sink.staging_batches_.size() << std::endl;
+      std::cout << sink.total_batches_.size() << std::endl;
+      std::cout << sink.backpressures_.size() << std::endl;
+    }
+
     ASSERT_EQ(observer.task_hit_backpressures, backpressures_exp);
     ASSERT_EQ(observer.backpressures_to_handle, backpressures_exp);
     ASSERT_EQ(observer.backpressures_resolved, backpressures_exp);
@@ -971,7 +967,7 @@ TEST_P(AsyncBackpressureTest, Baisc) { Basic(); }
 TEST_P(AsyncBackpressureTest, BaiscWithObserver) { BasicWithObserver(); }
 
 INSTANTIATE_TEST_SUITE_P(AsyncBackpressureSuite, AsyncBackpressureTest,
-                         testing::Range(size_t(8), size_t(128)),
+                         testing::Range(size_t(8), size_t(1024)),
                          [](const auto& param_info) {
                            return std::to_string(param_info.index) + "_" +
                                   std::to_string(param_info.param);
