@@ -760,9 +760,11 @@ class DistributedMemorySource : public SourceOp {
 
 class MemorySink : public SinkOp {
  public:
-  MemorySink(size_t backpressure_threshold, size_t backend_threshold)
+  MemorySink(size_t backpressure_threshold, size_t backend_threshold,
+             size_t finish_threshold)
       : backpressure_threshold_(backpressure_threshold),
         backend_threshold_(backend_threshold),
+        finish_threshold_(finish_threshold),
         finished_(false) {}
 
   PipelineTaskSink Sink() override {
@@ -780,10 +782,9 @@ class MemorySink : public SinkOp {
 
   TaskGroups Frontend() override { return {}; }
 
-  // TODO: May exit early than all backpressures happen.
   TaskGroups Backend() override {
     auto task = [&](TaskId) -> TaskResult {
-      size_t current_staging_batches = 0;
+      size_t current_staging_batches = 0, current_backpressures = 0;
 
       {
         std::lock_guard<std::mutex> lock(staging_batch_mutex_);
@@ -799,10 +800,16 @@ class MemorySink : public SinkOp {
 
       {
         std::lock_guard<std::mutex> lock(backpressure_mutex_);
-        if (current_staging_batches < backpressure_threshold_ ||
-            current_staging_batches + backpressures_.size() >= backend_threshold_) {
+        if (current_staging_batches < backpressure_threshold_) {
           ClearBackpressures();
         }
+        current_backpressures = backpressures_.size();
+      }
+
+      if (current_staging_batches + current_backpressures + total_batches_.size() >=
+          finish_threshold_) {
+        std::lock_guard<std::mutex> lock(staging_batch_mutex_);
+        CommitStagingBatches();
       }
 
       return TaskStatus::Continue();
@@ -843,6 +850,7 @@ class MemorySink : public SinkOp {
  public:
   size_t backpressure_threshold_;
   size_t backend_threshold_;
+  size_t finish_threshold_;
 
   std::mutex staging_batch_mutex_;
   std::vector<Batch> staging_batches_;
@@ -864,7 +872,7 @@ TEST(AsyncBackpressure, Basic) {
   size_t backpressure_batches = 8;
   size_t total_batches = 64;
   MemorySource source(std::list<Batch>(total_batches, Batch{1}));
-  MemorySink sink(backpressure_batches, backpressure_batches + dop);
+  MemorySink sink(backpressure_batches, backpressure_batches + dop, total_batches);
   LogicalPipeline pipeline{{{&source, {}}}, &sink};
   folly::CPUThreadPoolExecutor executor(8);
   FollyFutureScheduler scheduler(&executor);
@@ -916,7 +924,7 @@ TEST(AsyncBackpressure, BasicObserved) {
   size_t backpressure_batches = 8;
   size_t total_batches = 70;
   MemorySource source(std::list<Batch>(total_batches, Batch{1}));
-  MemorySink sink(backpressure_batches, backpressure_batches + dop);
+  MemorySink sink(backpressure_batches, backpressure_batches + dop, total_batches);
   LogicalPipeline pipeline{{{&source, {}}}, &sink};
   folly::CPUThreadPoolExecutor executor(8);
   TaskObserver observer(dop);
