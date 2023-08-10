@@ -867,97 +867,112 @@ class MemorySink : public SinkOp {
 
 using namespace ara::sketch;
 
-TEST(AsyncBackpressure, Basic) {
-  size_t dop = 4;
-  size_t backpressure_batches = 8;
-  size_t total_batches = 64;
-  MemorySource source(std::list<Batch>(total_batches, Batch{1}));
-  MemorySink sink(backpressure_batches, backpressure_batches + dop, total_batches);
-  LogicalPipeline pipeline{{{&source, {}}}, &sink};
-  folly::CPUThreadPoolExecutor executor(8);
-  FollyFutureScheduler scheduler(&executor);
-  Driver<SyncPipelineTask, FollyFutureScheduler> driver(SyncPipelineTask::Make,
-                                                        &scheduler);
-  auto result = driver.Run(dop, {pipeline});
-  ASSERT_OK(result);
-  ASSERT_TRUE(result->IsFinished());
-  ASSERT_EQ(sink.total_batches_.size(), total_batches);
-}
-
-TEST(AsyncBackpressure, BasicObserved) {
-  struct TaskObserver : public FollyFutureScheduler::TaskObserver {
-    TaskObserver(size_t dop)
-        : backpressure_to_handle_task_ids(dop), backpressure_resolved_task_ids(dop) {
-      for (size_t i = 0; i < dop; ++i) {
-        backpressure_to_handle_task_ids[i] = 0;
-        backpressure_resolved_task_ids[i] = 0;
-      }
-    }
-
-    void BeforeTaskRun(const Task& task, TaskId task_id) override {}
-
-    void AfterTaskRun(const Task& task, TaskId task_id,
-                      const TaskResult& result) override {
-      ARA_DCHECK(result.ok());
-      if (result->IsBackpressure()) {
-        task_hit_backpressures++;
-      }
-    }
-
-    void BeforeTaskBackpressure(const Task& task, TaskId task_id) override {
-      backpressures_to_handle++;
-      backpressure_to_handle_task_ids[task_id]++;
-    }
-
-    void AfterTaskBackpressure(const Task& task, TaskId task_id) override {
-      backpressures_resolved++;
-      backpressure_resolved_task_ids[task_id]++;
-    }
-
-    std::atomic<size_t> task_hit_backpressures = 0, backpressures_to_handle = 0,
-                        backpressures_resolved = 0;
-    std::vector<std::atomic<size_t>> backpressure_to_handle_task_ids;
-    std::vector<std::atomic<size_t>> backpressure_resolved_task_ids;
-  };
-
-  size_t dop = 4;
-  size_t backpressure_batches = 8;
-  size_t total_batches = 70;
-  MemorySource source(std::list<Batch>(total_batches, Batch{1}));
-  MemorySink sink(backpressure_batches, backpressure_batches + dop, total_batches);
-  LogicalPipeline pipeline{{{&source, {}}}, &sink};
-  folly::CPUThreadPoolExecutor executor(8);
-  TaskObserver observer(dop);
-  FollyFutureScheduler scheduler(&executor, &observer);
-  Driver<SyncPipelineTask, FollyFutureScheduler> driver(SyncPipelineTask::Make,
-                                                        &scheduler);
-  auto result = driver.Run(dop, {pipeline});
-  ASSERT_OK(result);
-  ASSERT_TRUE(result->IsFinished());
-  ASSERT_EQ(sink.total_batches_.size(), total_batches);
-
-  size_t backpressure_division_per_task = total_batches / (backpressure_batches + dop);
-  size_t backpressure_division = backpressure_division_per_task * dop;
-  size_t backpressure_remainder =
-      total_batches % (backpressure_batches + dop) -
-      std::min(total_batches % (backpressure_batches + dop), backpressure_batches);
-
-  size_t backpressures_exp = backpressure_division + backpressure_remainder;
-
-  ASSERT_EQ(observer.task_hit_backpressures, backpressures_exp);
-  ASSERT_EQ(observer.backpressures_to_handle, backpressures_exp);
-  ASSERT_EQ(observer.backpressures_resolved, backpressures_exp);
-
-  size_t backpressures_to_handle_remainder = 0, backpressures_resolved_remainder = 0;
-  for (size_t i = 0; i < dop; ++i) {
-    ASSERT_GE(observer.backpressure_to_handle_task_ids[i],
-              backpressure_division_per_task);
-    ASSERT_GE(observer.backpressure_resolved_task_ids[i], backpressure_division_per_task);
-    backpressures_to_handle_remainder +=
-        observer.backpressure_to_handle_task_ids[i] - backpressure_division_per_task;
-    backpressures_resolved_remainder +=
-        observer.backpressure_resolved_task_ids[i] - backpressure_division_per_task;
+class AsyncBackpressureTest : public testing::TestWithParam<size_t> {
+ protected:
+  void Basic() {
+    size_t dop = 4;
+    size_t backpressure_batches = 8;
+    size_t total_batches = GetParam();
+    MemorySource source(std::list<Batch>(total_batches, Batch{1}));
+    MemorySink sink(backpressure_batches, backpressure_batches + dop, total_batches);
+    LogicalPipeline pipeline{{{&source, {}}}, &sink};
+    folly::CPUThreadPoolExecutor executor(8);
+    FollyFutureScheduler scheduler(&executor);
+    Driver<SyncPipelineTask, FollyFutureScheduler> driver(SyncPipelineTask::Make,
+                                                          &scheduler);
+    auto result = driver.Run(dop, {pipeline});
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsFinished());
+    ASSERT_EQ(sink.total_batches_.size(), total_batches);
   }
-  ASSERT_EQ(backpressures_to_handle_remainder, backpressure_remainder);
-  ASSERT_EQ(backpressures_resolved_remainder, backpressure_remainder);
-}
+
+  void BasicWithObserver() {
+    struct TaskObserver : public FollyFutureScheduler::TaskObserver {
+      TaskObserver(size_t dop)
+          : backpressure_to_handle_task_ids(dop), backpressure_resolved_task_ids(dop) {
+        for (size_t i = 0; i < dop; ++i) {
+          backpressure_to_handle_task_ids[i] = 0;
+          backpressure_resolved_task_ids[i] = 0;
+        }
+      }
+
+      void BeforeTaskRun(const Task& task, TaskId task_id) override {}
+
+      void AfterTaskRun(const Task& task, TaskId task_id,
+                        const TaskResult& result) override {
+        ARA_DCHECK(result.ok());
+        if (result->IsBackpressure()) {
+          task_hit_backpressures++;
+        }
+      }
+
+      void BeforeTaskBackpressure(const Task& task, TaskId task_id) override {
+        backpressures_to_handle++;
+        backpressure_to_handle_task_ids[task_id]++;
+      }
+
+      void AfterTaskBackpressure(const Task& task, TaskId task_id) override {
+        backpressures_resolved++;
+        backpressure_resolved_task_ids[task_id]++;
+      }
+
+      std::atomic<size_t> task_hit_backpressures = 0, backpressures_to_handle = 0,
+                          backpressures_resolved = 0;
+      std::vector<std::atomic<size_t>> backpressure_to_handle_task_ids;
+      std::vector<std::atomic<size_t>> backpressure_resolved_task_ids;
+    };
+
+    size_t dop = 4;
+    size_t backpressure_batches = 8;
+    size_t total_batches = GetParam();
+    MemorySource source(std::list<Batch>(total_batches, Batch{1}));
+    MemorySink sink(backpressure_batches, backpressure_batches + dop, total_batches);
+    LogicalPipeline pipeline{{{&source, {}}}, &sink};
+    folly::CPUThreadPoolExecutor executor(8);
+    TaskObserver observer(dop);
+    FollyFutureScheduler scheduler(&executor, &observer);
+    Driver<SyncPipelineTask, FollyFutureScheduler> driver(SyncPipelineTask::Make,
+                                                          &scheduler);
+    auto result = driver.Run(dop, {pipeline});
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsFinished());
+    ASSERT_EQ(sink.total_batches_.size(), total_batches);
+
+    size_t backpressure_division_per_task = total_batches / (backpressure_batches + dop);
+    size_t backpressure_division = backpressure_division_per_task * dop;
+    size_t backpressure_remainder =
+        total_batches % (backpressure_batches + dop) -
+        std::min(total_batches % (backpressure_batches + dop), backpressure_batches);
+
+    size_t backpressures_exp = backpressure_division + backpressure_remainder;
+
+    ASSERT_EQ(observer.task_hit_backpressures, backpressures_exp);
+    ASSERT_EQ(observer.backpressures_to_handle, backpressures_exp);
+    ASSERT_EQ(observer.backpressures_resolved, backpressures_exp);
+
+    size_t backpressures_to_handle_remainder = 0, backpressures_resolved_remainder = 0;
+    for (size_t i = 0; i < dop; ++i) {
+      ASSERT_GE(observer.backpressure_to_handle_task_ids[i],
+                backpressure_division_per_task);
+      ASSERT_GE(observer.backpressure_resolved_task_ids[i],
+                backpressure_division_per_task);
+      backpressures_to_handle_remainder +=
+          observer.backpressure_to_handle_task_ids[i] - backpressure_division_per_task;
+      backpressures_resolved_remainder +=
+          observer.backpressure_resolved_task_ids[i] - backpressure_division_per_task;
+    }
+    ASSERT_EQ(backpressures_to_handle_remainder, backpressure_remainder);
+    ASSERT_EQ(backpressures_resolved_remainder, backpressure_remainder);
+  }
+};
+
+TEST_P(AsyncBackpressureTest, Baisc) { Basic(); }
+
+TEST_P(AsyncBackpressureTest, BaiscWithObserver) { BasicWithObserver(); }
+
+INSTANTIATE_TEST_SUITE_P(AsyncBackpressureSuite, AsyncBackpressureTest,
+                         testing::Range(size_t(8), size_t(128)),
+                         [](const auto& param_info) {
+                           return std::to_string(param_info.index) + "_" +
+                                  std::to_string(param_info.param);
+                         });
