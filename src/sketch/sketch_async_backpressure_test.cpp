@@ -14,6 +14,11 @@
 
 namespace ara::sketch {
 
+using Backpressure = std::any;
+using BackpressureClear = std::function<arrow::Status()>;
+using BackpressurePair = std::pair<Backpressure, BackpressureClear>;
+using GenBackpressurePair = std::function<BackpressurePair()>;
+
 struct TaskStatus {
  private:
   enum class Code {
@@ -23,8 +28,11 @@ struct TaskStatus {
     FINISHED,
     CANCELLED,
   } code_;
+  Backpressure backpressure_;
 
   TaskStatus(Code code) : code_(code) {}
+  TaskStatus(Backpressure backpressure)
+      : code_(Code::BACKPRESSURE), backpressure_(std::move(backpressure)) {}
 
  public:
   bool IsContinue() const { return code_ == Code::CONTINUE; }
@@ -33,9 +41,16 @@ struct TaskStatus {
   bool IsFinished() const { return code_ == Code::FINISHED; }
   bool IsCancelled() const { return code_ == Code::CANCELLED; }
 
+  Backpressure& GetBackpressure() {
+    ARA_DCHECK(IsBackpressure());
+    return backpressure_;
+  }
+
  public:
   static TaskStatus Continue() { return TaskStatus(Code::CONTINUE); }
-  static TaskStatus Backpressure() { return TaskStatus{Code::BACKPRESSURE}; }
+  static TaskStatus Backpressure(Backpressure backpressure) {
+    return TaskStatus(std::move(backpressure));
+  }
   static TaskStatus Yield() { return TaskStatus{Code::YIELD}; }
   static TaskStatus Finished() { return TaskStatus{Code::FINISHED}; }
   static TaskStatus Cancelled() { return TaskStatus{Code::CANCELLED}; }
@@ -45,14 +60,13 @@ using TaskId = size_t;
 using ThreadId = size_t;
 
 using TaskResult = arrow::Result<TaskStatus>;
-using Task = std::function<TaskResult(TaskId)>;
+using Task = std::function<TaskResult(TaskId, std::optional<GenBackpressurePair>)>;
 using TaskCont = std::function<TaskResult()>;
-using BackpressureCallback = std::function<arrow::Status()>;
-using TaskAddBackpressureCallback = std::function<arrow::Status(BackpressureCallback&&)>;
+// using TaskAddBackpressureCallback =
+// std::function<arrow::Status(BackpressureCallback&&)>;
 using TaskNotifyFinish = std::function<arrow::Status()>;
-using TaskGroup = std::tuple<Task, size_t, std::optional<TaskCont>,
-                             std::optional<TaskAddBackpressureCallback>,
-                             std::optional<TaskNotifyFinish>>;
+using TaskGroup =
+    std::tuple<Task, size_t, std::optional<TaskCont>, std::optional<TaskNotifyFinish>>;
 using TaskGroups = std::vector<TaskGroup>;
 
 using Batch = std::vector<int>;
@@ -70,9 +84,12 @@ struct OperatorResult {
     CANCELLED,
   } code_;
   std::optional<Batch> output_;
+  Backpressure backpressure_;
 
   OperatorResult(Code code, std::optional<Batch> output = std::nullopt)
       : code_(code), output_(std::move(output)) {}
+  OperatorResult(Backpressure backpressure)
+      : code_(Code::SINK_BACKPRESSURE), backpressure_(std::move(backpressure)) {}
 
  public:
   bool IsSourceNotReady() const { return code_ == Code::SOURCE_NOT_READY; }
@@ -89,6 +106,11 @@ struct OperatorResult {
     return output_;
   }
 
+  Backpressure& GetBackpressure() {
+    ARA_DCHECK(IsSinkBackpressure());
+    return backpressure_;
+  }
+
  public:
   static OperatorResult SourceNotReady() {
     return OperatorResult(Code::SOURCE_NOT_READY);
@@ -102,8 +124,8 @@ struct OperatorResult {
   static OperatorResult SourcePipeHasMore(Batch output) {
     return OperatorResult{Code::SOURCE_PIPE_HAS_MORE, std::move(output)};
   }
-  static OperatorResult SinkBackpressure() {
-    return OperatorResult{Code::SINK_BACKPRESSURE};
+  static OperatorResult SinkBackpressure(Backpressure backpressure) {
+    return OperatorResult(std::move(backpressure));
   }
   static OperatorResult PipeYield() { return OperatorResult{Code::PIPE_YIELD}; }
   static OperatorResult Finished(std::optional<Batch> output) {
@@ -116,8 +138,8 @@ using PipelineTaskSource = std::function<arrow::Result<OperatorResult>(ThreadId)
 using PipelineTaskPipe =
     std::function<arrow::Result<OperatorResult>(ThreadId, std::optional<Batch>)>;
 using PipelineTaskDrain = std::function<arrow::Result<OperatorResult>(ThreadId)>;
-using PipelineTaskSink =
-    std::function<arrow::Result<OperatorResult>(ThreadId, std::optional<Batch>)>;
+using PipelineTaskSink = std::function<arrow::Result<OperatorResult>(
+    ThreadId, std::optional<Batch>, std::optional<GenBackpressurePair>)>;
 
 class SourceOp {
  public:
@@ -141,7 +163,6 @@ class SinkOp {
   virtual PipelineTaskSink Sink() = 0;
   virtual TaskGroups Frontend() = 0;
   virtual TaskGroups Backend() = 0;
-  virtual TaskAddBackpressureCallback AddBackpressureCallback() = 0;
 };
 
 struct PhysicalPipelinePlex {
@@ -152,7 +173,6 @@ struct PhysicalPipelinePlex {
 
 struct PhysicalPipeline {
   std::vector<PhysicalPipelinePlex> plexes;
-  TaskAddBackpressureCallback add_backpressure_callback;
 };
 
 struct LogicalPipeline;
@@ -184,7 +204,7 @@ struct LogicalPipeline {
     std::vector<PhysicalPipelinePlex> plexes_(plexes.size());
     std::transform(plexes.begin(), plexes.end(), plexes_.begin(),
                    [&](auto& plex_meta) { return plex_meta.ToPhysical(sink); });
-    return {std::move(plexes_), sink->AddBackpressureCallback()};
+    return {std::move(plexes_)};
   }
 
   friend class PipelineStageBuilder;
@@ -273,17 +293,17 @@ class PipelineTask {
     return {dop, std::move(pipeline)};
   }
 
-  PipelineTask(size_t dop, PhysicalPipeline pipeline)
-      : add_backpressure_callback_(std::move(pipeline.add_backpressure_callback)) {
+  PipelineTask(size_t dop, PhysicalPipeline pipeline) {
     for (auto& plex : pipeline.plexes) {
       tasks_.push_back(PipelinePlexTask(dop, std::move(plex)));
     }
   }
 
-  arrow::Result<OperatorResult> Run(ThreadId thread_id) {
+  arrow::Result<OperatorResult> Run(ThreadId thread_id,
+                                    std::optional<GenBackpressurePair> gen) {
     bool all_finished = true;
     for (auto& task : tasks_) {
-      ARA_ASSIGN_OR_RAISE(auto result, task.Run(thread_id));
+      ARA_ASSIGN_OR_RAISE(auto result, task.Run(thread_id, gen));
       if (result.IsFinished()) {
         ARA_DCHECK(!result.GetOutput().has_value());
       } else {
@@ -300,13 +320,8 @@ class PipelineTask {
     }
   }
 
-  arrow::Status AddBackpressureCallback(BackpressureCallback&& callback) {
-    return add_backpressure_callback_(std::move(callback));
-  }
-
  private:
   std::vector<PipelinePlexTask> tasks_;
-  TaskAddBackpressureCallback add_backpressure_callback_;
 };
 
 class SyncPipelinePlexTask {
@@ -330,7 +345,8 @@ class SyncPipelinePlexTask {
   SyncPipelinePlexTask(SyncPipelinePlexTask&& other)
       : SyncPipelinePlexTask(other.dop_, std::move(other.plex_)) {}
 
-  arrow::Result<OperatorResult> Run(ThreadId thread_id) {
+  arrow::Result<OperatorResult> Run(ThreadId thread_id,
+                                    std::optional<GenBackpressurePair> gen) {
     if (cancelled) {
       return OperatorResult::Cancelled();
     }
@@ -338,7 +354,7 @@ class SyncPipelinePlexTask {
     if (!local_states_[thread_id].pipe_stack.empty()) {
       auto pipe_id = local_states_[thread_id].pipe_stack.top();
       local_states_[thread_id].pipe_stack.pop();
-      return Pipe(thread_id, pipe_id, std::nullopt);
+      return Pipe(thread_id, pipe_id, std::nullopt, std::move(gen));
     }
 
     if (!local_states_[thread_id].source_done) {
@@ -352,12 +368,12 @@ class SyncPipelinePlexTask {
       } else if (result->IsFinished()) {
         local_states_[thread_id].source_done = true;
         if (result->GetOutput().has_value()) {
-          return Pipe(thread_id, 0, std::move(result->GetOutput()));
+          return Pipe(thread_id, 0, std::move(result->GetOutput()), std::move(gen));
         }
       } else {
         ARA_DCHECK(result->IsSourcePipeHasMore());
         ARA_DCHECK(result->GetOutput().has_value());
-        return Pipe(thread_id, 0, std::move(result->GetOutput()));
+        return Pipe(thread_id, 0, std::move(result->GetOutput()), std::move(gen));
       }
     }
 
@@ -388,7 +404,8 @@ class SyncPipelinePlexTask {
         if (result->IsFinished()) {
           ++local_states_[thread_id].draining;
         }
-        return Pipe(thread_id, drain_id + 1, std::move(result->GetOutput()));
+        return Pipe(thread_id, drain_id + 1, std::move(result->GetOutput()),
+                    std::move(gen));
       }
     }
 
@@ -397,7 +414,8 @@ class SyncPipelinePlexTask {
 
  private:
   arrow::Result<OperatorResult> Pipe(ThreadId thread_id, size_t pipe_id,
-                                     std::optional<Batch> input) {
+                                     std::optional<Batch> input,
+                                     std::optional<GenBackpressurePair> gen) {
     for (size_t i = pipe_id; i < plex_.pipes.size(); ++i) {
       auto result = plex_.pipes[i].first(thread_id, std::move(input));
       if (!result.ok()) {
@@ -429,7 +447,7 @@ class SyncPipelinePlexTask {
       }
     }
 
-    auto result = plex_.sink(thread_id, std::move(input));
+    auto result = plex_.sink(thread_id, std::move(input), std::move(gen));
     if (!result.ok()) {
       cancelled = true;
       return result.status();
@@ -489,7 +507,7 @@ class Driver {
     ARA_ASSIGN_OR_RAISE(auto result, scheduler_->WaitTaskGroup(sink_fe_handle));
     ARA_DCHECK(result.IsFinished());
 
-    auto sink_be_notify_finish = std::get<4>(sink_be.back());
+    auto sink_be_notify_finish = std::get<3>(sink_be.back());
     if (sink_be_notify_finish.has_value()) {
       ARA_DCHECK(sink_be_notify_finish.value()().ok());
     }
@@ -515,10 +533,10 @@ class Driver {
 
     auto pipeline_task = factory_(dop, stage.pipeline);
     TaskGroup pipeline_task_group{
-        [&](ThreadId thread_id) -> TaskResult {
-          ARA_ASSIGN_OR_RAISE(auto result, pipeline_task.Run(thread_id));
+        [&](ThreadId thread_id, std::optional<GenBackpressurePair> gen) -> TaskResult {
+          ARA_ASSIGN_OR_RAISE(auto result, pipeline_task.Run(thread_id, std::move(gen)));
           if (result.IsSinkBackpressure()) {
-            return TaskStatus::Backpressure();
+            return TaskStatus::Backpressure(std::move(result.GetBackpressure()));
           }
           if (result.IsPipeYield()) {
             return TaskStatus::Yield();
@@ -531,11 +549,7 @@ class Driver {
           }
           return TaskStatus::Continue();
         },
-        dop, std::nullopt,
-        [&](BackpressureCallback&& cb) -> arrow::Status {
-          return pipeline_task.AddBackpressureCallback(std::move(cb));
-        },
-        std::nullopt};
+        dop, std::nullopt, std::nullopt};
     auto pipeline_task_group_handle = scheduler_->ScheduleTaskGroup(pipeline_task_group);
     ARA_ASSIGN_OR_RAISE(auto result,
                         scheduler_->WaitTaskGroup(pipeline_task_group_handle));
@@ -580,14 +594,13 @@ class FollyFutureScheduler {
     auto& task = std::get<0>(group);
     auto num_tasks = std::get<1>(group);
     auto& task_cont = std::get<2>(group);
-    auto& task_add_bpcb = std::get<3>(group);
 
     auto [p, f] = folly::makePromiseContract<folly::Unit>(executor_);
     std::vector<folly::Promise<folly::Unit>> task_promises;
     std::vector<folly::Future<TaskResult>> tasks;
     TaskGroupPayload payload(num_tasks);
     for (size_t i = 0; i < num_tasks; ++i) {
-      auto [tp, tf] = MakeTask(task, i, payload[i], task_add_bpcb);
+      auto [tp, tf] = MakeTask(task, i, payload[i]);
       task_promises.push_back(std::move(tp));
       tasks.push_back(std::move(tf));
       payload[i] = TaskStatus::Continue();
@@ -622,7 +635,7 @@ class FollyFutureScheduler {
     }
     auto handle = ScheduleTaskGroup(groups[0]);
     for (size_t i = 1; i < groups.size(); ++i) {
-      ARA_DCHECK(!std::get<4>(groups[i]).has_value());
+      ARA_DCHECK(!std::get<3>(groups[i]).has_value());
       auto result = WaitTaskGroup(handle);
       ARA_DCHECK(result.ok());
       handle = ScheduleTaskGroup(groups[i]);
@@ -638,38 +651,29 @@ class FollyFutureScheduler {
   }
 
  private:
-  ConcreteTask MakeTask(const Task& task, TaskId task_id, TaskResult& result,
-                        const std::optional<TaskAddBackpressureCallback>& task_add_bpcb) {
+  ConcreteTask MakeTask(const Task& task, TaskId task_id, TaskResult& result) {
     auto [p, f] = folly::makePromiseContract<folly::Unit>(executor_);
-
     auto pred = [&]() {
       return result.ok() && !result->IsFinished() && !result->IsCancelled();
     };
     auto thunk = [&, task_id]() {
       if (result->IsBackpressure()) {
-        ARA_DCHECK(task_add_bpcb.has_value());
         if (observer_) {
           observer_->BeforeTaskBackpressure(task, task_id);
         }
-        auto [bp_p, bp_f] = folly::makePromiseContract<folly::Unit>(executor_);
-        // Workaround that std::function must be copy-constructible.
-        auto bp_p_ptr = std::make_shared<folly::Promise<folly::Unit>>(std::move(bp_p));
-        auto cb = [&, bp_p_ptr = std::move(bp_p_ptr), task, task_id]() mutable {
-          bp_p_ptr->setValue();
-          if (observer_) {
-            observer_->AfterTaskBackpressure(task, task_id);
-          }
-          return arrow::Status::OK();
-        };
-        ARA_DCHECK_OK(task_add_bpcb.value()(std::move(cb)));
-        return std::move(bp_f).thenValue(
-            [&](auto&&) { result = TaskStatus::Continue(); });
+        auto backpressure = std::any_cast<std::shared_ptr<folly::Future<folly::Unit>>>(
+            std::move(result->GetBackpressure()));
+        return std::move(*backpressure).thenValue([&](auto&&) {
+          result = TaskStatus::Continue();
+        });
       }
       return folly::via(executor_).then([&, task_id](auto&&) {
         if (observer_) {
           observer_->BeforeTaskRun(task, task_id);
         }
-        result = task(task_id);
+        result = task(task_id, [&, task, task_id]() -> BackpressurePair {
+          return MakeBackpressurePair(task, task_id);
+        });
         if (observer_) {
           observer_->AfterTaskRun(task, task_id, result);
         }
@@ -683,6 +687,21 @@ class FollyFutureScheduler {
         });
     return {std::move(p), std::move(task_f)};
   }
+
+  BackpressurePair MakeBackpressurePair(const Task& task, TaskId task_id) {
+    auto [p, f] = folly::makePromiseContract<folly::Unit>(executor_);
+    // Workaround that std::function must be copy-constructible.
+    auto p_ptr = std::make_shared<folly::Promise<folly::Unit>>(std::move(p));
+    auto f_ptr = std::make_shared<folly::Future<folly::Unit>>(std::move(f));
+    auto cb = [&, p_ptr = std::move(p_ptr), task, task_id]() mutable {
+      p_ptr->setValue();
+      if (observer_) {
+        observer_->AfterTaskBackpressure(task, task_id);
+      }
+      return arrow::Status::OK();
+    };
+    return std::make_pair(std::any{std::move(f_ptr)}, std::move(cb));
+  };
 
  private:
   folly::Executor* executor_;
@@ -768,12 +787,16 @@ class MemorySink : public SinkOp {
         finished_(false) {}
 
   PipelineTaskSink Sink() override {
-    return [&](ThreadId, std::optional<Batch> input) -> arrow::Result<OperatorResult> {
+    return [&](ThreadId, std::optional<Batch> input,
+               std::optional<GenBackpressurePair> gen) -> arrow::Result<OperatorResult> {
+      ARA_DCHECK(gen.has_value());
       if (input.has_value()) {
         std::lock_guard<std::mutex> lock(mutex_);
         staging_batches_.push_back(std::move(input.value()));
         if (staging_batches_.size() > backpressure_threshold_) {
-          return OperatorResult::SinkBackpressure();
+          auto backpressure_pair = gen.value()();
+          backpressures_.push_back(std::move(backpressure_pair.second));
+          return OperatorResult::SinkBackpressure(std::move(backpressure_pair.first));
         }
       }
       return OperatorResult::PipeSinkNeedsMore();
@@ -783,7 +806,7 @@ class MemorySink : public SinkOp {
   TaskGroups Frontend() override { return {}; }
 
   TaskGroups Backend() override {
-    auto task = [&](TaskId) -> TaskResult {
+    auto task = [&](TaskId, std::optional<GenBackpressurePair>) -> TaskResult {
       std::lock_guard<std::mutex> lock(mutex_);
 
       if (finished_) {
@@ -791,13 +814,12 @@ class MemorySink : public SinkOp {
         return TaskStatus::Finished();
       }
 
-      if (staging_batches_.size() == 0 ||
-          backpressures_.size() == backend_threshold_ - backpressure_threshold_) {
+      if (staging_batches_.size() <= backend_threshold_) {
         ClearBackpressures();
         return TaskStatus::Continue();
       }
 
-      if (staging_batches_.size() == backend_threshold_) {
+      if (staging_batches_.size() >= backend_threshold_) {
         CommitStagingBatches();
       }
 
@@ -813,16 +835,7 @@ class MemorySink : public SinkOp {
       return arrow::Status::OK();
     };
 
-    return {
-        {std::move(task), 1, std::nullopt, std::nullopt, std::move(task_notify_finish)}};
-  }
-
-  TaskAddBackpressureCallback AddBackpressureCallback() override {
-    return [&](BackpressureCallback&& callback) -> arrow::Status {
-      std::lock_guard<std::mutex> lock(mutex_);
-      backpressures_.push_back(std::move(callback));
-      return arrow::Status::OK();
-    };
+    return {{std::move(task), 1, std::nullopt, std::move(task_notify_finish)}};
   }
 
  private:
@@ -850,7 +863,7 @@ class MemorySink : public SinkOp {
 
   std::vector<Batch> staging_batches_;
   std::vector<Batch> total_batches_;
-  std::vector<BackpressureCallback> backpressures_;
+  std::vector<BackpressureClear> backpressures_;
 };
 
 }  // namespace ara::sketch
