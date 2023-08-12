@@ -62,8 +62,6 @@ using ThreadId = size_t;
 using TaskResult = arrow::Result<TaskStatus>;
 using Task = std::function<TaskResult(TaskId, std::optional<GenBackpressurePair>)>;
 using TaskCont = std::function<TaskResult()>;
-// using TaskAddBackpressureCallback =
-// std::function<arrow::Status(BackpressureCallback&&)>;
 using TaskNotifyFinish = std::function<arrow::Status()>;
 using TaskGroup =
     std::tuple<Task, size_t, std::optional<TaskCont>, std::optional<TaskNotifyFinish>>;
