@@ -814,7 +814,7 @@ class MemorySink : public SinkOp {
         return TaskStatus::Finished();
       }
 
-      if (staging_batches_.size() <= backend_threshold_) {
+      if (staging_batches_.size() <= backpressure_threshold_) {
         ClearBackpressures();
         return TaskStatus::Continue();
       }
