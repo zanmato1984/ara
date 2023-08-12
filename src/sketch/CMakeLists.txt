@@ -46,3 +46,7 @@ add_ara_test(sketch_coro_test "${SKETCH_CORO_TEST_SRC}")
 set(SKETCH_AGGREGATION_TEST_SRC
         "${CMAKE_CURRENT_SOURCE_DIR}/sketch_aggregation_test.cpp")
 add_ara_test(sketch_aggregation_test "${SKETCH_AGGREGATION_TEST_SRC}")
+
+set(SKETCH_ASYNC_BACKPRESSURE_TEST_SRC
+        "${CMAKE_CURRENT_SOURCE_DIR}/sketch_async_backpressure_test.cpp")
+add_ara_test(sketch_async_backpressure_test "${SKETCH_ASYNC_BACKPRESSURE_TEST_SRC}")
