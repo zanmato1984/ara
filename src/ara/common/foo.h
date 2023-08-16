@@ -1,3 +1,5 @@
+#pragma once
+
 #include "ara/common/batch.h"
 
 namespace ara {

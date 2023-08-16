@@ -1,3 +1,5 @@
+#pragma once
+
 #include <arrow/compute/exec.h>
 
 namespace ara {
