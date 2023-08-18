@@ -2,6 +2,7 @@
 
 #include <ara/task/defines.h>
 #include <ara/task/task_context.h>
+#include <ara/task/task_meta.h>
 #include <ara/util/util.h>
 
 namespace ara::task {
@@ -12,13 +13,13 @@ template <typename T>
 struct TaskTraits;
 
 template <typename Impl>
-class InternalTask {
+class InternalTask : public TaskMeta {
  public:
   using Signature = typename TaskTraits<Impl>::Signature;
   using ReturnType = typename TaskTraits<Impl>::ReturnType;
 
-  InternalTask(Signature f, std::string name, std::string desc)
-      : f_(std::move(f)), name_(std::move(name)), desc_(std::move(desc)) {}
+  InternalTask(std::string name, std::string desc, Signature f)
+      : TaskMeta(std::move(name), std::move(desc)), f_(std::move(f)) {}
 
   template <typename... Args>
   ReturnType operator()(const TaskContext& context, Args... args) const {
@@ -35,17 +36,12 @@ class InternalTask {
     return result;
   }
 
-  std::string GetName() const { return name_; }
-  std::string GetDesc() const { return desc_; }
-
  private:
   friend Impl;
   Impl& impl() { return *static_cast<Impl*>(this); }
   const Impl& impl() const { return *static_cast<const Impl*>(this); }
 
   Signature f_;
-  std::string name_;
-  std::string desc_;
 };
 
 }  // namespace detail
