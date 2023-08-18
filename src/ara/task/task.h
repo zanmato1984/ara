@@ -71,16 +71,22 @@ class Task : public detail::InternalTask<Task> {
  public:
   using detail::InternalTask<Task>::InternalTask;
 
+ private:
   Status ObserverBegin(TaskObserver*, const TaskContext&, TaskId) const;
   Status ObserverEnd(TaskObserver*, const TaskContext&, TaskId, const TaskResult&) const;
+
+  friend detail::InternalTask<Task>;
 };
 
 class Continuation : public detail::InternalTask<Continuation> {
  public:
   using detail::InternalTask<Continuation>::InternalTask;
 
+ private:
   Status ObserverBegin(TaskObserver*, const TaskContext&) const;
   Status ObserverEnd(TaskObserver*, const TaskContext&, const TaskResult&) const;
+
+  friend detail::InternalTask<Continuation>;
 };
 
 };  // namespace ara::task
