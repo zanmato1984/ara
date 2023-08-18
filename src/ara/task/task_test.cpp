@@ -1,5 +1,6 @@
 #include "task.h"
 #include "ara/util/util.h"
+#include "task_group.h"
 #include "task_status.h"
 
 #include <gtest/gtest.h>
@@ -8,7 +9,7 @@ using namespace ara;
 using namespace ara::task;
 
 TEST(TaskTest, BasicTask) {
-  auto task_impl = [](const TaskContext& context, TaskId task_id) -> TaskResult {
+  auto task_impl = [](const TaskContext&, TaskId) -> TaskResult {
     return TaskStatus::Finished();
   };
 
@@ -20,7 +21,7 @@ TEST(TaskTest, BasicTask) {
 }
 
 TEST(TaskTest, BasicContinuation) {
-  auto cont_impl = [](const TaskContext& context) -> TaskResult {
+  auto cont_impl = [](const TaskContext&) -> TaskResult {
     return TaskStatus::Finished();
   };
 
@@ -152,4 +153,128 @@ TEST(TaskTest, TaskObserver) {
   ASSERT_EQ(task_observer->traces[13], cont_cancelled_trace(true));
   ASSERT_EQ(task_observer->traces[14], cont_yield_trace(false));
   ASSERT_EQ(task_observer->traces[15], cont_yield_trace(true));
+}
+
+TEST(TaskTest, BasicTaskGroup) {
+  auto task_impl = [](const TaskContext&, TaskId) -> TaskResult {
+    return TaskStatus::Finished();
+  };
+  auto cont_impl = [](const TaskContext&) -> TaskResult {
+    return TaskStatus::Finished();
+  };
+  auto notify = [](const TaskContext&) -> Status { return Status::OK(); };
+
+  Task task("BasicTask", "Do nothing but finish directly", task_impl);
+  Continuation cont("BasicCont", "Do nothing but finish directly", cont_impl);
+  TaskGroup tg("BasicTaskGroup", "Do nothing", std::move(task), 1, std::move(cont),
+               std::move(notify));
+  auto task_ref = tg.GetTask();
+  auto num_tasks = tg.NumTasks();
+  auto cont_ref = tg.GetContinuation();
+
+  ASSERT_EQ(num_tasks, 1);
+  ASSERT_TRUE(cont_ref.has_value());
+
+  TaskContext context;
+  {
+    auto res = task_ref(context, 0);
+    ASSERT_TRUE(res.ok());
+    ASSERT_TRUE(res->IsFinished());
+  }
+
+  {
+    auto res = cont_ref.value()(context);
+    ASSERT_TRUE(res.ok());
+    ASSERT_TRUE(res->IsFinished());
+  }
+
+  {
+    auto status = tg.OnBegin(context);
+    ASSERT_TRUE(status.ok());
+  }
+
+  {
+    auto status = tg.OnEnd(context, TaskStatus::Finished());
+    ASSERT_TRUE(status.ok());
+  }
+
+  {
+    auto status = tg.NotifyFinish(context);
+    ASSERT_TRUE(status.ok());
+  }
+}
+
+struct TaskGroupTrace {
+  std::string name;
+  std::string desc;
+  std::variant<TaskResult, Status> result;
+};
+
+bool operator==(const TaskGroupTrace& t1, const TaskGroupTrace& t2) {
+  return t1.name == t2.name && t1.desc == t2.desc && t1.result == t2.result;
+}
+
+TEST(TaskTest, TaskGroupObserver) {
+  auto task_impl = [](const TaskContext&, TaskId) -> TaskResult {
+    return TaskStatus::Finished();
+  };
+  auto cont_impl = [](const TaskContext&) -> TaskResult {
+    return TaskStatus::Finished();
+  };
+  auto notify = [](const TaskContext&) -> Status {
+    return Status::UnknownError("Notify");
+  };
+
+  std::string name = "TaskGroup";
+  std::string desc = "Do nothing";
+  Task task("", "", task_impl);
+  Continuation cont("", "", cont_impl);
+
+  TaskGroup tg(name, desc, task, 1, cont, notify);
+
+  struct TestTaskObserver : public TaskObserver {
+    std::vector<TaskGroupTrace> traces;
+
+    Status OnTaskGroupBegin(const TaskGroup& tg, const TaskContext& context) {
+      traces.emplace_back(
+          TaskGroupTrace{tg.GetName(), tg.GetDesc(), Status::UnknownError("Begin")});
+      return Status::OK();
+    }
+
+    Status OnTaskGroupEnd(const TaskGroup& tg, const TaskContext& context,
+                          const TaskResult& result) {
+      traces.emplace_back(TaskGroupTrace{tg.GetName(), tg.GetDesc(), result});
+      return Status::OK();
+    }
+
+    Status OnNotifyFinishBegin(const TaskGroup& tg, const TaskContext& context) {
+      traces.emplace_back(TaskGroupTrace{"Notify" + tg.GetName(), tg.GetDesc(),
+                                         Status::UnknownError("NotifyBegin")});
+      return Status::OK();
+    }
+
+    Status OnNotifyFinishEnd(const TaskGroup& tg, const TaskContext& context,
+                             const Status& status) {
+      traces.emplace_back(TaskGroupTrace{"Notify" + tg.GetName(), tg.GetDesc(), status});
+      return Status::OK();
+    }
+  };
+
+  TaskContext context;
+  context.task_observer = std::make_unique<TestTaskObserver>();
+  auto task_observer = dynamic_cast<TestTaskObserver*>(context.task_observer.get());
+
+  std::ignore = tg.OnBegin(context);
+  std::ignore = tg.NotifyFinish(context);
+  std::ignore = tg.OnEnd(context, TaskStatus::Cancelled());
+
+  ASSERT_EQ(task_observer->traces.size(), 4);
+  ASSERT_EQ(task_observer->traces[0],
+            (TaskGroupTrace{name, desc, Status::UnknownError("Begin")}));
+  ASSERT_EQ(task_observer->traces[1],
+            (TaskGroupTrace{"Notify" + name, desc, Status::UnknownError("NotifyBegin")}));
+  ASSERT_EQ(task_observer->traces[2],
+            (TaskGroupTrace{"Notify" + name, desc, Status::UnknownError("Notify")}));
+  ASSERT_EQ(task_observer->traces[3],
+            (TaskGroupTrace{name, desc, TaskStatus::Cancelled()}));
 }
