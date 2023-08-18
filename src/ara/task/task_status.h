@@ -16,8 +16,8 @@ struct TaskStatus {
   } code_;
   Backpressure backpressure_;
 
-  TaskStatus(Code code) : code_(code) {}
-  TaskStatus(Backpressure backpressure)
+  explicit TaskStatus(Code code) : code_(code) {}
+  explicit TaskStatus(Backpressure backpressure)
       : code_(Code::BACKPRESSURE), backpressure_(std::move(backpressure)) {}
 
  public:
@@ -31,6 +31,13 @@ struct TaskStatus {
     ARA_DCHECK(IsBackpressure());
     return backpressure_;
   }
+
+  const Backpressure& GetBackpressure() const {
+    ARA_DCHECK(IsBackpressure());
+    return backpressure_;
+  }
+
+  bool operator==(const TaskStatus& other) const { return code_ == other.code_; }
 
  public:
   static TaskStatus Continue() { return TaskStatus(Code::CONTINUE); }

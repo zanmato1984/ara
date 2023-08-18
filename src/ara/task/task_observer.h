@@ -1,23 +1,30 @@
 #pragma once
 
 #include <ara/task/defines.h>
-#include <ara/task/task.h>
 
 namespace ara::task {
+
+class Task;
+class Continuation;
 
 class TaskObserver {
  public:
   virtual ~TaskObserver() = default;
 
-  virtual Status OnTaskBegin(const Task&, const TaskContext&, TaskId) = 0;
-  virtual Status OnTaskEnd(const Task&, const TaskContext&, TaskId,
-                           const TaskResult&) = 0;
+  virtual Status OnTaskBegin(const Task&, const TaskContext&, TaskId) {
+    return Status::OK();
+  }
+  virtual Status OnTaskEnd(const Task&, const TaskContext&, TaskId, const TaskResult&) {
+    return Status::OK();
+  }
 
-  virtual Status OnContBegin(const Cont&, const TaskContext&) = 0;
-  virtual Status OnContEnd(const Cont&, const TaskContext&, const TaskResult&) = 0;
+  virtual Status OnContinuationBegin(const Continuation&, const TaskContext&) {
+    return Status::OK();
+  }
+  virtual Status OnContinuationEnd(const Continuation&, const TaskContext&,
+                                   const TaskResult&) {
+    return Status::OK();
+  }
 };
-
-// TODO: Some kind of context as factory parameter?
-using TaskObserverFactory = std::function<TaskObserver()>;
 
 }  // namespace ara::task

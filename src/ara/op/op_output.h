@@ -1,8 +1,11 @@
 #include <ara/common/batch.h>
+#include <ara/task/backpressure.h>
 
 namespace ara::op {
 
 namespace detail {
+
+using ara::task::Backpressure;
 
 template <typename BatchT>
 struct OpOutput {
@@ -17,10 +20,13 @@ struct OpOutput {
     FINISHED,
     CANCELLED,
   } code_;
-  std::optional<BatchT> batch_;
+  std::variant<Backpressure, std::optional<BatchT>> payload_;
 
-  OpOutput(Code code, std::optional<BatchT> batch = std::nullopt)
-      : code_(code), batch_(std::move(batch)) {}
+  explicit OpOutput(Code code, std::optional<BatchT> batch = std::nullopt)
+      : code_(code), payload_(std::move(batch)) {}
+
+  explicit OpOutput(Backpressure backpressure)
+      : code_(Code::SINK_BACKPRESSURE), payload_(std::move(backpressure)) {}
 
  public:
   bool IsSourceNotReady() { return code_ == Code::SOURCE_NOT_READY; }
@@ -34,8 +40,25 @@ struct OpOutput {
 
   std::optional<Batch>& GetBatch() {
     ARA_DCHECK(IsPipeEven() || IsSourcePipeHasMore() || IsFinished());
-    return batch_;
+    return std::get<std::optional<Batch>>(payload_);
   }
+
+  const std::optional<Batch>& GetBatch() const {
+    ARA_DCHECK(IsPipeEven() || IsSourcePipeHasMore() || IsFinished());
+    return std::get<std::optional<Batch>>(payload_);
+  }
+
+  Backpressure& GetBackpressure() {
+    ARA_DCHECK(IsSinkBackpressure());
+    return std::get<Backpressure>(payload_);
+  }
+
+  const Backpressure& GetBackpressure() const {
+    ARA_DCHECK(IsSinkBackpressure());
+    return std::get<Backpressure>(payload_);
+  }
+
+  bool operator==(const OpOutput& other) const { return code_ == other.code_; }
 
  public:
   static OpOutput SourceNotReady() { return OpOutput(Code::SOURCE_NOT_READY); }
@@ -46,7 +69,9 @@ struct OpOutput {
   static OpOutput SourcePipeHasMore(Batch batch) {
     return OpOutput{Code::SOURCE_PIPE_HAS_MORE, std::move(batch)};
   }
-  static OpOutput SinkBackpressure() { return OpOutput{Code::SINK_BACKPRESSURE}; }
+  static OpOutput SinkBackpressure(Backpressure backpressure) {
+    return OpOutput(std::move(backpressure));
+  }
   static OpOutput PipeYield() { return OpOutput{Code::PIPE_YIELD}; }
   static OpOutput Finished(std::optional<BatchT> batch = std::nullopt) {
     return OpOutput{Code::FINISHED, std::move(batch)};

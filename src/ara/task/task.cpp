@@ -1,22 +1,25 @@
-#include "ara/task/task.h"
-#include "ara/task/task_context.h"
-#include "ara/task/task_observer.h"
+#include "task.h"
 
 namespace ara::task {
 
-template <typename... Args>
-TaskResult detail::Task<Args...>::operator()(const TaskContext& context,
-                                             Args... args) const {
-  auto observer = context.task_observer.get();
-  if (observer != nullptr) {
-    ARA_RETURN_NOT_OK(observer->OnTaskBegin(*this, context, std::forward<Args>(args)...));
-  }
-  auto result = impl_(std::forward<Args>(args)...);
-  if (observer != nullptr) {
-    ARA_RETURN_NOT_OK(
-        observer->OnTaskEnd(*this, context, std::forward<Args>(args)..., result));
-  }
-  return result;
+Status Task::ObserverBegin(TaskObserver* observer, const TaskContext& context,
+                           TaskId task_id) const {
+  return observer->OnTaskBegin(*this, context, task_id);
+}
+
+Status Task::ObserverEnd(TaskObserver* observer, const TaskContext& context,
+                         TaskId task_id, const TaskResult& result) const {
+  return observer->OnTaskEnd(*this, context, task_id, result);
+}
+
+Status Continuation::ObserverBegin(TaskObserver* observer,
+                                   const TaskContext& context) const {
+  return observer->OnContinuationBegin(*this, context);
+}
+
+Status Continuation::ObserverEnd(TaskObserver* observer, const TaskContext& context,
+                                 const TaskResult& result) const {
+  return observer->OnContinuationEnd(*this, context, result);
 }
 
 }  // namespace ara::task

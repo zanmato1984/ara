@@ -5,11 +5,9 @@
 
 namespace ara::task {
 
-class TaskObserver;
-
 struct TaskContext {
   BackpressurePairFactory backpressure_pair_factory;
-  std::unique_ptr<TaskObserver> task_observer;
+  std::unique_ptr<TaskObserver> task_observer = nullptr;
 };
 
 };  // namespace ara::task
