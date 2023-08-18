@@ -6,6 +6,7 @@ namespace ara::task {
 
 class Task;
 class Continuation;
+class TaskGroup;
 
 class TaskObserver {
  public:
@@ -23,6 +24,21 @@ class TaskObserver {
   }
   virtual Status OnContinuationEnd(const Continuation&, const TaskContext&,
                                    const TaskResult&) {
+    return Status::OK();
+  }
+
+  virtual Status OnTaskGroupBegin(const TaskGroup&, const TaskContext&) {
+    return Status::OK();
+  }
+  virtual Status OnTaskGroupEnd(const TaskGroup&, const TaskContext&, const TaskResult&) {
+    return Status::OK();
+  }
+
+  virtual Status OnNotifyFinishBegin(const TaskGroup&, const TaskContext&) {
+    return Status::OK();
+  }
+  virtual Status OnNotifyFinishEnd(const TaskGroup&, const TaskContext&,
+                                   const Status&) {
     return Status::OK();
   }
 };

@@ -2,5 +2,8 @@ cmake_minimum_required(VERSION 3.21)
 
 set(CMAKE_CXX_STANDARD 20)
 
-add_ara_library(ara-schedule "foo.cpp")
-add_ara_internal_dependencies(ara-schedule ara-common)
+set(ARA_SCHEDULE_SRC "foo.cpp")
+add_ara_library(ara-schedule "${ARA_SCHEDULE_SRC}")
+
+set(ARA_SCHEDULE_DEPS "ara-common")
+add_ara_internal_dependencies(ara-schedule "${ARA_SCHEDULE_DEPS}")

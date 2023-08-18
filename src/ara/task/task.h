@@ -28,11 +28,14 @@ class InternalTask : public TaskMeta {
       ARA_RETURN_NOT_OK(
           impl().ObserverBegin(observer, context, std::forward<Args>(args)...));
     }
+
     auto result = f_(context, std::forward<Args>(args)...);
+
     if (observer != nullptr) {
       ARA_RETURN_NOT_OK(
           impl().ObserverEnd(observer, context, std::forward<Args>(args)..., result));
     }
+
     return result;
   }
 

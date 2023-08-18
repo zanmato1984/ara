@@ -1,5 +1,6 @@
 #include "op_output.h"
 
+#include <gtest/gtest.h>
 #include <iostream>
 
 using namespace ara::op;
