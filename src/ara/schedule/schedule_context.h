@@ -1,13 +1,14 @@
 #pragma once
 
 #include <ara/common/defines.h>
-#include <ara/schedule/schedule_observer.h>
 
 namespace ara::schedule {
 
+class ScheduleObserver;
+
 struct ScheduleContext {
   QueryId query_id;
-  std::unique_ptr<ScheduleObserver> schedule_observer = nullptr;
+  ScheduleObserver* schedule_observer = nullptr;
 };
 
 }  // namespace ara::schedule
