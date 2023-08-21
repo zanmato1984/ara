@@ -5,6 +5,7 @@
 
 namespace ara {
 
+using QueryId = size_t;
 using Status = arrow::Status;
 template <typename T>
 using Result = arrow::Result<T>;
