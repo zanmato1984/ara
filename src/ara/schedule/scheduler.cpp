@@ -1,5 +1,4 @@
 #include "scheduler.h"
-
 #include "schedule_context.h"
 #include "schedule_observer.h"
 
