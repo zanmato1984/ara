@@ -1,9 +1,9 @@
 #include "task.h"
-#include "ara/util/util.h"
 #include "task_group.h"
 #include "task_observer.h"
 #include "task_status.h"
 
+#include <ara/util/util.h>
 #include <gtest/gtest.h>
 
 using namespace ara;
