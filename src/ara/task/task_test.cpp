@@ -1,6 +1,7 @@
 #include "task.h"
 #include "ara/util/util.h"
 #include "task_group.h"
+#include "task_observer.h"
 #include "task_status.h"
 
 #include <gtest/gtest.h>
@@ -123,9 +124,9 @@ TEST(TaskTest, TaskObserver) {
     }
   };
 
+  TestTaskObserver task_observer;
   TaskContext context;
-  context.task_observer = std::make_unique<TestTaskObserver>();
-  auto task_observer = dynamic_cast<TestTaskObserver*>(context.task_observer.get());
+  context.task_observer = &task_observer;
 
   std::ignore = task_continue(context, 0);
   std::ignore = task_continue(context, 1);
@@ -136,23 +137,23 @@ TEST(TaskTest, TaskObserver) {
   std::ignore = cont_cancelled(context);
   std::ignore = cont_yield(context);
 
-  ASSERT_EQ(task_observer->traces.size(), 16);
-  ASSERT_EQ(task_observer->traces[0], task_continue_trace(0, false));
-  ASSERT_EQ(task_observer->traces[1], task_continue_trace(0, true));
-  ASSERT_EQ(task_observer->traces[2], task_continue_trace(1, false));
-  ASSERT_EQ(task_observer->traces[3], task_continue_trace(1, true));
-  ASSERT_EQ(task_observer->traces[4], task_finished_trace(0, false));
-  ASSERT_EQ(task_observer->traces[5], task_finished_trace(0, true));
-  ASSERT_EQ(task_observer->traces[6], task_backpressure_trace(1, false));
-  ASSERT_EQ(task_observer->traces[7], task_backpressure_trace(1, true));
-  ASSERT_EQ(task_observer->traces[8], task_backpressure_trace(0, false));
-  ASSERT_EQ(task_observer->traces[9], task_backpressure_trace(0, true));
-  ASSERT_EQ(task_observer->traces[10], task_finished_trace(1, false));
-  ASSERT_EQ(task_observer->traces[11], task_finished_trace(1, true));
-  ASSERT_EQ(task_observer->traces[12], cont_cancelled_trace(false));
-  ASSERT_EQ(task_observer->traces[13], cont_cancelled_trace(true));
-  ASSERT_EQ(task_observer->traces[14], cont_yield_trace(false));
-  ASSERT_EQ(task_observer->traces[15], cont_yield_trace(true));
+  ASSERT_EQ(task_observer.traces.size(), 16);
+  ASSERT_EQ(task_observer.traces[0], task_continue_trace(0, false));
+  ASSERT_EQ(task_observer.traces[1], task_continue_trace(0, true));
+  ASSERT_EQ(task_observer.traces[2], task_continue_trace(1, false));
+  ASSERT_EQ(task_observer.traces[3], task_continue_trace(1, true));
+  ASSERT_EQ(task_observer.traces[4], task_finished_trace(0, false));
+  ASSERT_EQ(task_observer.traces[5], task_finished_trace(0, true));
+  ASSERT_EQ(task_observer.traces[6], task_backpressure_trace(1, false));
+  ASSERT_EQ(task_observer.traces[7], task_backpressure_trace(1, true));
+  ASSERT_EQ(task_observer.traces[8], task_backpressure_trace(0, false));
+  ASSERT_EQ(task_observer.traces[9], task_backpressure_trace(0, true));
+  ASSERT_EQ(task_observer.traces[10], task_finished_trace(1, false));
+  ASSERT_EQ(task_observer.traces[11], task_finished_trace(1, true));
+  ASSERT_EQ(task_observer.traces[12], cont_cancelled_trace(false));
+  ASSERT_EQ(task_observer.traces[13], cont_cancelled_trace(true));
+  ASSERT_EQ(task_observer.traces[14], cont_yield_trace(false));
+  ASSERT_EQ(task_observer.traces[15], cont_yield_trace(true));
 }
 
 TEST(TaskTest, BasicTaskGroup) {
@@ -260,21 +261,21 @@ TEST(TaskTest, TaskGroupObserver) {
     }
   };
 
+  TestTaskObserver task_observer;
   TaskContext context;
-  context.task_observer = std::make_unique<TestTaskObserver>();
-  auto task_observer = dynamic_cast<TestTaskObserver*>(context.task_observer.get());
+  context.task_observer = &task_observer;
 
   std::ignore = tg.OnBegin(context);
   std::ignore = tg.NotifyFinish(context);
   std::ignore = tg.OnEnd(context, TaskStatus::Cancelled());
 
-  ASSERT_EQ(task_observer->traces.size(), 4);
-  ASSERT_EQ(task_observer->traces[0],
+  ASSERT_EQ(task_observer.traces.size(), 4);
+  ASSERT_EQ(task_observer.traces[0],
             (TaskGroupTrace{name, desc, Status::UnknownError("Begin")}));
-  ASSERT_EQ(task_observer->traces[1],
+  ASSERT_EQ(task_observer.traces[1],
             (TaskGroupTrace{"Notify" + name, desc, Status::UnknownError("NotifyBegin")}));
-  ASSERT_EQ(task_observer->traces[2],
+  ASSERT_EQ(task_observer.traces[2],
             (TaskGroupTrace{"Notify" + name, desc, Status::UnknownError("Notify")}));
-  ASSERT_EQ(task_observer->traces[3],
+  ASSERT_EQ(task_observer.traces[3],
             (TaskGroupTrace{name, desc, TaskStatus::Cancelled()}));
 }

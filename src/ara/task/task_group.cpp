@@ -1,5 +1,6 @@
 #include "task_group.h"
 #include "task_context.h"
+#include "task_observer.h"
 
 namespace ara::task {
 
