@@ -68,8 +68,6 @@ struct TaskTraits<ara::task::Continuation> {
 
 }  // namespace detail
 
-class TaskObserver;
-
 class Task : public detail::InternalTask<Task> {
  public:
   using detail::InternalTask<Task>::InternalTask;

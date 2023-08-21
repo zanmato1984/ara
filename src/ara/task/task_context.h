@@ -1,5 +1,6 @@
 #pragma once
 
+#include <ara/common/defines.h>
 #include <ara/task/backpressure.h>
 #include <ara/task/task_observer.h>
 
