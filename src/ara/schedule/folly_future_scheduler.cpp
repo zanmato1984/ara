@@ -41,10 +41,22 @@ Result<std::unique_ptr<TaskGroupHandle>> FollyFutureScheduler::DoSchedule(
                    }
                    return folly::collectAll(task_futures);
                  })
-                 .thenValue([&cont, &task_context](auto&& try_results) -> TaskResult {
-                   for (auto&& try_result : try_results) {
-                     ARA_DCHECK(try_result.hasValue());
-                     auto result = try_result.value();
+                 .thenValue([&schedule_context, &task_group, &cont,
+                             &task_context](auto&& try_results) -> TaskResult {
+                   std::vector<TaskResult> results(try_results.size());
+                   std::transform(try_results.begin(), try_results.end(), results.begin(),
+                                  [](auto&& try_result) -> TaskResult {
+                                    ARA_CHECK(try_result.hasValue());
+                                    return try_result.value();
+                                  });
+                   if (schedule_context.schedule_observer != nullptr) {
+                     auto status = schedule_context.schedule_observer->OnAllTasksFinished(
+                         schedule_context, task_group, results);
+                     if (!status.ok()) {
+                       return std::move(status);
+                     }
+                   }
+                   for (auto&& result : results) {
                      ARA_RETURN_NOT_OK(result);
                    }
                    if (cont.has_value()) {
@@ -89,6 +101,7 @@ FollyFutureScheduler::ConcreteTask FollyFutureScheduler::MakeTask(
             schedule_context, task, task_id);
         if (!status.ok()) {
           result = std::move(status);
+          return folly::makeFuture();
         }
       }
       auto backpressure = std::any_cast<std::shared_ptr<folly::Future<folly::Unit>>>(
@@ -99,6 +112,7 @@ FollyFutureScheduler::ConcreteTask FollyFutureScheduler::MakeTask(
               schedule_context, task, task_id);
           if (!status.ok()) {
             result = std::move(status);
+            return;
           }
         }
         result = TaskStatus::Continue();
@@ -111,10 +125,14 @@ FollyFutureScheduler::ConcreteTask FollyFutureScheduler::MakeTask(
                                                                       task, task_id);
         if (!status.ok()) {
           result = std::move(status);
+          return folly::makeFuture();
         }
       }
       return folly::via(io_executor_).then([&, task_id](auto&&) {
         result = task(context, task_id);
+        if (!result.ok()) {
+          return;
+        }
         if (schedule_context.schedule_observer != nullptr) {
           auto status = schedule_context.schedule_observer->OnTaskYieldBack(
               schedule_context, task, task_id);
@@ -143,16 +161,12 @@ FollyFutureScheduler::ConcreteTask FollyFutureScheduler::MakeTask(
 Result<BackpressureAndResetPair> FollyFutureScheduler::MakeBackpressureAndResetPair(
     const ScheduleContext& schedule_context, const TaskContext& task_context,
     const Task& task, TaskId task_id) const {
-  // TODO: Observe this function.
   auto [p, f] = folly::makePromiseContract<folly::Unit>(cpu_executor_);
   // Workaround that std::function must be copy-constructible.
   auto p_ptr = std::make_shared<folly::Promise<folly::Unit>>(std::move(p));
   auto f_ptr = std::make_shared<folly::Future<folly::Unit>>(std::move(f));
   auto callback = [&, p_ptr = std::move(p_ptr), task, task_id]() mutable {
     p_ptr->setValue();
-    //   if (observer_) {
-    //     observer_->AfterTaskBackpressure(task, task_id);
-    //   }
     return Status::OK();
   };
   return std::make_pair(std::any{std::move(f_ptr)}, std::move(callback));

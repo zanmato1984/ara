@@ -1,7 +1,7 @@
 #pragma once
 
 #include <ara/task/backpressure.h>
-#include <ara/util/util.h>
+#include <ara/util/defines.h>
 
 namespace ara::task {
 

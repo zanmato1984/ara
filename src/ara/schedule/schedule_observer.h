@@ -46,6 +46,7 @@ class ScheduleObserver {
                                          task::TaskId) {
     return Status::OK();
   }
+
   virtual Status OnTaskYield(const ScheduleContext&, const task::Task&, task::TaskId) {
     return Status::OK();
   }
@@ -54,7 +55,10 @@ class ScheduleObserver {
     return Status::OK();
   }
 
-  // TODO: On task all done.
+  virtual Status OnAllTasksFinished(const ScheduleContext&, const task::TaskGroup&,
+                                    const std::vector<task::TaskResult>&) {
+    return Status::OK();
+  }
 
  public:
   static std::unique_ptr<ScheduleObserver> Make(const QueryContext&);

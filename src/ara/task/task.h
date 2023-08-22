@@ -3,7 +3,7 @@
 #include <ara/task/defines.h>
 #include <ara/task/task_context.h>
 #include <ara/task/task_meta.h>
-#include <ara/util/util.h>
+#include <ara/util/defines.h>
 
 namespace ara::task {
 

@@ -6,6 +6,8 @@
 
 namespace ara::task {
 
+using util::TaskResultToString;
+
 class TaskLogger : public TaskObserver {
  public:
   Status OnTaskBegin(const Task& task, const TaskContext& context,
@@ -34,14 +36,6 @@ class TaskLogger : public TaskObserver {
     ARA_LOG(INFO) << "Continuation " << cont.Name() << "(" << cont.Desc() << ") "
                   << " end with " << TaskResultToString(result);
     return Status::OK();
-  }
-
- private:
-  std::string TaskResultToString(const TaskResult& result) {
-    if (!result.ok()) {
-      return result.status().ToString();
-    }
-    return result->ToString();
   }
 };
 
