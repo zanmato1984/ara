@@ -1,5 +1,6 @@
 #pragma once
 
+#include <ara/common/query_context.h>
 #include <ara/task/defines.h>
 
 namespace ara::task {
@@ -37,10 +38,12 @@ class TaskObserver {
   virtual Status OnNotifyFinishBegin(const TaskGroup&, const TaskContext&) {
     return Status::OK();
   }
-  virtual Status OnNotifyFinishEnd(const TaskGroup&, const TaskContext&,
-                                   const Status&) {
+  virtual Status OnNotifyFinishEnd(const TaskGroup&, const TaskContext&, const Status&) {
     return Status::OK();
   }
+
+ public:
+  static std::unique_ptr<TaskObserver> Make(const QueryContext&);
 };
 
 }  // namespace ara::task

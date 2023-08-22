@@ -1,6 +1,8 @@
 #pragma once
 
 #include <ara/common/defines.h>
+#include <ara/common/query_context.h>
+#include <ara/task/defines.h>
 
 namespace ara {
 
@@ -32,9 +34,30 @@ class ScheduleObserver {
     return Status::OK();
   }
   virtual Status OnWaitTaskGroupEnd(const TaskGroupHandle&, const ScheduleContext&,
-                                    const Status&) {
+                                    const task::TaskResult&) {
     return Status::OK();
   }
+
+  virtual Status OnTaskBackpressure(const ScheduleContext&, const task::Task&,
+                                    task::TaskId) {
+    return Status::OK();
+  }
+  virtual Status OnTaskBackpressureReset(const ScheduleContext&, const task::Task&,
+                                         task::TaskId) {
+    return Status::OK();
+  }
+  virtual Status OnTaskYield(const ScheduleContext&, const task::Task&, task::TaskId) {
+    return Status::OK();
+  }
+  virtual Status OnTaskYieldBack(const ScheduleContext&, const task::Task&,
+                                 task::TaskId) {
+    return Status::OK();
+  }
+
+  // TODO: On task all done.
+
+ public:
+  static std::unique_ptr<ScheduleObserver> Make(const QueryContext&);
 };
 
 }  // namespace schedule

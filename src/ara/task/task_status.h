@@ -17,8 +17,6 @@ struct TaskStatus {
   Backpressure backpressure_;
 
   explicit TaskStatus(Code code) : code_(code) {}
-  explicit TaskStatus(Backpressure backpressure)
-      : code_(Code::BACKPRESSURE), backpressure_(std::move(backpressure)) {}
 
  public:
   bool IsContinue() const { return code_ == Code::CONTINUE; }
@@ -39,10 +37,27 @@ struct TaskStatus {
 
   bool operator==(const TaskStatus& other) const { return code_ == other.code_; }
 
+  std::string ToString() const {
+    switch (code_) {
+      case Code::CONTINUE:
+        return "CONTINUE";
+      case Code::BACKPRESSURE:
+        return "BACKPRESSURE";
+      case Code::YIELD:
+        return "YIELD";
+      case Code::FINISHED:
+        return "FINISHED";
+      case Code::CANCELLED:
+        return "CANCELLED";
+    }
+  }
+
  public:
   static TaskStatus Continue() { return TaskStatus(Code::CONTINUE); }
   static TaskStatus Backpressure(Backpressure backpressure) {
-    return TaskStatus(std::move(backpressure));
+    auto status = TaskStatus(Code::BACKPRESSURE);
+    status.backpressure_ = std::move(backpressure);
+    return status;
   }
   static TaskStatus Yield() { return TaskStatus{Code::YIELD}; }
   static TaskStatus Finished() { return TaskStatus{Code::FINISHED}; }

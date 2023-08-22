@@ -9,9 +9,9 @@ class TaskMeta {
   TaskMeta(std::string name, std::string desc)
       : name_(std::move(name)), desc_(std::move(desc)) {}
 
-  std::string GetName() const { return name_; }
+  const std::string& Name() const { return name_; }
 
-  std::string GetDesc() const { return desc_; }
+  const std::string& Desc() const { return desc_; }
 
  private:
   std::string name_;

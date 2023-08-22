@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 set(CMAKE_CXX_STANDARD 20)
 
-set(ARA_TASK_SRC "task.cpp" "task_group.cpp")
+set(ARA_TASK_SRC "task.cpp" "task_group.cpp" "task_observer.cpp")
 add_ara_library(ara-task "${ARA_TASK_SRC}")
 
 set(ARA_TASK_DEPS "ara-common" "ara-util")

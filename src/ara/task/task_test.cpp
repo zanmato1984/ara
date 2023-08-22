@@ -97,36 +97,34 @@ TEST(TaskTest, TaskObserver) {
     std::vector<TaskTrace> traces;
 
     Status OnTaskBegin(const Task& task, const TaskContext&, TaskId task_id) override {
-      traces.emplace_back(
-          TaskTrace{task.GetName(), task.GetDesc(), task_id, std::nullopt});
+      traces.emplace_back(TaskTrace{task.Name(), task.Desc(), task_id, std::nullopt});
       return Status::OK();
     }
 
     Status OnTaskEnd(const Task& task, const TaskContext&, TaskId task_id,
                      const TaskResult& result) override {
       ARA_DCHECK(result.ok());
-      traces.emplace_back(TaskTrace{task.GetName(), task.GetDesc(), task_id, *result});
+      traces.emplace_back(TaskTrace{task.Name(), task.Desc(), task_id, *result});
       return Status::OK();
     }
 
     Status OnContinuationBegin(const Continuation& cont, const TaskContext&) override {
       traces.emplace_back(
-          TaskTrace{cont.GetName(), cont.GetDesc(), std::nullopt, std::nullopt});
+          TaskTrace{cont.Name(), cont.Desc(), std::nullopt, std::nullopt});
       return Status::OK();
     }
 
     Status OnContinuationEnd(const Continuation& cont, const TaskContext&,
                              const TaskResult& result) override {
       ARA_DCHECK(result.ok());
-      traces.emplace_back(
-          TaskTrace{cont.GetName(), cont.GetDesc(), std::nullopt, *result});
+      traces.emplace_back(TaskTrace{cont.Name(), cont.Desc(), std::nullopt, *result});
       return Status::OK();
     }
   };
 
-  TestTaskObserver task_observer;
   TaskContext context;
-  context.task_observer = &task_observer;
+  context.task_observer = std::make_unique<TestTaskObserver>();
+  auto& task_observer = *dynamic_cast<TestTaskObserver*>(context.task_observer.get());
 
   std::ignore = task_continue(context, 0);
   std::ignore = task_continue(context, 1);
@@ -238,32 +236,32 @@ TEST(TaskTest, TaskGroupObserver) {
 
     Status OnTaskGroupBegin(const TaskGroup& tg, const TaskContext& context) {
       traces.emplace_back(
-          TaskGroupTrace{tg.GetName(), tg.GetDesc(), Status::UnknownError("Begin")});
+          TaskGroupTrace{tg.Name(), tg.Desc(), Status::UnknownError("Begin")});
       return Status::OK();
     }
 
     Status OnTaskGroupEnd(const TaskGroup& tg, const TaskContext& context,
                           const TaskResult& result) {
-      traces.emplace_back(TaskGroupTrace{tg.GetName(), tg.GetDesc(), result});
+      traces.emplace_back(TaskGroupTrace{tg.Name(), tg.Desc(), result});
       return Status::OK();
     }
 
     Status OnNotifyFinishBegin(const TaskGroup& tg, const TaskContext& context) {
-      traces.emplace_back(TaskGroupTrace{"Notify" + tg.GetName(), tg.GetDesc(),
+      traces.emplace_back(TaskGroupTrace{"Notify" + tg.Name(), tg.Desc(),
                                          Status::UnknownError("NotifyBegin")});
       return Status::OK();
     }
 
     Status OnNotifyFinishEnd(const TaskGroup& tg, const TaskContext& context,
                              const Status& status) {
-      traces.emplace_back(TaskGroupTrace{"Notify" + tg.GetName(), tg.GetDesc(), status});
+      traces.emplace_back(TaskGroupTrace{"Notify" + tg.Name(), tg.Desc(), status});
       return Status::OK();
     }
   };
 
-  TestTaskObserver task_observer;
   TaskContext context;
-  context.task_observer = &task_observer;
+  context.task_observer = std::make_unique<TestTaskObserver>();
+  auto& task_observer = *dynamic_cast<TestTaskObserver*>(context.task_observer.get());
 
   std::ignore = tg.OnBegin(context);
   std::ignore = tg.NotifyFinish(context);

@@ -2,13 +2,15 @@
 #include "schedule_context.h"
 #include "schedule_observer.h"
 
+#include <ara/task/task_status.h>
 #include <ara/util/util.h>
 
 namespace ara::schedule {
 
 using task::TaskGroup;
+using task::TaskResult;
 
-Status TaskGroupHandle::Wait(const ScheduleContext& context) {
+TaskResult TaskGroupHandle::Wait(const ScheduleContext& context) {
   if (context.schedule_observer != nullptr) {
     ARA_RETURN_NOT_OK(context.schedule_observer->OnWaitTaskGroupBegin(*this, context));
   }
@@ -33,5 +35,7 @@ Result<std::unique_ptr<TaskGroupHandle>> Scheduler::Schedule(
   }
   return result;
 }
+
+std::unique_ptr<Scheduler> Scheduler::Make(const QueryContext&) { return nullptr; }
 
 }  // namespace ara::schedule

@@ -23,7 +23,7 @@ class InternalTask : public TaskMeta {
 
   template <typename... Args>
   ReturnType operator()(const TaskContext& context, Args... args) const {
-    auto observer = context.task_observer;
+    auto observer = context.task_observer.get();
     if (observer != nullptr) {
       ARA_RETURN_NOT_OK(
           impl().ObserverBegin(observer, context, std::forward<Args>(args)...));
