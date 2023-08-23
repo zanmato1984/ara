@@ -77,8 +77,12 @@ class ScheduleLogger : public ScheduleObserver {
   }
 };
 
-std::unique_ptr<ScheduleObserver> ScheduleObserver::Make(const QueryContext&) {
-  return std::make_unique<ScheduleLogger>();
+std::unique_ptr<ChainedObserver<ScheduleObserver>> ScheduleObserver::Make(const QueryContext&) {
+  auto logger = std::make_unique<ScheduleLogger>();
+  std::vector<std::unique_ptr<ScheduleObserver>> observers;
+  observers.push_back(std::move(logger));
+  // return std::make_unique<ChainedObserver<ScheduleObserver>>(std::vector<std::unique_ptr<ScheduleObserver>>{std::move(logger)});
+  return std::make_unique<ChainedObserver<ScheduleObserver>>(std::move(observers));
 }
 
 }  // namespace ara::schedule

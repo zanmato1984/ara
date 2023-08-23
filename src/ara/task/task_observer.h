@@ -1,5 +1,6 @@
 #pragma once
 
+#include <ara/common/observer.h>
 #include <ara/common/query_context.h>
 #include <ara/task/defines.h>
 
@@ -9,7 +10,7 @@ class Task;
 class Continuation;
 class TaskGroup;
 
-class TaskObserver {
+class TaskObserver : public Observer {
  public:
   virtual ~TaskObserver() = default;
 
@@ -43,7 +44,7 @@ class TaskObserver {
   }
 
  public:
-  static std::unique_ptr<TaskObserver> Make(const QueryContext&);
+  static std::unique_ptr<ChainedObserver<TaskObserver>> Make(const QueryContext&);
 };
 
 }  // namespace ara::task

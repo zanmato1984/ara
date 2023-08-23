@@ -48,8 +48,9 @@ Result<std::unique_ptr<TaskGroupHandle>> AsyncDoublePoolScheduler::DoSchedule(
                                     return try_result.value();
                                   });
                    if (schedule_context.schedule_observer != nullptr) {
-                     auto status = schedule_context.schedule_observer->OnAllTasksFinished(
-                         schedule_context, task_group, results);
+                     auto status = schedule_context.schedule_observer->Observe(
+                         &ScheduleObserver::OnAllTasksFinished, schedule_context,
+                         task_group, results);
                      if (!status.ok()) {
                        return std::move(status);
                      }
@@ -83,8 +84,8 @@ AsyncDoublePoolScheduler::ConcreteTask AsyncDoublePoolScheduler::MakeTask(
   auto thunk = [&, task_id]() {
     if (result->IsBackpressure()) {
       if (schedule_context.schedule_observer != nullptr) {
-        auto status = schedule_context.schedule_observer->OnTaskBackpressure(
-            schedule_context, task, task_id);
+        auto status = schedule_context.schedule_observer->Observe(
+            &ScheduleObserver::OnTaskBackpressure, schedule_context, task, task_id);
         if (!status.ok()) {
           result = std::move(status);
           return folly::makeFuture();
@@ -94,8 +95,9 @@ AsyncDoublePoolScheduler::ConcreteTask AsyncDoublePoolScheduler::MakeTask(
           std::move(result->GetBackpressure()));
       return std::move(*backpressure).thenValue([&, task_id](auto&&) {
         if (schedule_context.schedule_observer != nullptr) {
-          auto status = schedule_context.schedule_observer->OnTaskBackpressureReset(
-              schedule_context, task, task_id);
+          auto status = schedule_context.schedule_observer->Observe(
+              &ScheduleObserver::OnTaskBackpressureReset, schedule_context, task,
+              task_id);
           if (!status.ok()) {
             result = std::move(status);
             return;
@@ -107,8 +109,8 @@ AsyncDoublePoolScheduler::ConcreteTask AsyncDoublePoolScheduler::MakeTask(
 
     if (result->IsYield()) {
       if (schedule_context.schedule_observer != nullptr) {
-        auto status = schedule_context.schedule_observer->OnTaskYield(schedule_context,
-                                                                      task, task_id);
+        auto status = schedule_context.schedule_observer->Observe(
+            &ScheduleObserver::OnTaskYield, schedule_context, task, task_id);
         if (!status.ok()) {
           result = std::move(status);
           return folly::makeFuture();
@@ -120,8 +122,8 @@ AsyncDoublePoolScheduler::ConcreteTask AsyncDoublePoolScheduler::MakeTask(
           return;
         }
         if (schedule_context.schedule_observer != nullptr) {
-          auto status = schedule_context.schedule_observer->OnTaskYieldBack(
-              schedule_context, task, task_id);
+          auto status = schedule_context.schedule_observer->Observe(
+              &ScheduleObserver::OnTaskYieldBack, schedule_context, task, task_id);
           if (!status.ok()) {
             result = std::move(status);
           }

@@ -1,7 +1,8 @@
-#include "ara/common/foo.h"
-#include "ara/op/op_output.h"
-#include "ara/task/task.h"
-#include "ara/task/task_status.h"
+#include "op_output.h"
+
+#include <ara/common/foo.h>
+#include <ara/task/task.h>
+#include <ara/task/task_status.h>
 
 namespace ara::op {
 

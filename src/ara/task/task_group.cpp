@@ -9,7 +9,7 @@ Status TaskGroup::OnBegin(const TaskContext& context) {
     return Status::OK();
   }
 
-  return context.task_observer->OnTaskGroupBegin(*this, context);
+  return context.task_observer->Observe(&TaskObserver::OnTaskGroupBegin, *this, context);
 }
 
 Status TaskGroup::OnEnd(const TaskContext& context, const TaskResult& result) {
@@ -17,7 +17,8 @@ Status TaskGroup::OnEnd(const TaskContext& context, const TaskResult& result) {
     return Status::OK();
   }
 
-  return context.task_observer->OnTaskGroupEnd(*this, context, result);
+  return context.task_observer->Observe(&TaskObserver::OnTaskGroupEnd, *this, context,
+                                        result);
 }
 
 Status TaskGroup::NotifyFinish(const TaskContext& context) {
@@ -26,13 +27,15 @@ Status TaskGroup::NotifyFinish(const TaskContext& context) {
   }
 
   if (context.task_observer != nullptr) {
-    ARA_RETURN_NOT_OK(context.task_observer->OnNotifyFinishBegin(*this, context));
+    ARA_RETURN_NOT_OK(context.task_observer->Observe(&TaskObserver::OnNotifyFinishBegin,
+                                                     *this, context));
   }
 
   auto status = notify_.value()(context);
 
   if (context.task_observer != nullptr) {
-    ARA_RETURN_NOT_OK(context.task_observer->OnNotifyFinishEnd(*this, context, status));
+    ARA_RETURN_NOT_OK(context.task_observer->Observe(&TaskObserver::OnNotifyFinishEnd,
+                                                     *this, context, status));
   }
 
   return status;

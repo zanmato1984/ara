@@ -3,7 +3,9 @@
 #include "task_observer.h"
 #include "task_status.h"
 
+#include <ara/common/observer.h>
 #include <ara/util/util.h>
+
 #include <gtest/gtest.h>
 
 using namespace ara;
@@ -43,6 +45,18 @@ struct TaskTrace {
 bool operator==(const TaskTrace& t1, const TaskTrace& t2) {
   return t1.name == t2.name && t1.desc == t2.desc && t1.id == t2.id &&
          t1.status == t2.status;
+}
+
+template <typename TestTaskObserver>
+std::pair<std::unique_ptr<ChainedObserver<TaskObserver>>, TestTaskObserver&>
+MakeTestTaskObserver() {
+  auto task_observer_ptr = std::make_unique<TestTaskObserver>();
+  auto& task_observer = *dynamic_cast<TestTaskObserver*>(task_observer_ptr.get());
+  std::vector<std::unique_ptr<TaskObserver>> observers;
+  observers.push_back(std::move(task_observer_ptr));
+  auto chained_observer =
+      std::make_unique<ChainedObserver<TaskObserver>>(std::move(observers));
+  return {std::move(chained_observer), task_observer};
 }
 
 TEST(TaskTest, TaskObserver) {
@@ -123,8 +137,8 @@ TEST(TaskTest, TaskObserver) {
   };
 
   TaskContext context;
-  context.task_observer = std::make_unique<TestTaskObserver>();
-  auto& task_observer = *dynamic_cast<TestTaskObserver*>(context.task_observer.get());
+  auto [chained_observer, task_observer] = MakeTestTaskObserver<TestTaskObserver>();
+  context.task_observer = std::move(chained_observer);
 
   std::ignore = task_continue(context, 0);
   std::ignore = task_continue(context, 1);
@@ -260,8 +274,8 @@ TEST(TaskTest, TaskGroupObserver) {
   };
 
   TaskContext context;
-  context.task_observer = std::make_unique<TestTaskObserver>();
-  auto& task_observer = *dynamic_cast<TestTaskObserver*>(context.task_observer.get());
+  auto [chained_observer, task_observer] = MakeTestTaskObserver<TestTaskObserver>();
+  context.task_observer = std::move(chained_observer);
 
   std::ignore = tg.OnBegin(context);
   std::ignore = tg.NotifyFinish(context);

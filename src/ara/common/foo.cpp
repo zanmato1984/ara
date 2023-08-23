@@ -1,5 +1,5 @@
-#include "ara/common/foo.h"
-#include "ara/common/batch.h"
+#include "foo.h"
+#include "batch.h"
 
 namespace ara {
 

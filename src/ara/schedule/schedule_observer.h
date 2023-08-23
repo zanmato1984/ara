@@ -2,6 +2,7 @@
 
 #include <ara/common/defines.h>
 #include <ara/common/query_context.h>
+#include <ara/common/observer.h>
 #include <ara/task/defines.h>
 
 namespace ara {
@@ -16,7 +17,7 @@ class ScheduleContext;
 class TaskGroupHandle;
 class Scheduler;
 
-class ScheduleObserver {
+class ScheduleObserver : public Observer {
  public:
   virtual ~ScheduleObserver() = default;
 
@@ -61,7 +62,7 @@ class ScheduleObserver {
   }
 
  public:
-  static std::unique_ptr<ScheduleObserver> Make(const QueryContext&);
+  static std::unique_ptr<ChainedObserver<ScheduleObserver>> Make(const QueryContext&);
 };
 
 }  // namespace schedule

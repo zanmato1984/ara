@@ -39,8 +39,13 @@ class TaskLogger : public TaskObserver {
   }
 };
 
-std::unique_ptr<TaskObserver> TaskObserver::Make(const QueryContext&) {
-  return std::make_unique<TaskLogger>();
+std::unique_ptr<ChainedObserver<TaskObserver>> TaskObserver::Make(const QueryContext&) {
+  auto logger = std::make_unique<TaskLogger>();
+  std::vector<std::unique_ptr<TaskObserver>> observers;
+  observers.push_back(std::move(logger));
+  // return
+  // std::make_unique<ChainedObserver<TaskObserver>>(std::vector<std::unique_ptr<TaskObserver>>{std::move(logger)});
+  return std::make_unique<ChainedObserver<TaskObserver>>(std::move(observers));
 }
 
 }  // namespace ara::task
