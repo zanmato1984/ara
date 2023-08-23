@@ -1,7 +1,6 @@
 #pragma once
 
 #include <ara/schedule/scheduler.h>
-#include <ara/task/backpressure.h>
 #include <ara/task/defines.h>
 #include <ara/task/task_context.h>
 #include <ara/task/task_status.h>
@@ -14,26 +13,26 @@ namespace ara::schedule {
 namespace detail {
 
 using task::BackpressureAndResetPair;
+using task::BackpressurePairFactory;
 using task::Task;
 using task::TaskContext;
 using task::TaskGroup;
 using task::TaskId;
-using task::TaskObserver;
 using task::TaskResult;
 using task::TaskStatus;
 
 using Promise = folly::Promise<folly::Unit>;
 using Future = folly::Future<task::TaskResult>;
 
-class FollyFutureHandle : public TaskGroupHandle {
+class AsyncHandle : public TaskGroupHandle {
  private:
+  static const std::string kName;
+
   using MakeFuture = std::function<Future(const TaskContext&, std::vector<TaskResult>&)>;
 
  public:
-  static const std::string kName;
-
-  FollyFutureHandle(std::string name, std::string desc, TaskContext task_context,
-                    std::vector<TaskResult> results, MakeFuture make_future)
+  AsyncHandle(std::string name, std::string desc, TaskContext task_context,
+              std::vector<TaskResult> results, MakeFuture make_future)
       : TaskGroupHandle(kName + "(" + std::move(name) + ")",
                         kName + ")" + std::move(desc) + ")"),
         task_context_(std::move(task_context)),
@@ -49,12 +48,12 @@ class FollyFutureHandle : public TaskGroupHandle {
   Future future_;
 };
 
-class FollyFutureScheduler : public Scheduler {
+class AsyncDoublePoolScheduler : public Scheduler {
  public:
   static const std::string kName;
 
-  FollyFutureScheduler(folly::CPUThreadPoolExecutor* cpu_executor,
-                       folly::IOThreadPoolExecutor* io_executor)
+  AsyncDoublePoolScheduler(folly::CPUThreadPoolExecutor* cpu_executor,
+                           folly::IOThreadPoolExecutor* io_executor)
       : Scheduler(kName), cpu_executor_(cpu_executor), io_executor_(io_executor) {}
 
  protected:
@@ -62,12 +61,13 @@ class FollyFutureScheduler : public Scheduler {
                                                       const TaskGroup&) override;
 
  private:
-  TaskContext MakeTaskContext(const ScheduleContext&) const;
-
   using ConcreteTask = std::pair<folly::Promise<folly::Unit>, folly::Future<TaskResult>>;
 
   ConcreteTask MakeTask(const ScheduleContext&, const Task&, const TaskContext&, TaskId,
                         TaskResult&) const;
+
+  std::optional<BackpressurePairFactory> MakeBackpressurePairFactory(
+      const ScheduleContext&) const override;
 
   Result<BackpressureAndResetPair> MakeBackpressureAndResetPair(const ScheduleContext&,
                                                                 const TaskContext&,
@@ -81,7 +81,7 @@ class FollyFutureScheduler : public Scheduler {
 
 }  // namespace detail
 
-using FollyFutureHandle = detail::FollyFutureHandle;
-using FollyFutureScheduler = detail::FollyFutureScheduler;
+using AsyncHandle = detail::AsyncHandle;
+using AsyncDoublePoolScheduler = detail::AsyncDoublePoolScheduler;
 
 }  // namespace ara::schedule

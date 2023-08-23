@@ -1,4 +1,4 @@
-#include "folly_future_scheduler.h"
+#include "async_double_pool_scheduler.h"
 #include "schedule_context.h"
 #include "schedule_observer.h"
 
@@ -8,15 +8,13 @@
 
 namespace ara::schedule::detail {
 
-const std::string FollyFutureHandle::kName = "FollyFutureHandle";
+const std::string AsyncHandle::kName = "AsyncHandle";
 
-TaskResult FollyFutureHandle::DoWait(const ScheduleContext&) {
-  return future_.wait().value();
-}
+TaskResult AsyncHandle::DoWait(const ScheduleContext&) { return future_.wait().value(); }
 
-const std::string FollyFutureScheduler::kName = "FollyFutureScheduler";
+const std::string AsyncDoublePoolScheduler::kName = "AsyncDoublePoolScheduler";
 
-Result<std::unique_ptr<TaskGroupHandle>> FollyFutureScheduler::DoSchedule(
+Result<std::unique_ptr<TaskGroupHandle>> AsyncDoublePoolScheduler::DoSchedule(
     const ScheduleContext& schedule_context, const TaskGroup& task_group) {
   auto& task = task_group.GetTask();
   auto num_tasks = task_group.NumTasks();
@@ -70,24 +68,12 @@ Result<std::unique_ptr<TaskGroupHandle>> FollyFutureScheduler::DoSchedule(
   TaskContext task_context = MakeTaskContext(schedule_context);
   std::vector<TaskResult> results(num_tasks);
 
-  return std::make_unique<FollyFutureHandle>(task_group.Name(), task_group.Desc(),
-                                             std::move(task_context), std::move(results),
-                                             std::move(make_future));
+  return std::make_unique<AsyncHandle>(task_group.Name(), task_group.Desc(),
+                                       std::move(task_context), std::move(results),
+                                       std::move(make_future));
 }
 
-TaskContext FollyFutureScheduler::MakeTaskContext(
-    const ScheduleContext& schedule_context) const {
-  auto task_observer = TaskObserver::Make(*schedule_context.query_context);
-  return {schedule_context.query_context, schedule_context.query_id,
-          [&](const TaskContext& task_context, const Task& task,
-              TaskId task_id) -> Result<BackpressureAndResetPair> {
-            return MakeBackpressureAndResetPair(schedule_context, task_context, task,
-                                                task_id);
-          },
-          std::move(task_observer)};
-}
-
-FollyFutureScheduler::ConcreteTask FollyFutureScheduler::MakeTask(
+AsyncDoublePoolScheduler::ConcreteTask AsyncDoublePoolScheduler::MakeTask(
     const ScheduleContext& schedule_context, const Task& task, const TaskContext& context,
     TaskId task_id, TaskResult& result) const {
   auto [p, f] = folly::makePromiseContract<folly::Unit>(cpu_executor_);
@@ -158,7 +144,15 @@ FollyFutureScheduler::ConcreteTask FollyFutureScheduler::MakeTask(
   return {std::move(p), std::move(task_f)};
 }
 
-Result<BackpressureAndResetPair> FollyFutureScheduler::MakeBackpressureAndResetPair(
+std::optional<BackpressurePairFactory>
+AsyncDoublePoolScheduler::MakeBackpressurePairFactory(
+    const ScheduleContext& schedule_context) const {
+  return [&](const TaskContext& task_context, const Task& task, TaskId task_id) {
+    return MakeBackpressureAndResetPair(schedule_context, task_context, task, task_id);
+  };
+}
+
+Result<BackpressureAndResetPair> AsyncDoublePoolScheduler::MakeBackpressureAndResetPair(
     const ScheduleContext& schedule_context, const TaskContext& task_context,
     const Task& task, TaskId task_id) const {
   auto [p, f] = folly::makePromiseContract<folly::Unit>(cpu_executor_);

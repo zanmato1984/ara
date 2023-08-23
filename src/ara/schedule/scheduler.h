@@ -2,6 +2,7 @@
 
 #include <ara/common/defines.h>
 #include <ara/common/query_context.h>
+#include <ara/task/backpressure.h>
 #include <ara/task/defines.h>
 
 #include <memory>
@@ -51,6 +52,11 @@ class Scheduler {
  protected:
   virtual Result<std::unique_ptr<TaskGroupHandle>> DoSchedule(const ScheduleContext&,
                                                               const task::TaskGroup&) = 0;
+
+  task::TaskContext MakeTaskContext(const ScheduleContext&) const;
+
+  virtual std::optional<task::BackpressurePairFactory> MakeBackpressurePairFactory(
+      const ScheduleContext&) const = 0;
 
  private:
   std::string name_;

@@ -1,5 +1,5 @@
 #include "scheduler.h"
-#include "folly_future_scheduler.h"
+#include "async_double_pool_scheduler.h"
 
 #include <ara/task/defines.h>
 #include <ara/task/task_status.h>

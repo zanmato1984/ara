@@ -2,12 +2,18 @@
 #include "schedule_context.h"
 #include "schedule_observer.h"
 
+#include <ara/task/task_context.h>
 #include <ara/task/task_status.h>
 #include <ara/util/util.h>
 
 namespace ara::schedule {
 
+using task::BackpressureAndResetPair;
+using task::Task;
+using task::TaskContext;
 using task::TaskGroup;
+using task::TaskId;
+using task::TaskObserver;
 using task::TaskResult;
 
 TaskResult TaskGroupHandle::Wait(const ScheduleContext& context) {
@@ -34,6 +40,13 @@ Result<std::unique_ptr<TaskGroupHandle>> Scheduler::Schedule(
         context.schedule_observer->OnScheduleTaskGroupEnd(*this, context, tg, result));
   }
   return result;
+}
+
+TaskContext Scheduler::MakeTaskContext(const ScheduleContext& schedule_context) const {
+  auto task_observer = TaskObserver::Make(*schedule_context.query_context);
+  auto backpressure_factory = MakeBackpressurePairFactory(schedule_context);
+  return {schedule_context.query_context, schedule_context.query_id,
+          std::move(backpressure_factory), std::move(task_observer)};
 }
 
 std::unique_ptr<Scheduler> Scheduler::Make(const QueryContext&) { return nullptr; }
