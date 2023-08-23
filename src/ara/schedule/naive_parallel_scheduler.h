@@ -11,7 +11,8 @@ class NaiveParallelHandle : public TaskGroupHandle {
  private:
   static const std::string kName;
 
-  using MakeFuture = std::function<std::future<task::TaskResult>(const task::TaskContext&)>;
+  using MakeFuture =
+      std::function<std::future<task::TaskResult>(const task::TaskContext&)>;
 
  public:
   NaiveParallelHandle(std::string name, std::string desc, task::TaskContext task_context,
@@ -39,11 +40,8 @@ class NaiveParallelScheduler : public Scheduler {
   Result<std::unique_ptr<TaskGroupHandle>> DoSchedule(const ScheduleContext&,
                                                       const task::TaskGroup&) override;
 
-  // TODO: May use condition variable to implement backpressure.
   std::optional<task::BackpressurePairFactory> MakeBackpressurePairFactory(
-      const ScheduleContext&) const override {
-    return std::nullopt;
-  }
+      const ScheduleContext&) const override;
 
  private:
   using ConcreteTask = std::future<task::TaskResult>;

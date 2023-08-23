@@ -6,6 +6,7 @@
 
 namespace ara::schedule {
 
+using task::BackpressureAndResetPair;
 using task::Task;
 using task::TaskContext;
 using task::TaskGroup;
@@ -51,12 +52,45 @@ Result<std::unique_ptr<TaskGroupHandle>> NaiveParallelScheduler::DoSchedule(
                                                std::move(make_future));
 }
 
+namespace detail {
+struct BackpressureImpl {
+  std::mutex mutex;
+  std::condition_variable cv;
+  bool ready = false;
+};
+}  // namespace detail
+
+std::optional<task::BackpressurePairFactory>
+NaiveParallelScheduler::MakeBackpressurePairFactory(const ScheduleContext&) const {
+  return
+      [&](const TaskContext&, const Task&, TaskId) -> Result<BackpressureAndResetPair> {
+        auto impl = std::make_shared<detail::BackpressureImpl>();
+        auto callback = [impl]() {
+          std::unique_lock<std::mutex> lock(impl->mutex);
+          impl->ready = true;
+          impl->cv.notify_one();
+          return Status::OK();
+        };
+        return std::make_pair(std::any{std::move(impl)}, std::move(callback));
+      };
+}
+
 NaiveParallelScheduler::ConcreteTask NaiveParallelScheduler::MakeTask(
     const ScheduleContext&, const Task& task, const TaskContext& task_context,
     TaskId task_id) const {
   return std::async(std::launch::async, [&task, &task_context, task_id]() {
     TaskResult result = TaskStatus::Continue();
     while (result.ok() && !result->IsFinished() && !result->IsCancelled()) {
+      if (result->IsYield()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      } else if (result->IsBackpressure()) {
+        auto backpressure = std::any_cast<std::shared_ptr<detail::BackpressureImpl>>(
+            std::move(result->GetBackpressure()));
+        std::unique_lock<std::mutex> lock(backpressure->mutex);
+        while (!backpressure->ready) {
+          backpressure->cv.wait(lock);
+        }
+      }
       auto result = task(task_context, task_id);
     }
     return result;
