@@ -13,6 +13,17 @@ using namespace ara;
 using namespace ara::task;
 using namespace ara::schedule;
 
+TaskResult ScheduleTask(const ScheduleContext& schedule_context, Scheduler& scheduler,
+                        Task task, size_t num_tasks, std::optional<Continuation> cont,
+                        std::optional<TaskGroup::NotifyFinishFunc> notify_finish) {
+  TaskGroup task_group("", "", std::move(task), num_tasks, std::move(cont),
+                       std::move(notify_finish));
+  auto handle = scheduler.Schedule(schedule_context, task_group);
+  ARA_RETURN_NOT_OK(handle);
+  // TODO: Wait should do the NotifyFinish call.
+  return = (*handle)->Wait(schedule_context);
+}
+
 TEST(ScheduleTest, AsyncDoublePoolSchedulerBasic) {
   ScheduleContext schedule_context;
   folly::CPUThreadPoolExecutor cpu_executor(4);
