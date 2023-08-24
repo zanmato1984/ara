@@ -4,6 +4,7 @@
 #include <ara/common/query_context.h>
 #include <ara/task/backpressure.h>
 #include <ara/task/defines.h>
+#include <ara/task/task_context.h>
 
 #include <memory>
 
@@ -19,8 +20,7 @@ class ScheduleContext;
 
 class TaskGroupHandle {
  public:
-  TaskGroupHandle(std::string name, std::string desc)
-      : name_(std::move(name)), desc_(std::move(desc)) {}
+  TaskGroupHandle(const std::string&, const task::TaskGroup&, task::TaskContext);
 
   virtual ~TaskGroupHandle() = default;
 
@@ -33,9 +33,11 @@ class TaskGroupHandle {
  protected:
   virtual task::TaskResult DoWait(const ScheduleContext&) = 0;
 
- private:
+ protected:
   std::string name_;
   std::string desc_;
+  const task::TaskGroup& task_group_;
+  task::TaskContext task_context_;
 };
 
 class Scheduler {

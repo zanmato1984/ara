@@ -69,9 +69,8 @@ Result<std::unique_ptr<TaskGroupHandle>> AsyncDoublePoolScheduler::DoSchedule(
   TaskContext task_context = MakeTaskContext(schedule_context);
   std::vector<TaskResult> results(num_tasks);
 
-  return std::make_unique<AsyncHandle>(task_group.Name(), task_group.Desc(),
-                                       std::move(task_context), std::move(results),
-                                       std::move(make_future));
+  return std::make_unique<AsyncHandle>(task_group, std::move(task_context),
+                                       std::move(results), std::move(make_future));
 }
 
 AsyncDoublePoolScheduler::ConcreteTask AsyncDoublePoolScheduler::MakeTask(

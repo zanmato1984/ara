@@ -25,7 +25,7 @@ class TaskGroup : public detail::TaskMeta {
   Status OnBegin(const TaskContext&);
   Status OnEnd(const TaskContext&, const TaskResult&);
 
-  Status NotifyFinish(const TaskContext&);
+  Status NotifyFinish(const TaskContext&) const;
 
  private:
   Task task_;

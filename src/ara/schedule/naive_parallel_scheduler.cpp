@@ -54,8 +54,7 @@ Result<std::unique_ptr<TaskGroupHandle>> NaiveParallelScheduler::DoSchedule(
                       });
   };
   auto task_context = MakeTaskContext(schedule_context);
-  return std::make_unique<NaiveParallelHandle>(task_group.Name(), task_group.Desc(),
-                                               std::move(task_context),
+  return std::make_unique<NaiveParallelHandle>(task_group, std::move(task_context),
                                                std::move(make_future));
 }
 

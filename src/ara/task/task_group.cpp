@@ -21,7 +21,7 @@ Status TaskGroup::OnEnd(const TaskContext& context, const TaskResult& result) {
                                         result);
 }
 
-Status TaskGroup::NotifyFinish(const TaskContext& context) {
+Status TaskGroup::NotifyFinish(const TaskContext& context) const {
   if (!notify_.has_value()) {
     return Status::OK();
   }

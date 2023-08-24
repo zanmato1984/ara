@@ -3,6 +3,7 @@
 #include "schedule_observer.h"
 
 #include <ara/task/task_context.h>
+#include <ara/task/task_group.h>
 #include <ara/task/task_status.h>
 #include <ara/util/util.h>
 
@@ -16,10 +17,18 @@ using task::TaskId;
 using task::TaskObserver;
 using task::TaskResult;
 
+TaskGroupHandle::TaskGroupHandle(const std::string& name, const TaskGroup& task_group,
+                                 TaskContext task_context)
+    : name_(name + "(" + task_group.Name() + ")"),
+      desc_(name + "(" + task_group.Desc() + ")"),
+      task_group_(task_group),
+      task_context_(std::move(task_context)) {}
+
 TaskResult TaskGroupHandle::Wait(const ScheduleContext& context) {
   if (context.schedule_observer != nullptr) {
     ARA_RETURN_NOT_OK(context.schedule_observer->OnWaitTaskGroupBegin(*this, context));
   }
+  ARA_RETURN_NOT_OK(task_group_.NotifyFinish(task_context_));
   auto status = DoWait(context);
   if (context.schedule_observer != nullptr) {
     ARA_RETURN_NOT_OK(

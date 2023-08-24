@@ -20,8 +20,7 @@ TaskResult ScheduleTask(const ScheduleContext& schedule_context, Scheduler& sche
                        std::move(notify_finish));
   auto handle = scheduler.Schedule(schedule_context, task_group);
   ARA_RETURN_NOT_OK(handle);
-  // TODO: Wait should do the NotifyFinish call.
-  return = (*handle)->Wait(schedule_context);
+  return (*handle)->Wait(schedule_context);
 }
 
 TEST(ScheduleTest, AsyncDoublePoolSchedulerBasic) {
@@ -32,12 +31,8 @@ TEST(ScheduleTest, AsyncDoublePoolSchedulerBasic) {
   Task task("Task", "Do nothing", [](const TaskContext&, TaskId) -> TaskResult {
     return TaskStatus::Finished();
   });
-  TaskGroup task_group("TaskGroup", "Do nothing", std::move(task), 4, std::nullopt,
-                       std::nullopt);
-
-  auto handle = scheduler.Schedule(schedule_context, task_group);
-  ASSERT_OK(handle);
-  auto result = (*handle)->Wait(schedule_context);
+  auto result = ScheduleTask(schedule_context, scheduler, std::move(task), 4,
+                             std::nullopt, std::nullopt);
   ASSERT_OK(result);
   ASSERT_TRUE(result->IsFinished());
 }
@@ -48,12 +43,8 @@ TEST(ScheduleTest, NaiveParallelSchedulerBasic) {
   Task task("Task", "Do nothing", [](const TaskContext&, TaskId) -> TaskResult {
     return TaskStatus::Finished();
   });
-  TaskGroup task_group("TaskGroup", "Do nothing", std::move(task), 4, std::nullopt,
-                       std::nullopt);
-
-  auto handle = scheduler.Schedule(schedule_context, task_group);
-  ASSERT_OK(handle);
-  auto result = (*handle)->Wait(schedule_context);
+  auto result = ScheduleTask(schedule_context, scheduler, std::move(task), 4,
+                             std::nullopt, std::nullopt);
   ASSERT_OK(result);
   ASSERT_TRUE(result->IsFinished());
 }

@@ -15,17 +15,15 @@ class NaiveParallelHandle : public TaskGroupHandle {
       std::function<std::future<task::TaskResult>(const task::TaskContext&)>;
 
  public:
-  NaiveParallelHandle(std::string name, std::string desc, task::TaskContext task_context,
+  NaiveParallelHandle(const task::TaskGroup& task_group, task::TaskContext task_context,
                       MakeFuture make_future)
-      : TaskGroupHandle(kName + "(" + std::move(name) + ")",
-                        kName + ")" + std::move(desc) + ")"),
+      : TaskGroupHandle(kName, task_group, std::move(task_context)),
         future_(make_future(task_context_)) {}
 
  protected:
   task::TaskResult DoWait(const ScheduleContext&) override;
 
  private:
-  task::TaskContext task_context_;
   std::future<task::TaskResult> future_;
 };
 

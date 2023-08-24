@@ -32,11 +32,9 @@ class AsyncHandle : public TaskGroupHandle {
   using MakeFuture = std::function<Future(const TaskContext&, std::vector<TaskResult>&)>;
 
  public:
-  AsyncHandle(std::string name, std::string desc, TaskContext task_context,
+  AsyncHandle(const TaskGroup& task_group, TaskContext task_context,
               std::vector<TaskResult> results, MakeFuture make_future)
-      : TaskGroupHandle(kName + "(" + std::move(name) + ")",
-                        kName + ")" + std::move(desc) + ")"),
-        task_context_(std::move(task_context)),
+      : TaskGroupHandle(kName, task_group, std::move(task_context)),
         results_(std::move(results)),
         future_(make_future(task_context_, results_)) {}
 
@@ -44,7 +42,6 @@ class AsyncHandle : public TaskGroupHandle {
   TaskResult DoWait(const ScheduleContext&) override;
 
  private:
-  TaskContext task_context_;
   std::vector<TaskResult> results_;
   Future future_;
 };
