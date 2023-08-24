@@ -3,7 +3,7 @@
 
 #include <gtest/gtest.h>
 
-TEST(SchedulerTest, Basic) {
+TEST(ScheduleTest, Basic) {
     // ara::schedule::AsyncDoublePoolScheduler scheduler;
     // ara::schedule::ScheduleContext schedule_context;
     // ara::task::Task task;

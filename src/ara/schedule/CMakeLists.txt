@@ -8,5 +8,5 @@ add_ara_library(ara-schedule "${ARA_SCHEDULE_SRC}")
 set(ARA_SCHEDULE_DEPS "ara-common" "ara-executor" "ara-task" "ara-util")
 add_ara_internal_dependencies(ara-schedule "${ARA_SCHEDULE_DEPS}")
 
-set(ARA_SCHEDULER_TEST_SRC "scheduler_test.cpp")
-add_ara_test(ara-scheduler-test "${ARA_SCHEDULER_TEST_SRC}")
+set(ARA_SCHEDULE_TEST_SRC "schedule_test.cpp")
+add_ara_test(ara-schedule-test "${ARA_SCHEDULE_TEST_SRC}")
