@@ -4,6 +4,8 @@
 
 namespace ara::task {
 
+// TODO: Task hint to CPU/IO thread pool.
+
 class TaskGroup : public detail::TaskMeta {
  public:
   using NotifyFinishFunc = std::function<Status(const TaskContext&)>;
