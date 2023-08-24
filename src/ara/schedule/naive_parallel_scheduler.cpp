@@ -116,7 +116,7 @@ NaiveParallelScheduler::ConcreteTask NaiveParallelScheduler::MakeTask(
                   task_id));
             }
           }
-          auto result = task(task_context, task_id);
+          result = task(task_context, task_id);
           if (is_yield && result.ok() && !result->IsYield()) {
             if (schedule_context.schedule_observer != nullptr) {
               ARA_RETURN_NOT_OK(schedule_context.schedule_observer->Observe(
