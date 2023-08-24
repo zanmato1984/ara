@@ -1,4 +1,6 @@
 #include "naive_parallel_scheduler.h"
+#include "schedule_context.h"
+#include "schedule_observer.h"
 
 #include <ara/task/task.h>
 #include <ara/task/task_group.h>
@@ -40,6 +42,11 @@ Result<std::unique_ptr<TaskGroupHandle>> NaiveParallelScheduler::DoSchedule(
                         for (auto& result : results) {
                           ARA_RETURN_NOT_OK(result);
                         }
+                        if (schedule_context.schedule_observer != nullptr) {
+                          ARA_RETURN_NOT_OK(schedule_context.schedule_observer->Observe(
+                              &ScheduleObserver::OnAllTasksFinished, schedule_context,
+                              task_group, results));
+                        }
                         if (cont.has_value()) {
                           return cont.value()(task_context);
                         }
@@ -76,25 +83,49 @@ NaiveParallelScheduler::MakeBackpressurePairFactory(const ScheduleContext&) cons
 }
 
 NaiveParallelScheduler::ConcreteTask NaiveParallelScheduler::MakeTask(
-    const ScheduleContext&, const Task& task, const TaskContext& task_context,
-    TaskId task_id) const {
-  return std::async(std::launch::async, [&task, &task_context, task_id]() {
-    TaskResult result = TaskStatus::Continue();
-    while (result.ok() && !result->IsFinished() && !result->IsCancelled()) {
-      if (result->IsYield()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-      } else if (result->IsBackpressure()) {
-        auto backpressure = std::any_cast<std::shared_ptr<detail::BackpressureImpl>>(
-            std::move(result->GetBackpressure()));
-        std::unique_lock<std::mutex> lock(backpressure->mutex);
-        while (!backpressure->ready) {
-          backpressure->cv.wait(lock);
+    const ScheduleContext& schedule_context, const Task& task,
+    const TaskContext& task_context, TaskId task_id) const {
+  return std::async(
+      std::launch::async,
+      [&schedule_context, &task, &task_context, task_id]() -> TaskResult {
+        TaskResult result = TaskStatus::Continue();
+        while (result.ok() && !result->IsFinished() && !result->IsCancelled()) {
+          bool is_yield = false;
+          if (result->IsYield()) {
+            is_yield = true;
+            if (schedule_context.schedule_observer != nullptr) {
+              ARA_RETURN_NOT_OK(schedule_context.schedule_observer->Observe(
+                  &ScheduleObserver::OnTaskYield, schedule_context, task, task_id));
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+          } else if (result->IsBackpressure()) {
+            if (schedule_context.schedule_observer != nullptr) {
+              ARA_RETURN_NOT_OK(schedule_context.schedule_observer->Observe(
+                  &ScheduleObserver::OnTaskBackpressure, schedule_context, task,
+                  task_id));
+            }
+            auto backpressure = std::any_cast<std::shared_ptr<detail::BackpressureImpl>>(
+                std::move(result->GetBackpressure()));
+            std::unique_lock<std::mutex> lock(backpressure->mutex);
+            while (!backpressure->ready) {
+              backpressure->cv.wait(lock);
+            }
+            if (schedule_context.schedule_observer != nullptr) {
+              ARA_RETURN_NOT_OK(schedule_context.schedule_observer->Observe(
+                  &ScheduleObserver::OnTaskBackpressureReset, schedule_context, task,
+                  task_id));
+            }
+          }
+          auto result = task(task_context, task_id);
+          if (is_yield && result.ok() && !result->IsYield()) {
+            if (schedule_context.schedule_observer != nullptr) {
+              ARA_RETURN_NOT_OK(schedule_context.schedule_observer->Observe(
+                  &ScheduleObserver::OnTaskYieldBack, schedule_context, task, task_id));
+            }
+          }
         }
-      }
-      auto result = task(task_context, task_id);
-    }
-    return result;
-  });
+        return result;
+      });
 }
 
 }  // namespace ara::schedule
