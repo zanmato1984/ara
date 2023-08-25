@@ -7,6 +7,13 @@
 
 namespace ara::task {
 
+struct TaskHint {
+  enum class Type {
+    CPU,
+    IO,
+  } type;
+};
+
 namespace detail {
 
 template <typename T>
@@ -18,8 +25,10 @@ class InternalTask : public TaskMeta {
   using Signature = typename TaskTraits<Impl>::Signature;
   using ReturnType = typename TaskTraits<Impl>::ReturnType;
 
-  InternalTask(std::string name, std::string desc, Signature f)
-      : TaskMeta(std::move(name), std::move(desc)), f_(std::move(f)) {}
+  InternalTask(std::string name, std::string desc, Signature f, TaskHint hint = {})
+      : TaskMeta(std::move(name), std::move(desc)),
+        f_(std::move(f)),
+        hint_(std::move(hint)) {}
 
   template <typename... Args>
   ReturnType operator()(const TaskContext& context, Args... args) const {
@@ -39,12 +48,15 @@ class InternalTask : public TaskMeta {
     return result;
   }
 
+  const TaskHint& GetHint() const { return hint_; }
+
  private:
   friend Impl;
   Impl& impl() { return *static_cast<Impl*>(this); }
   const Impl& impl() const { return *static_cast<const Impl*>(this); }
 
   Signature f_;
+  TaskHint hint_;
 };
 
 }  // namespace detail
