@@ -1,5 +1,6 @@
 #include "task_observer.h"
 #include "task.h"
+#include "task_group.h"
 #include "task_status.h"
 
 #include <ara/util/util.h>
@@ -37,14 +38,27 @@ class TaskLogger : public TaskObserver {
                   << " end with " << TaskResultToString(result);
     return Status::OK();
   }
+
+  Status OnNotifyFinishBegin(const TaskGroup& task_group,
+                             const TaskContext& context) override {
+    ARA_LOG(INFO) << "Notify " << task_group.Name() << "(" << task_group.Desc() << ") "
+                  << " finish begin";
+    return Status::OK();
+  }
+
+  virtual Status OnNotifyFinishEnd(const TaskGroup& task_group,
+                                   const TaskContext& context,
+                                   const Status& status) override {
+    ARA_LOG(INFO) << "Notify " << task_group.Name() << "(" << task_group.Desc() << ") "
+                  << " finish end with " << status.ToString();
+    return Status::OK();
+  }
 };
 
 std::unique_ptr<ChainedObserver<TaskObserver>> TaskObserver::Make(const QueryContext&) {
   auto logger = std::make_unique<TaskLogger>();
   std::vector<std::unique_ptr<TaskObserver>> observers;
   observers.push_back(std::move(logger));
-  // return
-  // std::make_unique<ChainedObserver<TaskObserver>>(std::vector<std::unique_ptr<TaskObserver>>{std::move(logger)});
   return std::make_unique<ChainedObserver<TaskObserver>>(std::move(observers));
 }
 

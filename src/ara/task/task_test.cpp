@@ -202,16 +202,6 @@ TEST(TaskTest, BasicTaskGroup) {
   }
 
   {
-    auto status = tg.OnBegin(context);
-    ASSERT_TRUE(status.ok());
-  }
-
-  {
-    auto status = tg.OnEnd(context, TaskStatus::Finished());
-    ASSERT_TRUE(status.ok());
-  }
-
-  {
     auto status = tg.NotifyFinish(context);
     ASSERT_TRUE(status.ok());
   }
@@ -277,17 +267,11 @@ TEST(TaskTest, TaskGroupObserver) {
   auto [chained_observer, task_observer] = MakeTestTaskObserver<TestTaskObserver>();
   context.task_observer = std::move(chained_observer);
 
-  std::ignore = tg.OnBegin(context);
   std::ignore = tg.NotifyFinish(context);
-  std::ignore = tg.OnEnd(context, TaskStatus::Cancelled());
 
-  ASSERT_EQ(task_observer.traces.size(), 4);
+  ASSERT_EQ(task_observer.traces.size(), 2);
   ASSERT_EQ(task_observer.traces[0],
-            (TaskGroupTrace{name, desc, Status::UnknownError("Begin")}));
-  ASSERT_EQ(task_observer.traces[1],
             (TaskGroupTrace{"Notify" + name, desc, Status::UnknownError("NotifyBegin")}));
-  ASSERT_EQ(task_observer.traces[2],
+  ASSERT_EQ(task_observer.traces[1],
             (TaskGroupTrace{"Notify" + name, desc, Status::UnknownError("Notify")}));
-  ASSERT_EQ(task_observer.traces[3],
-            (TaskGroupTrace{name, desc, TaskStatus::Cancelled()}));
 }

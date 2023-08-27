@@ -23,9 +23,6 @@ class TaskGroup : public ara::internal::Meta {
 
   const std::optional<Continuation>& GetContinuation() const { return cont_; }
 
-  Status OnBegin(const TaskContext&);
-  Status OnEnd(const TaskContext&, const TaskResult&);
-
   Status NotifyFinish(const TaskContext&) const;
 
  private:

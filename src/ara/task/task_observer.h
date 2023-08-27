@@ -29,13 +29,6 @@ class TaskObserver : public Observer {
     return Status::OK();
   }
 
-  virtual Status OnTaskGroupBegin(const TaskGroup&, const TaskContext&) {
-    return Status::OK();
-  }
-  virtual Status OnTaskGroupEnd(const TaskGroup&, const TaskContext&, const TaskResult&) {
-    return Status::OK();
-  }
-
   virtual Status OnNotifyFinishBegin(const TaskGroup&, const TaskContext&) {
     return Status::OK();
   }

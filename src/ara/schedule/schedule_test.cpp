@@ -82,3 +82,5 @@ TYPED_TEST(ScheduleTest, EndlessTaskWithNotifyFinish) {
   ASSERT_OK(result);
   ASSERT_TRUE(result->IsFinished());
 }
+
+// TODO: More schedule test.

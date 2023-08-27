@@ -1,3 +1,5 @@
+#pragma once
+
 #include <ara/common/batch.h>
 #include <ara/task/backpressure.h>
 
