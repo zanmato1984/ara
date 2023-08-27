@@ -13,6 +13,9 @@ const std::string AsyncHandle::kName = "AsyncHandle";
 TaskResult AsyncHandle::DoWait(const ScheduleContext&) { return future_.wait().value(); }
 
 const std::string AsyncDoublePoolScheduler::kName = "AsyncDoublePoolScheduler";
+const std::string AsyncDoublePoolScheduler::kDesc =
+    "Scheduler that uses folly::future for task parallelism and double thread pool "
+    "executors (folly::CPU/IOThreadPoolExecutor) for CPU/IO tasks";
 
 Result<std::unique_ptr<TaskGroupHandle>> AsyncDoublePoolScheduler::DoSchedule(
     const ScheduleContext& schedule_context, const TaskGroup& task_group) {

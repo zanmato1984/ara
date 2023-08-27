@@ -1,16 +1,17 @@
 #pragma once
 
+#include <ara/common/meta.h>
 #include <ara/task/task.h>
 
 namespace ara::task {
 
-class TaskGroup : public detail::TaskMeta {
+class TaskGroup : public internal::Meta {
  public:
   using NotifyFinishFunc = std::function<Status(const TaskContext&)>;
 
   TaskGroup(std::string name, std::string desc, Task task, size_t num_tasks,
             std::optional<Continuation> cont, std::optional<NotifyFinishFunc> notify)
-      : TaskMeta(std::move(name), std::move(desc)),
+      : Meta(std::move(name), std::move(desc)),
         task_(std::move(task)),
         cont_(std::move(cont)),
         num_tasks_(num_tasks),

@@ -19,8 +19,7 @@ using task::TaskResult;
 
 TaskGroupHandle::TaskGroupHandle(const std::string& name, const TaskGroup& task_group,
                                  TaskContext task_context)
-    : name_(name + "(" + task_group.Name() + ")"),
-      desc_(name + "(" + task_group.Desc() + ")"),
+    : Meta(name + "(" + task_group.Name() + ")", name + "(" + task_group.Desc() + ")"),
       task_group_(task_group),
       task_context_(std::move(task_context)) {}
 

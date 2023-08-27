@@ -30,9 +30,10 @@ class NaiveParallelHandle : public TaskGroupHandle {
 class NaiveParallelScheduler : public Scheduler {
  private:
   static const std::string kName;
+  static const std::string kDesc;
 
  public:
-  NaiveParallelScheduler() : Scheduler(kName) {}
+  NaiveParallelScheduler() : Scheduler(kName, kDesc) {}
 
  protected:
   Result<std::unique_ptr<TaskGroupHandle>> DoSchedule(const ScheduleContext&,

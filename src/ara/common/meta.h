@@ -2,11 +2,11 @@
 
 #include <string>
 
-namespace ara::task::detail {
+namespace ara::internal {
 
-class TaskMeta {
+class Meta {
  public:
-  TaskMeta(std::string name, std::string desc)
+  Meta(std::string name, std::string desc)
       : name_(std::move(name)), desc_(std::move(desc)) {}
 
   const std::string& Name() const { return name_; }
@@ -18,4 +18,4 @@ class TaskMeta {
   std::string desc_;
 };
 
-}  // namespace ara::task::detail
+}  // namespace ara::internal

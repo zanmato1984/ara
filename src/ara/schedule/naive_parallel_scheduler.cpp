@@ -21,6 +21,8 @@ const std::string NaiveParallelHandle::kName = "NaiveParallelHandle";
 TaskResult NaiveParallelHandle::DoWait(const ScheduleContext&) { return future_.get(); }
 
 const std::string NaiveParallelScheduler::kName = "NaiveParallelScheduler";
+const std::string NaiveParallelScheduler::kDesc =
+    "Scheduler that use naive std::thread for each task";
 
 Result<std::unique_ptr<TaskGroupHandle>> NaiveParallelScheduler::DoSchedule(
     const ScheduleContext& schedule_context, const TaskGroup& task_group) {

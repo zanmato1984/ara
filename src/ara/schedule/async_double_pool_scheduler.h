@@ -49,10 +49,11 @@ class AsyncHandle : public TaskGroupHandle {
 class AsyncDoublePoolScheduler : public Scheduler {
  public:
   static const std::string kName;
+  static const std::string kDesc;
 
   AsyncDoublePoolScheduler(folly::CPUThreadPoolExecutor* cpu_executor,
                            folly::IOThreadPoolExecutor* io_executor)
-      : Scheduler(kName), cpu_executor_(cpu_executor), io_executor_(io_executor) {}
+      : Scheduler(kName, kDesc), cpu_executor_(cpu_executor), io_executor_(io_executor) {}
 
  protected:
   Result<std::unique_ptr<TaskGroupHandle>> DoSchedule(const ScheduleContext&,
