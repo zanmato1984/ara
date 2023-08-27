@@ -14,13 +14,13 @@ struct TaskHint {
   } type;
 };
 
-namespace detail {
+namespace internal {
 
 template <typename T>
 struct TaskTraits;
 
-template <typename Impl>
-class InternalTask : public internal::Meta {
+template <typename Impl, typename ContextType>
+class InternalTask : public ara::internal::Meta {
  public:
   using Signature = typename TaskTraits<Impl>::Signature;
   using ReturnType = typename TaskTraits<Impl>::ReturnType;
@@ -31,8 +31,8 @@ class InternalTask : public internal::Meta {
         hint_(std::move(hint)) {}
 
   template <typename... Args>
-  ReturnType operator()(const TaskContext& context, Args... args) const {
-    auto observer = context.task_observer.get();
+  ReturnType operator()(const ContextType& context, Args... args) const {
+    auto observer = TaskTraits<Impl>::GetObserver(context).get();
     if (observer != nullptr) {
       ARA_RETURN_NOT_OK(
           impl().ObserverBegin(observer, context, std::forward<Args>(args)...));
@@ -59,49 +59,55 @@ class InternalTask : public internal::Meta {
   TaskHint hint_;
 };
 
-}  // namespace detail
+}  // namespace internal
 
 class Task;
 class Continuation;
 
-namespace detail {
+namespace internal {
 
 template <>
 struct TaskTraits<ara::task::Task> {
   using Signature = std::function<TaskResult(const TaskContext&, TaskId)>;
   using ReturnType = TaskResult;
+  static const auto& GetObserver(const TaskContext& task_context) {
+    return task_context.task_observer;
+  }
 };
 
 template <>
 struct TaskTraits<ara::task::Continuation> {
   using Signature = std::function<TaskResult(const TaskContext&)>;
   using ReturnType = TaskResult;
+  static const auto& GetObserver(const TaskContext& task_context) {
+    return task_context.task_observer;
+  }
 };
 
-}  // namespace detail
+}  // namespace internal
 
-class Task : public detail::InternalTask<Task> {
+class Task : public internal::InternalTask<Task, TaskContext> {
  public:
-  using detail::InternalTask<Task>::InternalTask;
+  using internal::InternalTask<Task, TaskContext>::InternalTask;
 
  private:
   Status ObserverBegin(ChainedObserver<TaskObserver>*, const TaskContext&, TaskId) const;
   Status ObserverEnd(ChainedObserver<TaskObserver>*, const TaskContext&, TaskId,
                      const TaskResult&) const;
 
-  friend detail::InternalTask<Task>;
+  friend internal::InternalTask<Task, TaskContext>;
 };
 
-class Continuation : public detail::InternalTask<Continuation> {
+class Continuation : public internal::InternalTask<Continuation, TaskContext> {
  public:
-  using detail::InternalTask<Continuation>::InternalTask;
+  using internal::InternalTask<Continuation, TaskContext>::InternalTask;
 
  private:
   Status ObserverBegin(ChainedObserver<TaskObserver>*, const TaskContext&) const;
   Status ObserverEnd(ChainedObserver<TaskObserver>*, const TaskContext&,
                      const TaskResult&) const;
 
-  friend detail::InternalTask<Continuation>;
+  friend internal::InternalTask<Continuation, TaskContext>;
 };
 
 };  // namespace ara::task
