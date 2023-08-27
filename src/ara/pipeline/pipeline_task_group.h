@@ -66,6 +66,35 @@ class PipelineContinuation : public task::internal::InternalTask<PipelineContinu
   friend task::internal::InternalTask<PipelineContinuation>;
 };
 
-class PipelineTaskGroup : public internal::Meta {};
+class PipelineTaskGroup : public internal::Meta {
+ public:
+  using NotifyFinishFunc =
+      std::function<Status(const PipelineContext&, const task::TaskContext&)>;
+
+  PipelineTaskGroup(std::string name, std::string desc, PipelineTask task,
+                    size_t num_tasks, std::optional<PipelineContinuation> cont,
+                    std::optional<NotifyFinishFunc> notify)
+      : Meta(std::move(name), std::move(desc)),
+        task_(std::move(task)),
+        cont_(std::move(cont)),
+        num_tasks_(num_tasks),
+        notify_(std::move(notify)) {}
+
+  const PipelineTask& GetTask() const { return task_; }
+
+  size_t NumTasks() const { return num_tasks_; }
+
+  const std::optional<PipelineContinuation>& GetContinuation() const { return cont_; }
+
+  Status NotifyFinish(const PipelineContext&, const task::TaskContext&) const;
+
+ private:
+  PipelineTask task_;
+  size_t num_tasks_;
+  std::optional<PipelineContinuation> cont_;
+  std::optional<NotifyFinishFunc> notify_;
+};
+
+using PipelineTaskGroups = std::vector<PipelineTaskGroup>;
 
 }  // namespace ara::pipeline

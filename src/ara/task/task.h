@@ -49,7 +49,7 @@ class InternalTask : public ara::internal::Meta {
     return result;
   }
 
-  const TaskHint& GetHint() const { return hint_; }
+  const TaskHint& Hint() const { return hint_; }
 
  private:
   friend Impl;
