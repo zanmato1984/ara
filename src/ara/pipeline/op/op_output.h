@@ -1,7 +1,7 @@
 #include <ara/common/batch.h>
 #include <ara/task/backpressure.h>
 
-namespace ara::op {
+namespace ara::pipeline {
 
 namespace detail {
 
@@ -84,4 +84,4 @@ struct OpOutput {
 using OpOutput = detail::OpOutput<ara::Batch>;
 using OpResult = arrow::Result<OpOutput>;
 
-}  // namespace ara::op
+}  // namespace ara::pipeline

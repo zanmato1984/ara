@@ -1,9 +1,9 @@
-#include "op_output.h"
+#include "op/op_output.h"
 
 #include <gtest/gtest.h>
 #include <iostream>
 
-using namespace ara::op;
+using namespace ara::pipeline;
 
 void foo() {
   OpOutput o1 = OpOutput::Cancelled(), o2 = OpOutput::Cancelled();

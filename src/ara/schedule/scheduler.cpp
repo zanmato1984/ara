@@ -54,8 +54,8 @@ Result<std::unique_ptr<TaskGroupHandle>> Scheduler::Schedule(
 TaskContext Scheduler::MakeTaskContext(const ScheduleContext& schedule_context) const {
   auto task_observer = TaskObserver::Make(*schedule_context.query_context);
   auto backpressure_factory = MakeBackpressurePairFactory(schedule_context);
-  return {schedule_context.query_context, schedule_context.query_id,
-          std::move(backpressure_factory), std::move(task_observer)};
+  return {schedule_context.query_context, std::move(backpressure_factory),
+          std::move(task_observer)};
 }
 
 std::unique_ptr<Scheduler> Scheduler::Make(const QueryContext&) { return nullptr; }
