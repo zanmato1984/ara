@@ -64,21 +64,17 @@ class PipelineCompiler {
     }
   }
 
-  PhysicalPipeline::Plex LogicalPlexToPhysicalPlex(const LogicalPipeline::Plex& plex,
-                                                   SinkOp* sink_op) {
-    return {plex.source_op, plex.pipe_ops, sink_op};
-  }
-
   PhysicalPipelines BuildPhysicalPipelines(const PipelineContext& context) {
     std::vector<PhysicalPipeline> physical_pipelines;
     for (auto& [id, physical_info] : physical_pipelines_) {
       auto sources_keepalive = std::move(physical_info.first);
       auto logical_plexes = std::move(physical_info.second);
       std::vector<PhysicalPipeline::Plex> physical_plexes(logical_plexes.size());
-      std::transform(logical_plexes.begin(), logical_plexes.end(),
-                     physical_plexes.begin(), [&](auto& plex) {
-                       return LogicalPlexToPhysicalPlex(plex, logical_pipeline_.SinkOp());
-                     });
+      std::transform(
+          logical_plexes.begin(), logical_plexes.end(), physical_plexes.begin(),
+          [&](auto& plex) -> PhysicalPipeline::Plex {
+            return {plex.source_op, std::move(plex.pipe_ops), logical_pipeline_.SinkOp()};
+          });
       auto name =
           "PhysicalPipeline" + std::to_string(id) + "(" + logical_pipeline_.Name() + ")";
       physical_pipelines.emplace_back(std::move(name), std::move(physical_plexes),

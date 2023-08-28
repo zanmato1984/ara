@@ -54,7 +54,7 @@ class FooSink : public SinkOp {
   std::unique_ptr<SourceOp> ImplicitSource() override { return nullptr; }
 };
 
-TEST(PipelineTest, TaskBasic) {
+TEST(PipelineTaskTest, TaskBasic) {
   PipelineContext pipeline_context;
   FooSource source;
   FooSink sink;
