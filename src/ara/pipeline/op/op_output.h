@@ -98,6 +98,4 @@ struct OpOutput {
   static OpOutput Cancelled() { return OpOutput{Code::CANCELLED}; }
 };
 
-using OpResult = arrow::Result<OpOutput>;
-
 }  // namespace ara::pipeline

@@ -1,7 +1,8 @@
 #pragma once
 
+#include <ara/common/batch.h>
 #include <ara/common/meta.h>
-#include <ara/pipeline/op/op_output.h>
+#include <ara/pipeline/defines.h>
 #include <ara/task/task_group.h>
 
 namespace ara::pipeline {

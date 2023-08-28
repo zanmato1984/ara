@@ -1,5 +1,6 @@
 #include "pipeline_task.h"
 
+#include <ara/common/batch.h>
 #include <ara/pipeline/physical_pipeline.h>
 #include <ara/pipeline/pipeline_context.h>
 #include <ara/pipeline/pipeline_observer.h>

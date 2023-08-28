@@ -1,4 +1,4 @@
-#include <ara/pipeline/op/op_output.h>
+#include <ara/pipeline/defines.h>
 #include <ara/task/defines.h>
 
 namespace ara::util {

@@ -1,3 +1,4 @@
+#include <ara/pipeline/op/op_output.h>
 #include <ara/task/task_status.h>
 #include <ara/util/util.h>
 
