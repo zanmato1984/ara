@@ -1,5 +1,6 @@
 #pragma once
 
+#include <ara/common/meta.h>
 #include <ara/pipeline/op/op_output.h>
 #include <ara/task/task_group.h>
 
@@ -7,35 +8,38 @@ namespace ara::pipeline {
 
 class PipelineContext;
 
-using PhysicalSource =
+using PipelineSource =
     std::function<OpResult(const PipelineContext&, const task::TaskContext&, ThreadId)>;
-using PhysicalPipe = std::function<OpResult(
+using PipelinePipe = std::function<OpResult(
     const PipelineContext&, const task::TaskContext&, ThreadId, std::optional<Batch>)>;
-using PhysicalDrain =
+using PipelineDrain =
     std::function<OpResult(const PipelineContext&, const task::TaskContext&, ThreadId)>;
-using PhysicalSink = std::function<OpResult(
+using PipelineSink = std::function<OpResult(
     const PipelineContext&, const task::TaskContext&, ThreadId, std::optional<Batch>)>;
 
-class SourceOp {
+class SourceOp : public internal::Meta {
  public:
+  using Meta::Meta;
   virtual ~SourceOp() = default;
-  virtual PhysicalSource Source() = 0;
+  virtual PipelineSource Source() = 0;
   virtual task::TaskGroups Frontend() = 0;
   virtual task::TaskGroup Backend() = 0;
 };
 
-class PipeOp {
+class PipeOp : public internal::Meta {
  public:
+  using Meta::Meta;
   virtual ~PipeOp() = default;
-  virtual PhysicalPipe Pipe() = 0;
-  virtual std::optional<PhysicalDrain> Drain() = 0;
+  virtual PipelinePipe Pipe() = 0;
+  virtual std::optional<PipelineDrain> Drain() = 0;
   virtual std::unique_ptr<SourceOp> ImplicitSource() = 0;
 };
 
-class SinkOp {
+class SinkOp : public internal::Meta {
  public:
+  using Meta::Meta;
   virtual ~SinkOp() = default;
-  virtual PhysicalSink Sink() = 0;
+  virtual PipelineSink Sink() = 0;
   virtual task::TaskGroups Frontend() = 0;
   virtual task::TaskGroup Backend() = 0;
   virtual std::unique_ptr<SourceOp> ImplicitSource() = 0;
