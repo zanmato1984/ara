@@ -24,6 +24,10 @@ class PhysicalPipeline : public internal::Meta {
 
   const std::vector<Plex>& Plexes() const { return plexes_; }
 
+  const std::vector<std::unique_ptr<SourceOp>>& ImplicitSources() const {
+    return implicit_sources_;
+  }
+
  private:
   static std::string Explain(const std::vector<Plex>&);
 
