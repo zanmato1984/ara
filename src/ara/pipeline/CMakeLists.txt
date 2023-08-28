@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 set(CMAKE_CXX_STANDARD 20)
 
-set(ARA_PIPELINE_SRC "pipeline_observer.cpp" "pipeline_task_group.cpp" "physical_pipeline.cpp")
+set(ARA_PIPELINE_SRC "pipeline_observer.cpp" "physical_pipeline.cpp")
 add_ara_library(ara-pipeline "${ARA_PIPELINE_SRC}")
 
 set(ARA_PIPELINE_DEPS "ara-common" "ara-util" "ara-task")

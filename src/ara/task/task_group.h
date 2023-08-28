@@ -5,7 +5,7 @@
 
 namespace ara::task {
 
-class TaskGroup : public ara::internal::Meta {
+class TaskGroup : public internal::Meta {
  public:
   using NotifyFinishFunc = std::function<Status(const TaskContext&)>;
 
