@@ -2,6 +2,7 @@
 
 #include <ara/common/batch.h>
 #include <ara/task/backpressure.h>
+#include <ara/util/defines.h>
 
 namespace ara::pipeline {
 

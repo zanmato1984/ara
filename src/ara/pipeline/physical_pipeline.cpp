@@ -67,13 +67,6 @@ class PipelineCompiler {
   PhysicalPipeline::Plex LogicalPlexToPhysicalPlex(const LogicalPipeline::Plex& plex,
                                                    SinkOp* sink_op) {
     return {plex.source_op, plex.pipe_ops, sink_op};
-    // std::vector<std::pair<PhysicalPipe, std::optional<PhysicalDrain>>> pipes(
-    //     plex.pipes.size());
-    // std::transform(plex.pipes.begin(), plex.pipes.end(), pipes.begin(), [&](auto* pipe)
-    // {
-    //   return std::make_pair(pipe->Pipe(), pipe->Drain());
-    // });
-    // return {plex.source->Source(), std::move(pipes), sink->Sink()};
   }
 
   PhysicalPipelines BuildPhysicalPipelines(const PipelineContext& context) {
