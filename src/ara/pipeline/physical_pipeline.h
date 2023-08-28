@@ -3,17 +3,10 @@
 #include <ara/common/meta.h>
 #include <ara/pipeline/op/op.h>
 
-namespace ara {
-
-class QueryContext;
-
-namespace pipeline {
-
-namespace detail {
-class PipelineCompiler;
-}  // namespace detail
+namespace ara::pipeline {
 
 class LogicalPipeline;
+class PipelineContext;
 
 class PhysicalPipeline : public internal::Meta {
  public:
@@ -41,8 +34,6 @@ class PhysicalPipeline : public internal::Meta {
 
 using PhysicalPipelines = std::vector<PhysicalPipeline>;
 
-PhysicalPipelines CompilePipeline(const QueryContext&, const LogicalPipeline&);
+PhysicalPipelines CompilePipeline(const PipelineContext&, const LogicalPipeline&);
 
-}  // namespace pipeline
-
-}  // namespace ara
+}  // namespace ara::pipeline
