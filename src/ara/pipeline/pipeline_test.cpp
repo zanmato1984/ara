@@ -10,7 +10,8 @@
 #include <ara/schedule/schedule_observer.h>
 
 #include <arrow/testing/gtest_util.h>
-#include <glog/logging.h>
+#include <folly/executors/CPUThreadPoolExecutor.h>
+#include <folly/executors/IOThreadPoolExecutor.h>
 #include <gtest/gtest.h>
 
 using namespace ara;

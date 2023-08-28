@@ -6,11 +6,6 @@
 
 namespace ara::pipeline {
 
-namespace detail {
-
-using ara::task::Backpressure;
-
-template <typename BatchT>
 struct OpOutput {
  private:
   enum class Code {
@@ -23,42 +18,42 @@ struct OpOutput {
     FINISHED,
     CANCELLED,
   } code_;
-  std::variant<Backpressure, std::optional<BatchT>> payload_;
+  std::variant<task::Backpressure, std::optional<Batch>> payload_;
 
-  explicit OpOutput(Code code, std::optional<BatchT> batch = std::nullopt)
+  explicit OpOutput(Code code, std::optional<Batch> batch = std::nullopt)
       : code_(code), payload_(std::move(batch)) {}
 
-  explicit OpOutput(Backpressure backpressure)
+  explicit OpOutput(task::Backpressure backpressure)
       : code_(Code::SINK_BACKPRESSURE), payload_(std::move(backpressure)) {}
 
  public:
-  bool IsSourceNotReady() { return code_ == Code::SOURCE_NOT_READY; }
-  bool IsPipeSinkNeedsMore() { return code_ == Code::PIPE_SINK_NEEDS_MORE; }
-  bool IsPipeEven() { return code_ == Code::PIPE_EVEN; }
-  bool IsSourcePipeHasMore() { return code_ == Code::SOURCE_PIPE_HAS_MORE; }
-  bool IsSinkBackpressure() { return code_ == Code::SINK_BACKPRESSURE; }
-  bool IsPipeYield() { return code_ == Code::PIPE_YIELD; }
-  bool IsFinished() { return code_ == Code::FINISHED; }
-  bool IsCancelled() { return code_ == Code::CANCELLED; }
+  bool IsSourceNotReady() const { return code_ == Code::SOURCE_NOT_READY; }
+  bool IsPipeSinkNeedsMore() const { return code_ == Code::PIPE_SINK_NEEDS_MORE; }
+  bool IsPipeEven() const { return code_ == Code::PIPE_EVEN; }
+  bool IsSourcePipeHasMore() const { return code_ == Code::SOURCE_PIPE_HAS_MORE; }
+  bool IsSinkBackpressure() const { return code_ == Code::SINK_BACKPRESSURE; }
+  bool IsPipeYield() const { return code_ == Code::PIPE_YIELD; }
+  bool IsFinished() const { return code_ == Code::FINISHED; }
+  bool IsCancelled() const { return code_ == Code::CANCELLED; }
 
   std::optional<Batch>& GetBatch() {
-    ARA_DCHECK(IsPipeEven() || IsSourcePipeHasMore() || IsFinished());
+    ARA_CHECK(IsPipeEven() || IsSourcePipeHasMore() || IsFinished());
     return std::get<std::optional<Batch>>(payload_);
   }
 
   const std::optional<Batch>& GetBatch() const {
-    ARA_DCHECK(IsPipeEven() || IsSourcePipeHasMore() || IsFinished());
+    ARA_CHECK(IsPipeEven() || IsSourcePipeHasMore() || IsFinished());
     return std::get<std::optional<Batch>>(payload_);
   }
 
-  Backpressure& GetBackpressure() {
-    ARA_DCHECK(IsSinkBackpressure());
-    return std::get<Backpressure>(payload_);
+  task::Backpressure& GetBackpressure() {
+    ARA_CHECK(IsSinkBackpressure());
+    return std::get<task::Backpressure>(payload_);
   }
 
-  const Backpressure& GetBackpressure() const {
-    ARA_DCHECK(IsSinkBackpressure());
-    return std::get<Backpressure>(payload_);
+  const task::Backpressure& GetBackpressure() const {
+    ARA_CHECK(IsSinkBackpressure());
+    return std::get<task::Backpressure>(payload_);
   }
 
   bool operator==(const OpOutput& other) const { return code_ == other.code_; }
@@ -93,19 +88,16 @@ struct OpOutput {
   static OpOutput SourcePipeHasMore(Batch batch) {
     return OpOutput{Code::SOURCE_PIPE_HAS_MORE, std::move(batch)};
   }
-  static OpOutput SinkBackpressure(Backpressure backpressure) {
+  static OpOutput SinkBackpressure(task::Backpressure backpressure) {
     return OpOutput(std::move(backpressure));
   }
   static OpOutput PipeYield() { return OpOutput{Code::PIPE_YIELD}; }
-  static OpOutput Finished(std::optional<BatchT> batch = std::nullopt) {
+  static OpOutput Finished(std::optional<Batch> batch = std::nullopt) {
     return OpOutput{Code::FINISHED, std::move(batch)};
   }
   static OpOutput Cancelled() { return OpOutput{Code::CANCELLED}; }
 };
 
-}  // namespace detail
-
-using OpOutput = detail::OpOutput<ara::Batch>;
 using OpResult = arrow::Result<OpOutput>;
 
 }  // namespace ara::pipeline
