@@ -22,8 +22,8 @@ class SourceOp : public internal::Meta {
   using Meta::Meta;
   virtual ~SourceOp() = default;
   virtual PipelineSource Source() = 0;
-  virtual task::TaskGroups Frontend() = 0;
-  virtual task::TaskGroup Backend() = 0;
+  virtual task::TaskGroups Frontend(const PipelineContext&) = 0;
+  virtual std::optional<task::TaskGroup> Backend(const PipelineContext&) = 0;
 };
 
 class PipeOp : public internal::Meta {
@@ -40,8 +40,8 @@ class SinkOp : public internal::Meta {
   using Meta::Meta;
   virtual ~SinkOp() = default;
   virtual PipelineSink Sink() = 0;
-  virtual task::TaskGroups Frontend() = 0;
-  virtual task::TaskGroup Backend() = 0;
+  virtual task::TaskGroups Frontend(const PipelineContext&) = 0;
+  virtual std::optional<task::TaskGroup> Backend(const PipelineContext&) = 0;
   virtual std::unique_ptr<SourceOp> ImplicitSource() = 0;
 };
 

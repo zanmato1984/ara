@@ -2,8 +2,8 @@
 
 #include <ara/common/defines.h>
 #include <ara/common/meta.h>
+#include <ara/pipeline/op/op.h>
 #include <ara/pipeline/op/op_output.h>
-#include <ara/pipeline/physical_pipeline.h>
 #include <ara/task/defines.h>
 
 #include <stack>
@@ -17,14 +17,15 @@ class TaskContext;
 namespace pipeline {
 
 class PipelineContext;
+class PhysicalPipeline;
 
 class PipelineTask : public internal::Meta {
  public:
   class Plex {
    public:
-    Plex(const PhysicalPipeline&, size_t, size_t);
+    Plex(const PipelineTask&, size_t, size_t);
 
-    Plex(Plex&& other) : Plex(other.pipeline_, other.plex_id_, other.dop_) {}
+    Plex(Plex&& other) : Plex(other.task_, other.plex_id_, other.dop_) {}
 
     OpResult operator()(const PipelineContext&, const task::TaskContext&, ThreadId);
 
@@ -33,9 +34,8 @@ class PipelineTask : public internal::Meta {
                   std::optional<Batch>);
 
    private:
-    const PhysicalPipeline& pipeline_;
+    const PipelineTask& task_;
     const size_t plex_id_;
-    const PhysicalPipeline::Plex& plex_;
     const size_t dop_;
 
     PipelineSource source_;
@@ -57,9 +57,12 @@ class PipelineTask : public internal::Meta {
 
   task::TaskResult operator()(const PipelineContext&, const task::TaskContext&, ThreadId);
 
+  const PhysicalPipeline& Pipeline() const { return pipeline_; }
+
   const std::vector<Plex>& Plexes() const { return plexes_; }
 
  private:
+  const PhysicalPipeline& pipeline_;
   std::vector<Plex> plexes_;
 };
 

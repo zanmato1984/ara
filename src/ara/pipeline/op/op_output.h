@@ -63,6 +63,27 @@ struct OpOutput {
 
   bool operator==(const OpOutput& other) const { return code_ == other.code_; }
 
+  std::string ToString() const {
+    switch (code_) {
+      case Code::SOURCE_NOT_READY:
+        return "SOURCE_NOT_READY";
+      case Code::PIPE_SINK_NEEDS_MORE:
+        return "PIPE_SINK_NEEDS_MORE";
+      case Code::PIPE_EVEN:
+        return "PIPE_EVEN";
+      case Code::SOURCE_PIPE_HAS_MORE:
+        return "SOURCE_PIPE_HAS_MORE";
+      case Code::SINK_BACKPRESSURE:
+        return "SINK_BACKPRESSURE";
+      case Code::PIPE_YIELD:
+        return "PIPE_YIELD";
+      case Code::FINISHED:
+        return "FINISHED";
+      case Code::CANCELLED:
+        return "CANCELLED";
+    }
+  }
+
  public:
   static OpOutput SourceNotReady() { return OpOutput(Code::SOURCE_NOT_READY); }
   static OpOutput PipeSinkNeedsMore() { return OpOutput(Code::PIPE_SINK_NEEDS_MORE); }
