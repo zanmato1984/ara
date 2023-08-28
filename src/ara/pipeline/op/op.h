@@ -29,7 +29,7 @@ class PipeOp {
   virtual ~PipeOp() = default;
   virtual PhysicalPipe Pipe() = 0;
   virtual std::optional<PhysicalDrain> Drain() = 0;
-  virtual std::unique_ptr<SourceOp> Source() = 0;
+  virtual std::unique_ptr<SourceOp> ImplicitSource() = 0;
 };
 
 class SinkOp {
@@ -38,6 +38,7 @@ class SinkOp {
   virtual PhysicalSink Sink() = 0;
   virtual task::TaskGroups Frontend() = 0;
   virtual task::TaskGroup Backend() = 0;
+  virtual std::unique_ptr<SourceOp> ImplicitSource() = 0;
 };
 
 }  // namespace ara::pipeline

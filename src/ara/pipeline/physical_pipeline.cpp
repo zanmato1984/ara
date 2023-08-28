@@ -6,6 +6,7 @@
 namespace ara::pipeline {
 
 namespace {
+
 class PhysicalPipelineBuilder {
  public:
   PhysicalPipelineBuilder(const LogicalPipeline& logical_pipeline)
@@ -28,7 +29,7 @@ class PhysicalPipelineBuilder {
       for (size_t i = 0; i < plex.pipes.size(); ++i) {
         auto pipe = plex.pipes[i];
         if (pipe_source_map.count(pipe) == 0) {
-          if (auto pipe_source_up = pipe->Source(); pipe_source_up != nullptr) {
+          if (auto pipe_source_up = pipe->ImplicitSource(); pipe_source_up != nullptr) {
             auto pipe_source = pipe_source_up.get();
             pipe_source_map.emplace(pipe, pipe_source);
             LogicalPipeline::Plex new_plex{
@@ -91,6 +92,7 @@ class PhysicalPipelineBuilder {
                              std::vector<LogicalPipeline::Plex>>>
       stages_;
 };
+
 }  // namespace
 
 PhysicalPipeline PhysicalPipeline::Make(const QueryContext& query_context,
