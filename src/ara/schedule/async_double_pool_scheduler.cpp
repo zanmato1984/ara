@@ -133,9 +133,10 @@ AsyncDoublePoolScheduler::ConcreteTask AsyncDoublePoolScheduler::MakeTask(
       });
     }
 
-    return folly::via(cpu_executor_).then([&, task_id](auto&&) {
-      result = task(context, task_id);
-    });
+    folly::Executor* executor =
+        task.Hint().type == task::TaskHint::Type::CPU ? cpu_executor_ : io_executor_;
+    return folly::via(executor).then(
+        [&, task_id](auto&&) { result = task(context, task_id); });
   };
 
   auto task_f =

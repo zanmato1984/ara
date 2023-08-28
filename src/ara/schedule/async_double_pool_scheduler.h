@@ -5,8 +5,7 @@
 #include <ara/task/task_context.h>
 #include <ara/task/task_status.h>
 
-#include <folly/executors/CPUThreadPoolExecutor.h>
-#include <folly/executors/IOThreadPoolExecutor.h>
+#include <folly/Executor.h>
 #include <folly/futures/Future.h>
 
 namespace ara::schedule {
@@ -51,8 +50,7 @@ class AsyncDoublePoolScheduler : public Scheduler {
   static const std::string kName;
   static const std::string kDesc;
 
-  AsyncDoublePoolScheduler(folly::CPUThreadPoolExecutor* cpu_executor,
-                           folly::IOThreadPoolExecutor* io_executor)
+  AsyncDoublePoolScheduler(folly::Executor* cpu_executor, folly::Executor* io_executor)
       : Scheduler(kName, kDesc), cpu_executor_(cpu_executor), io_executor_(io_executor) {}
 
  protected:
@@ -74,8 +72,8 @@ class AsyncDoublePoolScheduler : public Scheduler {
                                                                 TaskId) const;
 
  private:
-  folly::CPUThreadPoolExecutor* cpu_executor_;
-  folly::IOThreadPoolExecutor* io_executor_;
+  folly::Executor* cpu_executor_;
+  folly::Executor* io_executor_;
 };
 
 }  // namespace detail
