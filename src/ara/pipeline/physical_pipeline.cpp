@@ -1,5 +1,6 @@
 #include "physical_pipeline.h"
 #include "logical_pipeline.h"
+#include "op/op.h"
 
 #include <map>
 #include <sstream>

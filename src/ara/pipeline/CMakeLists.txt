@@ -15,6 +15,10 @@ set(ARA_PIPELINE_DEPS
         "ara-util")
 add_ara_internal_dependencies(ara-pipeline "${ARA_PIPELINE_DEPS}")
 
-set(ARA_PIPELINE_TEST_SRC
-        "pipeline_test.cpp")
-add_ara_test(ara-pipeline-test "${ARA_PIPELINE_TEST_SRC}")
+set(ARA_PIPELINE_COMPILE_TEST_SRC
+        "pipeline_compile_test.cpp")
+add_ara_test(ara-pipeline-compile-test "${ARA_PIPELINE_COMPILE_TEST_SRC}")
+
+set(ARA_PIPELINE_TASK_TEST_SRC
+        "pipeline_task_test.cpp")
+add_ara_test(ara-pipeline-task-test "${ARA_PIPELINE_TASK_TEST_SRC}")

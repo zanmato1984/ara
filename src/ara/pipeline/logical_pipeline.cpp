@@ -1,4 +1,5 @@
 #include "logical_pipeline.h"
+#include "op/op.h"
 
 #include <sstream>
 

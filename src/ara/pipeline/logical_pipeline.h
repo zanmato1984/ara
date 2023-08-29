@@ -1,9 +1,12 @@
 #pragma once
 
 #include <ara/common/meta.h>
-#include <ara/pipeline/op/op.h>
 
 namespace ara::pipeline {
+
+class SourceOp;
+class PipeOp;
+class SinkOp;
 
 class LogicalPipeline : public internal::Meta {
  public:
