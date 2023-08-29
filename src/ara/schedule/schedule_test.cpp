@@ -1,4 +1,4 @@
-#include "async_double_pool_scheduler.h"
+#include "async_dual_pool_scheduler.h"
 #include "naive_parallel_scheduler.h"
 #include "schedule_context.h"
 #include "schedule_observer.h"
@@ -15,10 +15,10 @@ using namespace ara;
 using namespace ara::task;
 using namespace ara::schedule;
 
-struct AsyncDoublePoolSchedulerHolder {
+struct AsyncDualPoolSchedulerHolder {
   folly::CPUThreadPoolExecutor cpu_executor{4};
   folly::IOThreadPoolExecutor io_executor{2};
-  AsyncDoublePoolScheduler scheduler{&cpu_executor, &io_executor};
+  AsyncDualPoolScheduler scheduler{&cpu_executor, &io_executor};
 };
 
 struct NaiveParallelSchedulerHolder {
@@ -41,7 +41,7 @@ class ScheduleTest : public testing::Test {
 };
 
 using SchedulerTypes =
-    ::testing::Types<AsyncDoublePoolSchedulerHolder, NaiveParallelSchedulerHolder>;
+    ::testing::Types<AsyncDualPoolSchedulerHolder, NaiveParallelSchedulerHolder>;
 TYPED_TEST_SUITE(ScheduleTest, SchedulerTypes);
 
 TYPED_TEST(ScheduleTest, EmptyTask) {

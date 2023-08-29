@@ -45,12 +45,12 @@ class AsyncHandle : public TaskGroupHandle {
   Future future_;
 };
 
-class AsyncDoublePoolScheduler : public Scheduler {
+class AsyncDualPoolScheduler : public Scheduler {
  public:
   static const std::string kName;
   static const std::string kDesc;
 
-  AsyncDoublePoolScheduler(folly::Executor* cpu_executor, folly::Executor* io_executor)
+  AsyncDualPoolScheduler(folly::Executor* cpu_executor, folly::Executor* io_executor)
       : Scheduler(kName, kDesc), cpu_executor_(cpu_executor), io_executor_(io_executor) {}
 
  protected:
@@ -79,6 +79,6 @@ class AsyncDoublePoolScheduler : public Scheduler {
 }  // namespace detail
 
 using AsyncHandle = detail::AsyncHandle;
-using AsyncDoublePoolScheduler = detail::AsyncDoublePoolScheduler;
+using AsyncDualPoolScheduler = detail::AsyncDualPoolScheduler;
 
 }  // namespace ara::schedule

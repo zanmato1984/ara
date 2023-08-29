@@ -5,7 +5,7 @@
 #include "pipeline_observer.h"
 #include "pipeline_task.h"
 
-#include <ara/schedule/async_double_pool_scheduler.h>
+#include <ara/schedule/async_dual_pool_scheduler.h>
 #include <ara/schedule/schedule_context.h>
 #include <ara/schedule/schedule_observer.h>
 
@@ -249,7 +249,7 @@ TEST(PipelineTaskTest, TaskBasic) {
   ScheduleContext schedule_context;
   folly::CPUThreadPoolExecutor cpu_executor(4);
   folly::IOThreadPoolExecutor io_executor(2);
-  AsyncDoublePoolScheduler scheduler(&cpu_executor, &io_executor);
+  AsyncDualPoolScheduler scheduler(&cpu_executor, &io_executor);
 
   auto handle = scheduler.Schedule(schedule_context, task_group);
   ASSERT_OK(handle);

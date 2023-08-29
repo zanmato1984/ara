@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.21)
 set(CMAKE_CXX_STANDARD 20)
 
 set(ARA_SCHEDULE_SRC
-        "async_double_pool_scheduler.cpp"
+        "async_dual_pool_scheduler.cpp"
         "naive_parallel_scheduler.cpp"
         "scheduler.cpp"
         "schedule_observer.cpp")
