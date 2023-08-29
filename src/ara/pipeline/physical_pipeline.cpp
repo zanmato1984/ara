@@ -42,23 +42,27 @@ class PipelineCompiler {
       size_t id = 0;
       topology_.emplace(plex.source_op,
                         std::pair<size_t, LogicalPipeline::Plex>{id++, plex});
+      sources_keep_order_.push_back(plex.source_op);
       for (size_t i = 0; i < plex.pipe_ops.size(); ++i) {
         auto pipe = plex.pipe_ops[i];
         if (pipe_source_map.count(pipe) == 0) {
-          if (auto pipe_source_up = pipe->ImplicitSource(); pipe_source_up != nullptr) {
-            auto pipe_source = pipe_source_up.get();
-            pipe_source_map.emplace(pipe, pipe_source);
+          if (auto implicit_source_up = pipe->ImplicitSource();
+              implicit_source_up != nullptr) {
+            auto implicit_source = implicit_source_up.get();
+            pipe_source_map.emplace(pipe, implicit_source);
             LogicalPipeline::Plex new_plex{
-                pipe_source,
+                implicit_source,
                 std::vector<PipeOp*>(plex.pipe_ops.begin() + i + 1, plex.pipe_ops.end())};
-            topology_.emplace(pipe_source, std::pair<size_t, LogicalPipeline::Plex>{
-                                               id++, std::move(new_plex)});
-            pipe_sources_keepalive_.emplace(pipe_source, std::move(pipe_source_up));
+            topology_.emplace(implicit_source, std::pair<size_t, LogicalPipeline::Plex>{
+                                                   id++, std::move(new_plex)});
+            sources_keep_order_.push_back(implicit_source);
+            implicit_sources_keepalive_.emplace(implicit_source,
+                                                std::move(implicit_source_up));
           }
         } else {
-          auto pipe_source = pipe_source_map[pipe];
-          if (topology_[pipe_source].first < id) {
-            topology_[pipe_source].first = id++;
+          auto implicit_source = pipe_source_map[pipe];
+          if (topology_[implicit_source].first < id) {
+            topology_[implicit_source].first = id++;
           }
         }
       }
@@ -66,10 +70,11 @@ class PipelineCompiler {
   }
 
   void SortTopology(const PipelineContext&) {
-    for (auto& [source, physical_info] : topology_) {
-      if (pipe_sources_keepalive_.count(source) > 0) {
+    for (auto& source : sources_keep_order_) {
+      auto& physical_info = topology_[source];
+      if (implicit_sources_keepalive_.count(source) > 0) {
         physical_pipelines_[physical_info.first].first.push_back(
-            std::move(pipe_sources_keepalive_[source]));
+            std::move(implicit_sources_keepalive_[source]));
       }
       physical_pipelines_[physical_info.first].second.push_back(
           std::move(physical_info.second));
@@ -98,7 +103,8 @@ class PipelineCompiler {
   const LogicalPipeline& logical_pipeline_;
 
   std::unordered_map<SourceOp*, std::pair<size_t, LogicalPipeline::Plex>> topology_;
-  std::unordered_map<SourceOp*, std::unique_ptr<SourceOp>> pipe_sources_keepalive_;
+  std::vector<SourceOp*> sources_keep_order_;
+  std::unordered_map<SourceOp*, std::unique_ptr<SourceOp>> implicit_sources_keepalive_;
   std::map<size_t, std::pair<std::vector<std::unique_ptr<SourceOp>>,
                              std::vector<LogicalPipeline::Plex>>>
       physical_pipelines_;
