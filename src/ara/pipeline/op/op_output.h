@@ -20,11 +20,7 @@ struct OpOutput {
   } code_;
   std::variant<task::Backpressure, std::optional<Batch>> payload_;
 
-  explicit OpOutput(Code code, std::optional<Batch> batch = std::nullopt)
-      : code_(code), payload_(std::move(batch)) {}
-
-  explicit OpOutput(task::Backpressure backpressure)
-      : code_(Code::SINK_BACKPRESSURE), payload_(std::move(backpressure)) {}
+  explicit OpOutput(Code code) : code_(code) {}
 
  public:
   bool IsSourceNotReady() const { return code_ == Code::SOURCE_NOT_READY; }
@@ -83,17 +79,25 @@ struct OpOutput {
   static OpOutput SourceNotReady() { return OpOutput(Code::SOURCE_NOT_READY); }
   static OpOutput PipeSinkNeedsMore() { return OpOutput(Code::PIPE_SINK_NEEDS_MORE); }
   static OpOutput PipeEven(Batch batch) {
-    return OpOutput(Code::PIPE_EVEN, std::move(batch));
+    auto output = OpOutput(Code::PIPE_EVEN);
+    output.payload_ = std::optional{std::move(batch)};
+    return output;
   }
   static OpOutput SourcePipeHasMore(Batch batch) {
-    return OpOutput{Code::SOURCE_PIPE_HAS_MORE, std::move(batch)};
+    auto output = OpOutput(Code::SOURCE_PIPE_HAS_MORE);
+    output.payload_ = std::optional{std::move(batch)};
+    return output;
   }
   static OpOutput SinkBackpressure(task::Backpressure backpressure) {
-    return OpOutput(std::move(backpressure));
+    auto output = OpOutput(Code::SOURCE_PIPE_HAS_MORE);
+    output.payload_ = std::move(backpressure);
+    return output;
   }
   static OpOutput PipeYield() { return OpOutput{Code::PIPE_YIELD}; }
   static OpOutput Finished(std::optional<Batch> batch = std::nullopt) {
-    return OpOutput{Code::FINISHED, std::move(batch)};
+    auto output = OpOutput(Code::SOURCE_PIPE_HAS_MORE);
+    output.payload_ = std::optional{std::move(batch)};
+    return output;
   }
   static OpOutput Cancelled() { return OpOutput{Code::CANCELLED}; }
 };
