@@ -244,6 +244,8 @@ TEST(PipelangTest, EmptySource) {
   ASSERT_EQ(logical.Plexes()[0].source_op, source);
   ASSERT_TRUE(logical.Plexes()[0].pipe_ops.empty());
   ASSERT_EQ(logical.SinkOp(), sink);
+
+  ASSERT_EQ(pipeline.Traces().size(), 1);
 }
 
 }  // namespace pipelang
