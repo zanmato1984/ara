@@ -98,7 +98,6 @@ NaiveParallelScheduler::ConcreteTask NaiveParallelScheduler::MakeTask(
               ARA_RETURN_NOT_OK(schedule_context.schedule_observer->Observe(
                   &ScheduleObserver::OnTaskYield, schedule_context, task, task_id));
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
           } else if (result->IsBackpressure()) {
             if (schedule_context.schedule_observer != nullptr) {
               ARA_RETURN_NOT_OK(schedule_context.schedule_observer->Observe(
