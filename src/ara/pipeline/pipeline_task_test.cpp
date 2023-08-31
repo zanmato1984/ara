@@ -419,3 +419,44 @@ TYPED_TEST(PipelineTaskTest, OnePass) {
   MakeOnePassPipeline(4, pipeline);
   this->TestTracePipeline(*pipeline);
 }
+
+void MakeOnePassWithPipePipeline(size_t dop,
+                                 std::unique_ptr<pipelang::ImperativePipeline>& result) {
+  result = std::make_unique<pipelang::ImperativePipeline>("OnePassWithPipe", dop);
+  auto& pipeline = *result;
+  auto source = pipeline.DeclSource("Source");
+  auto pipe = pipeline.DeclPipe("Pipe", source);
+  auto sink = pipeline.DeclSink("Sink", pipe);
+  source->HasMore();
+  pipe->PipeEven();
+  sink->NeedsMore();
+  source->Finished();
+
+  auto logical = pipeline.ToLogicalPipeline();
+  ASSERT_EQ(logical.Name(), "OnePassWithPipe");
+  ASSERT_EQ(logical.Plexes().size(), 1);
+  ASSERT_EQ(logical.Plexes()[0].source_op, source);
+  ASSERT_EQ(logical.Plexes()[0].pipe_ops.size(), 1);
+  ASSERT_EQ(logical.Plexes()[0].pipe_ops[0], pipe);
+  ASSERT_EQ(logical.SinkOp(), sink);
+
+  ASSERT_EQ(pipeline.Traces().size(), 4);
+  ASSERT_EQ(pipeline.Traces()[0],
+            (pipelang::ImperativeTrace{"Source", "Source",
+                                       OpOutput::SourcePipeHasMore({}).ToString()}));
+  ASSERT_EQ(
+      pipeline.Traces()[1],
+      (pipelang::ImperativeTrace{"Pipe", "Pipe", OpOutput::PipeEven({}).ToString()}));
+  ASSERT_EQ(pipeline.Traces()[2],
+            (pipelang::ImperativeTrace{"Sink", "Sink",
+                                       OpOutput::PipeSinkNeedsMore().ToString()}));
+  ASSERT_EQ(
+      pipeline.Traces()[3],
+      (pipelang::ImperativeTrace{"Source", "Source", OpOutput::Finished().ToString()}));
+}
+
+TYPED_TEST(PipelineTaskTest, OnePassWithPipe) {
+  std::unique_ptr<pipelang::ImperativePipeline> pipeline;
+  MakeOnePassWithPipePipeline(4, pipeline);
+  this->TestTracePipeline(*pipeline);
+}
