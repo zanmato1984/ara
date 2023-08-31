@@ -122,11 +122,11 @@ OpResult PipelineTask::Plex::operator()(const PipelineContext& pipeline_context,
       return result.status();
     }
     if (thread_locals_[thread_id].yield) {
-      ARA_CHECK(result->IsPipeSinkNeedsMore());
+      ARA_CHECK(result->IsPipeYieldBack());
       thread_locals_[thread_id].yield = false;
       OBSERVE(OnPipelineTaskEnd, task_, plex_id_, pipeline_context, task_context,
-              thread_id, OpOutput::PipeSinkNeedsMore());
-      return OpOutput::PipeSinkNeedsMore();
+              thread_id, OpOutput::PipeYieldBack());
+      return OpOutput::PipeYieldBack();
     }
     if (result->IsPipeYield()) {
       ARA_CHECK(!thread_locals_[thread_id].yield);

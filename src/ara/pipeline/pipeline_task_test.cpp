@@ -744,6 +744,10 @@ void MakeDrainPipeline(size_t dop,
   sink->NeedsMore();
   pipe->DrainHasMore();
   sink->NeedsMore();
+  pipe->DrainYield();
+  pipe->DrainYieldBack();
+  pipe->DrainHasMore();
+  sink->NeedsMore();
   pipe->DrainFinished(Batch{});
   sink->NeedsMore();
 
@@ -755,7 +759,7 @@ void MakeDrainPipeline(size_t dop,
   ASSERT_EQ(logical.Plexes()[0].pipe_ops[0], pipe);
   ASSERT_EQ(logical.SinkOp(), sink);
 
-  ASSERT_EQ(pipeline.Traces().size(), 10);
+  ASSERT_EQ(pipeline.Traces().size(), 14);
   ASSERT_EQ(pipeline.Traces()[0],
             (pipelang::ImperativeTrace{"Source", "Source",
                                        OpOutput::SourcePipeHasMore({}).ToString()}));
@@ -782,8 +786,20 @@ void MakeDrainPipeline(size_t dop,
                                        OpOutput::PipeSinkNeedsMore().ToString()}));
   ASSERT_EQ(
       pipeline.Traces()[8],
+      (pipelang::ImperativeTrace{"Pipe", "Drain", OpOutput::PipeYield().ToString()}));
+  ASSERT_EQ(
+      pipeline.Traces()[9],
+      (pipelang::ImperativeTrace{"Pipe", "Drain", OpOutput::PipeYieldBack().ToString()}));
+  ASSERT_EQ(pipeline.Traces()[10],
+            (pipelang::ImperativeTrace{"Pipe", "Drain",
+                                       OpOutput::SourcePipeHasMore({}).ToString()}));
+  ASSERT_EQ(pipeline.Traces()[11],
+            (pipelang::ImperativeTrace{"Sink", "Sink",
+                                       OpOutput::PipeSinkNeedsMore().ToString()}));
+  ASSERT_EQ(
+      pipeline.Traces()[12],
       (pipelang::ImperativeTrace{"Pipe", "Drain", OpOutput::Finished({}).ToString()}));
-  ASSERT_EQ(pipeline.Traces()[9],
+  ASSERT_EQ(pipeline.Traces()[13],
             (pipelang::ImperativeTrace{"Sink", "Sink",
                                        OpOutput::PipeSinkNeedsMore().ToString()}));
 }
