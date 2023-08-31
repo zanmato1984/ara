@@ -95,7 +95,7 @@ struct OpOutput {
   }
   static OpOutput PipeYield() { return OpOutput{Code::PIPE_YIELD}; }
   static OpOutput Finished(std::optional<Batch> batch = std::nullopt) {
-    auto output = OpOutput(Code::SOURCE_PIPE_HAS_MORE);
+    auto output = OpOutput(Code::FINISHED);
     output.payload_ = std::optional{std::move(batch)};
     return output;
   }
