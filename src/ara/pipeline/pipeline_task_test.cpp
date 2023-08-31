@@ -90,8 +90,8 @@ class ImperativeOp : public internal::Meta {
     pipeline_->traces_.emplace_back(std::move(trace));
   }
 
-  ImperativeInstruction Execute(ThreadId thread_id) {
-    return instructions_[thread_locals_[thread_id].id++];
+  ImperativeInstruction Fetch(ThreadId thread_id) {
+    return instructions_[thread_locals_[thread_id].pc++];
   }
 
  protected:
@@ -101,7 +101,7 @@ class ImperativeOp : public internal::Meta {
   std::vector<ImperativeInstruction> instructions_;
 
   struct ThreadLocal {
-    size_t id = 0;
+    size_t pc = 0;
   };
   std::vector<ThreadLocal> thread_locals_;
 };
@@ -120,7 +120,7 @@ class ImperativeSource : public ImperativeOp, public SourceOp {
 
   PipelineSource Source() override {
     return [&](const PipelineContext&, const TaskContext&,
-               ThreadId thread_id) -> OpResult { return Execute(thread_id); };
+               ThreadId thread_id) -> OpResult { return Fetch(thread_id); };
   }
 
   TaskGroups Frontend(const PipelineContext&) override { return {}; }
@@ -167,7 +167,7 @@ class ImperativePipe : public ImperativeOp, public PipeOp {
 
   PipelinePipe Pipe() override {
     return [&](const PipelineContext&, const TaskContext&, ThreadId thread_id,
-               std::optional<Batch>) -> OpResult { return Execute(thread_id); };
+               std::optional<Batch>) -> OpResult { return Fetch(thread_id); };
   }
 
   std::optional<PipelineDrain> Drain() override {
@@ -175,7 +175,7 @@ class ImperativePipe : public ImperativeOp, public PipeOp {
       return std::nullopt;
     }
     return [&](const PipelineContext&, const TaskContext&,
-               ThreadId thread_id) -> OpResult { return Execute(thread_id); };
+               ThreadId thread_id) -> OpResult { return Fetch(thread_id); };
   }
 
   std::unique_ptr<SourceOp> ImplicitSource() override {
@@ -200,7 +200,7 @@ class ImperativeSink : public ImperativeOp, public SinkOp {
   PipelineSink Sink() override {
     return [&](const PipelineContext&, const TaskContext& task_context,
                ThreadId thread_id, std::optional<Batch>) -> OpResult {
-      auto result = Execute(thread_id);
+      auto result = Fetch(thread_id);
       if (result.ok() && result->IsSinkBackpressure()) {
         ARA_CHECK(task_context.backpressure_pair_factory.has_value());
         auto backpressure_pair = task_context.backpressure_pair_factory.value()(
