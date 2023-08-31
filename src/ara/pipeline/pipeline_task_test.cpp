@@ -191,23 +191,76 @@ class ImperativeSink : public ImperativeOp, public SinkOp {
  public:
   explicit ImperativeSink(std::string name, ImperativePipeline* pipeline)
       : ImperativeOp(std::move(name), "ImperativeSink", pipeline),
-        SinkOp(ImperativeOp::Name(), ImperativeOp::Desc()) {}
+        SinkOp(ImperativeOp::Name(), ImperativeOp::Desc()),
+        finished_(false) {}
 
   void NeedsMore() { InstructAndTrace(OpOutput::PipeSinkNeedsMore(), "Sink"); }
   void Backpressure() { InstructAndTrace(OpOutput::SinkBackpressure({}), "Sink"); }
 
   PipelineSink Sink() override {
-    return [&](const PipelineContext&, const TaskContext&, ThreadId thread_id,
-               std::optional<Batch>) -> OpResult { return Execute(thread_id); };
+    return [&](const PipelineContext&, const TaskContext& task_context,
+               ThreadId thread_id, std::optional<Batch>) -> OpResult {
+      auto result = Execute(thread_id);
+      if (result.ok() && result->IsSinkBackpressure()) {
+        ARA_CHECK(task_context.backpressure_pair_factory.has_value());
+        auto backpressure_pair = task_context.backpressure_pair_factory.value()(
+            task_context, Task("", "", {}), thread_id);
+        ARA_RETURN_NOT_OK(backpressure_pair);
+        {
+          std::lock_guard<std::mutex> lock(mutex_);
+          backpressure_callbacks_.push_back(std::move(backpressure_pair->second));
+        }
+        return OpOutput::SinkBackpressure(std::move(backpressure_pair->first));
+      } else {
+        return std::move(result);
+      }
+    };
   }
 
   TaskGroups Frontend(const PipelineContext&) override { return {}; }
 
   std::optional<TaskGroup> Backend(const PipelineContext&) override {
-    return std::nullopt;
+    auto task_hint = TaskHint{TaskHint::Type::IO};
+    auto task = Task(
+        ImperativeOp::Name(), ImperativeOp::Desc(),
+        [&](const TaskContext& task_context, TaskId task_id) -> TaskResult {
+          if (finished_) {
+            return TaskStatus::Finished();
+          }
+
+          bool work = false;
+          {
+            std::unique_lock<std::mutex> lock(mutex_);
+            work = backpressure_callbacks_.size() == pipeline_->Dop();
+          }
+          if (work) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            std::unique_lock<std::mutex> lock(mutex_);
+            for (auto& callback : backpressure_callbacks_) {
+              ARA_RETURN_NOT_OK(callback());
+            }
+            backpressure_callbacks_.clear();
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(100));
+          return TaskStatus::Continue();
+        },
+        std::move(task_hint));
+
+    auto notify_finish = [&](const TaskContext&) {
+      finished_ = true;
+      return Status::OK();
+    };
+
+    return TaskGroup(ImperativeOp::Name(), ImperativeOp::Desc(), std::move(task), 1,
+                     std::nullopt, std::move(notify_finish));
   }
 
   std::unique_ptr<SourceOp> ImplicitSource() override { return nullptr; }
+
+ private:
+  std::atomic_bool finished_;
+  std::mutex mutex_;
+  std::vector<BackpressureResetCallback> backpressure_callbacks_;
 };
 
 ImperativeSource* ImperativePipeline::DeclSource(std::string name) {
@@ -262,6 +315,7 @@ LogicalPipeline ImperativePipeline::ToLogicalPipeline() const {
   return LogicalPipeline(name_, std::move(plexes), sink);
 }
 
+// TODO: Trace the task begin/end.
 class ImperativeTracer : public PipelineObserver {
  public:
   ImperativeTracer(size_t dop = 1) : traces_(dop) {}
@@ -337,10 +391,30 @@ class PipelineTaskTest : public testing::Test {
           std::make_unique<ChainedObserver<PipelineObserver>>(std::move(observers));
     }
 
+    ScheduleContext schedule_context;
+    SchedulerType holder;
+    Scheduler& scheduler = holder.scheduler;
+
     auto logical_pipeline = pipeline.ToLogicalPipeline();
     auto physical_pipelines = CompilePipeline(pipeline_context, logical_pipeline);
+
+    ASSERT_TRUE(logical_pipeline.SinkOp()->Frontend(pipeline_context).empty());
+    std::unique_ptr<TaskGroupHandle> sink_be_handle = nullptr;
+    auto sink_be = logical_pipeline.SinkOp()->Backend(pipeline_context);
+    if (sink_be.has_value()) {
+      auto result = scheduler.Schedule(schedule_context, std::move(sink_be.value()));
+      ASSERT_OK(result);
+      sink_be_handle = std::move(*result);
+    }
+
     for (const auto& physical_pipeline : physical_pipelines) {
       PipelineTask pipeline_task(physical_pipeline, dop);
+
+      for (const auto& plex : physical_pipeline.Plexes()) {
+        ASSERT_TRUE(plex.source_op->Frontend(pipeline_context).empty());
+        ASSERT_TRUE(!plex.source_op->Backend(pipeline_context).has_value());
+      }
+
       Task task(pipeline_task.Name(), pipeline_task.Desc(),
                 [&pipeline_context, &pipeline_task](const TaskContext& task_context,
                                                     TaskId task_id) -> TaskResult {
@@ -349,11 +423,15 @@ class PipelineTaskTest : public testing::Test {
       TaskGroup task_group(pipeline_task.Name(), pipeline_task.Desc(), std::move(task),
                            dop, std::nullopt, std::nullopt);
 
-      ScheduleContext schedule_context;
-      SchedulerType holder;
-      auto handle = holder.scheduler.Schedule(schedule_context, task_group);
+      auto handle = scheduler.Schedule(schedule_context, task_group);
       ASSERT_OK(handle);
       auto result = (*handle)->Wait(schedule_context);
+      ASSERT_OK(result);
+      ASSERT_TRUE(result->IsFinished());
+    }
+
+    if (sink_be_handle != nullptr) {
+      auto result = sink_be_handle->Wait(schedule_context);
       ASSERT_OK(result);
       ASSERT_TRUE(result->IsFinished());
     }
