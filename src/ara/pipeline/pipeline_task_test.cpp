@@ -146,6 +146,7 @@ class ImperativePipe : public ImperativeOp, public PipeOp {
   void PipeNeedsMore() { InstructAndTrace(OpOutput::PipeSinkNeedsMore(), "Pipe"); }
   void PipeHasMore() { InstructAndTrace(OpOutput::SourcePipeHasMore(Batch{}), "Pipe"); }
   void PipeYield() { InstructAndTrace(OpOutput::PipeYield(), "Pipe"); }
+  void PipeYieldBack() { InstructAndTrace(OpOutput::PipeYieldBack(), "Pipe"); }
 
   void DrainHasMore() {
     has_drain_ = true;
@@ -158,6 +159,10 @@ class ImperativePipe : public ImperativeOp, public PipeOp {
   void DrainFinished(std::optional<Batch> batch = std::nullopt) {
     has_drain_ = true;
     InstructAndTrace(OpOutput::Finished(std::move(batch)), "Drain");
+  }
+  void DrainYieldBack() {
+    has_drain_ = true;
+    InstructAndTrace(OpOutput::PipeYieldBack(), "Drain");
   }
 
   PipelinePipe Pipe() override {
@@ -670,12 +675,12 @@ void MakePipeYieldPipeline(size_t dop,
   auto sink = pipeline.DeclSink("Sink", {pipe});
   source->HasMore();
   pipe->PipeYield();
-  pipe->PipeNeedsMore();
+  pipe->PipeYieldBack();
   pipe->PipeEven();
   sink->NeedsMore();
   source->HasMore();
   pipe->PipeYield();
-  pipe->PipeNeedsMore();
+  pipe->PipeYieldBack();
   pipe->PipeNeedsMore();
   source->Finished();
 
@@ -693,9 +698,9 @@ void MakePipeYieldPipeline(size_t dop,
                                        OpOutput::SourcePipeHasMore({}).ToString()}));
   ASSERT_EQ(pipeline.Traces()[1], (pipelang::ImperativeTrace{
                                       "Pipe", "Pipe", OpOutput::PipeYield().ToString()}));
-  ASSERT_EQ(pipeline.Traces()[2],
-            (pipelang::ImperativeTrace{"Pipe", "Pipe",
-                                       OpOutput::PipeSinkNeedsMore().ToString()}));
+  ASSERT_EQ(
+      pipeline.Traces()[2],
+      (pipelang::ImperativeTrace{"Pipe", "Pipe", OpOutput::PipeYieldBack().ToString()}));
   ASSERT_EQ(
       pipeline.Traces()[3],
       (pipelang::ImperativeTrace{"Pipe", "Pipe", OpOutput::PipeEven({}).ToString()}));
@@ -707,9 +712,9 @@ void MakePipeYieldPipeline(size_t dop,
                                        OpOutput::SourcePipeHasMore({}).ToString()}));
   ASSERT_EQ(pipeline.Traces()[6], (pipelang::ImperativeTrace{
                                       "Pipe", "Pipe", OpOutput::PipeYield().ToString()}));
-  ASSERT_EQ(pipeline.Traces()[7],
-            (pipelang::ImperativeTrace{"Pipe", "Pipe",
-                                       OpOutput::PipeSinkNeedsMore().ToString()}));
+  ASSERT_EQ(
+      pipeline.Traces()[7],
+      (pipelang::ImperativeTrace{"Pipe", "Pipe", OpOutput::PipeYieldBack().ToString()}));
   ASSERT_EQ(pipeline.Traces()[8],
             (pipelang::ImperativeTrace{"Pipe", "Pipe",
                                        OpOutput::PipeSinkNeedsMore().ToString()}));

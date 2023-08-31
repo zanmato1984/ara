@@ -168,10 +168,10 @@ OpResult PipelineTask::Plex::Pipe(const PipelineContext& pipeline_context,
       return result.status();
     }
     if (thread_locals_[thread_id].yield) {
-      ARA_CHECK(result->IsPipeSinkNeedsMore());
+      ARA_CHECK(result->IsPipeYieldBack());
       thread_locals_[thread_id].pipe_stack.push(i);
       thread_locals_[thread_id].yield = false;
-      return OpOutput::PipeSinkNeedsMore();
+      return OpOutput::PipeYieldBack();
     }
     if (result->IsPipeYield()) {
       ARA_CHECK(!thread_locals_[thread_id].yield);

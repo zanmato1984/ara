@@ -15,6 +15,7 @@ struct OpOutput {
     SOURCE_PIPE_HAS_MORE,
     SINK_BACKPRESSURE,
     PIPE_YIELD,
+    PIPE_YIELD_BACK,
     FINISHED,
     CANCELLED,
   } code_;
@@ -29,6 +30,7 @@ struct OpOutput {
   bool IsSourcePipeHasMore() const { return code_ == Code::SOURCE_PIPE_HAS_MORE; }
   bool IsSinkBackpressure() const { return code_ == Code::SINK_BACKPRESSURE; }
   bool IsPipeYield() const { return code_ == Code::PIPE_YIELD; }
+  bool IsPipeYieldBack() const { return code_ == Code::PIPE_YIELD_BACK; }
   bool IsFinished() const { return code_ == Code::FINISHED; }
   bool IsCancelled() const { return code_ == Code::CANCELLED; }
 
@@ -68,6 +70,8 @@ struct OpOutput {
         return "SINK_BACKPRESSURE";
       case Code::PIPE_YIELD:
         return "PIPE_YIELD";
+      case Code::PIPE_YIELD_BACK:
+        return "PIPE_YIELD_BACK";
       case Code::FINISHED:
         return "FINISHED";
       case Code::CANCELLED:
@@ -93,13 +97,14 @@ struct OpOutput {
     output.payload_ = std::move(backpressure);
     return output;
   }
-  static OpOutput PipeYield() { return OpOutput{Code::PIPE_YIELD}; }
+  static OpOutput PipeYield() { return OpOutput(Code::PIPE_YIELD); }
+  static OpOutput PipeYieldBack() { return OpOutput(Code::PIPE_YIELD_BACK); }
   static OpOutput Finished(std::optional<Batch> batch = std::nullopt) {
     auto output = OpOutput(Code::FINISHED);
     output.payload_ = std::optional{std::move(batch)};
     return output;
   }
-  static OpOutput Cancelled() { return OpOutput{Code::CANCELLED}; }
+  static OpOutput Cancelled() { return OpOutput(Code::CANCELLED); }
 };
 
 }  // namespace ara::pipeline
