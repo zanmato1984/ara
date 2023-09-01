@@ -64,6 +64,13 @@ class PipelineTask : public internal::Meta {
  private:
   const PhysicalPipeline& pipeline_;
   std::vector<Plex> plexes_;
+
+  struct ThreadLocal {
+    ThreadLocal(size_t size) : finished(size, false) {}
+
+    std::vector<bool> finished;
+  };
+  std::vector<ThreadLocal> thread_locals_;
 };
 
 }  // namespace pipeline

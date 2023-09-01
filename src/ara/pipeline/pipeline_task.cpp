@@ -210,6 +210,9 @@ PipelineTask::PipelineTask(const PhysicalPipeline& pipeline, size_t dop)
   for (size_t i = 0; i < pipeline_.Plexes().size(); ++i) {
     plexes_.emplace_back(*this, i, dop);
   }
+  for (size_t i = 0; i < dop; ++i) {
+    thread_locals_.emplace_back(plexes_.size());
+  }
 }
 
 namespace {
@@ -238,10 +241,15 @@ TaskResult OpResultToTaskResult(OpResult op_result) {
 TaskResult PipelineTask::operator()(const PipelineContext& pipeline_context,
                                     const TaskContext& task_context, ThreadId thread_id) {
   bool all_finished = true;
-  for (auto& plex : plexes_) {
+  for (size_t i = 0; i < plexes_.size(); ++i) {
+    if (thread_locals_[thread_id].finished[i]) {
+      continue;
+    }
+    auto& plex = plexes_[i];
     ARA_ASSIGN_OR_RAISE(auto op_result, plex(pipeline_context, task_context, thread_id));
     if (op_result.IsFinished()) {
       ARA_CHECK(!op_result.GetBatch().has_value());
+      thread_locals_[thread_id].finished[i] = true;
     } else {
       all_finished = false;
     }
