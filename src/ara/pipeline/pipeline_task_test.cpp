@@ -32,6 +32,10 @@ struct ImperativeTrace {
   bool operator==(const ImperativeTrace& other) const {
     return op == other.op && method == other.method && payload == other.payload;
   }
+
+  friend void PrintTo(const ImperativeTrace& trace, std::ostream* os) {
+    *os << trace.op << "::" << trace.method << "(" << trace.payload.value_or("") << ")";
+  }
 };
 
 class ImperativeOp;
@@ -439,7 +443,11 @@ class PipelineTaskTest : public testing::Test {
     auto& traces_act = tracer->Traces();
     auto& traces_exp = pipeline.Traces();
     for (size_t i = 0; i < dop; ++i) {
-      ASSERT_EQ(traces_act[i], traces_exp);
+      ASSERT_EQ(traces_act[i].size(), traces_exp.size());
+      for (size_t j = 0; j < traces_exp.size(); ++j) {
+        ASSERT_EQ(traces_act[i][j], traces_exp[j])
+            << "thread_id=" << i << ", trace_id=" << j;
+      }
     }
   }
 };
@@ -978,5 +986,62 @@ void MakeBackpressurePipeline(size_t dop,
 TYPED_TEST(PipelineTaskTest, Backpressure) {
   std::unique_ptr<pipelang::ImperativePipeline> pipeline;
   MakeBackpressurePipeline(4, pipeline);
+  this->TestTracePipeline(*pipeline);
+}
+
+TYPED_TEST(PipelineTaskTest, MultiPipe) {
+  size_t dop = 1;
+  auto pipeline = std::make_unique<pipelang::ImperativePipeline>("MultiPipe", dop);
+  auto source = pipeline->DeclSource("Source");
+  auto pipe1 = pipeline->DeclPipe("Pipe1", {source});
+  auto pipe2 = pipeline->DeclPipe("Pipe2", {pipe1});
+  auto sink = pipeline->DeclSink("Sink", {pipe2});
+  source->HasMore();
+  pipe1->PipeEven();
+  pipe2->PipeEven();
+  sink->NeedsMore();
+
+  source->HasMore();
+  pipe1->PipeNeedsMore();
+
+  source->HasMore();
+  pipe1->PipeNeedsMore();
+
+  source->NotReady();
+
+  source->HasMore();
+  pipe1->PipeHasMore();
+  pipe2->PipeNeedsMore();
+
+  pipe1->PipeHasMore();
+  pipe2->PipeNeedsMore();
+
+  pipe1->PipeEven();
+  pipe2->PipeEven();
+  sink->NeedsMore();
+
+  source->HasMore();
+  pipe1->PipeHasMore();
+  pipe2->PipeHasMore();
+  sink->NeedsMore();
+
+  pipe2->PipeHasMore();
+  sink->NeedsMore();
+
+  pipe2->PipeEven();
+  sink->NeedsMore();
+
+  pipe1->PipeEven();
+  pipe2->PipeHasMore();
+  sink->NeedsMore();
+
+  pipe2->PipeEven();
+  sink->NeedsMore();
+
+  source->Finished(Batch{});
+  pipe1->PipeEven();
+  pipe2->PipeEven();
+  sink->NeedsMore();
+
   this->TestTracePipeline(*pipeline);
 }

@@ -157,11 +157,11 @@ OpResult PipelineTask::Plex::Pipe(const PipelineContext& pipeline_context,
                                   const TaskContext& task_context, ThreadId thread_id,
                                   size_t pipe_id, std::optional<Batch> input) {
   for (size_t i = pipe_id; i < pipes_.size(); ++i) {
-    OBSERVE(OnPipelinePipeBegin, task_, plex_id_, pipe_id, pipeline_context, task_context,
+    OBSERVE(OnPipelinePipeBegin, task_, plex_id_, i, pipeline_context, task_context,
             thread_id, input);
     auto result =
         pipes_[i].first(pipeline_context, task_context, thread_id, std::move(input));
-    OBSERVE(OnPipelinePipeEnd, task_, plex_id_, pipe_id, pipeline_context, task_context,
+    OBSERVE(OnPipelinePipeEnd, task_, plex_id_, i, pipeline_context, task_context,
             thread_id, result);
     if (!result.ok()) {
       cancelled_ = true;
