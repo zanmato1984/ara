@@ -887,3 +887,48 @@ TYPED_TEST(PipelineTaskTest, Drain) {
   MakeDrainPipeline(4, pipeline);
   this->TestTracePipeline(*pipeline);
 }
+
+void MakeImplicitSourcePipeline(size_t dop,
+                                std::unique_ptr<pipelang::ImperativePipeline>& result) {
+  result = std::make_unique<pipelang::ImperativePipeline>("ImplicitSource", dop);
+  auto& pipeline = *result;
+  auto source = pipeline.DeclSource("Source");
+  auto pipe = pipeline.DeclPipe("Pipe", {source});
+  auto implicit_source = pipeline.DeclImplicitSource("ImplicitSource", pipe);
+  auto sink = pipeline.DeclSink("Sink", {pipe});
+  source->Finished(Batch{});
+  pipe->PipeEven();
+  sink->NeedsMore();
+  implicit_source->Finished(Batch{});
+  sink->NeedsMore();
+
+  auto logical = pipeline.ToLogicalPipeline();
+  ASSERT_EQ(logical.Name(), "ImplicitSource");
+  ASSERT_EQ(logical.Plexes().size(), 1);
+  ASSERT_EQ(logical.Plexes()[0].source_op, source);
+  ASSERT_EQ(logical.Plexes()[0].pipe_ops.size(), 1);
+  ASSERT_EQ(logical.SinkOp(), sink);
+
+  ASSERT_EQ(pipeline.Traces().size(), 5);
+  ASSERT_EQ(
+      pipeline.Traces()[0],
+      (pipelang::ImperativeTrace{"Source", "Source", OpOutput::Finished({}).ToString()}));
+  ASSERT_EQ(
+      pipeline.Traces()[1],
+      (pipelang::ImperativeTrace{"Pipe", "Pipe", OpOutput::PipeEven({}).ToString()}));
+  ASSERT_EQ(pipeline.Traces()[2],
+            (pipelang::ImperativeTrace{"Sink", "Sink",
+                                       OpOutput::PipeSinkNeedsMore().ToString()}));
+  ASSERT_EQ(pipeline.Traces()[3],
+            (pipelang::ImperativeTrace{"ImplicitSource", "Source",
+                                       OpOutput::Finished({}).ToString()}));
+  ASSERT_EQ(pipeline.Traces()[4],
+            (pipelang::ImperativeTrace{"Sink", "Sink",
+                                       OpOutput::PipeSinkNeedsMore().ToString()}));
+}
+
+TYPED_TEST(PipelineTaskTest, ImplicitSource) {
+  std::unique_ptr<pipelang::ImperativePipeline> pipeline;
+  MakeImplicitSourcePipeline(4, pipeline);
+  this->TestTracePipeline(*pipeline);
+}
