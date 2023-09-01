@@ -93,7 +93,7 @@ struct OpOutput {
     return output;
   }
   static OpOutput SinkBackpressure(task::Backpressure backpressure) {
-    auto output = OpOutput(Code::SOURCE_PIPE_HAS_MORE);
+    auto output = OpOutput(Code::SINK_BACKPRESSURE);
     output.payload_ = std::move(backpressure);
     return output;
   }

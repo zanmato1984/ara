@@ -932,3 +932,51 @@ TYPED_TEST(PipelineTaskTest, ImplicitSource) {
   MakeImplicitSourcePipeline(4, pipeline);
   this->TestTracePipeline(*pipeline);
 }
+
+void MakeBackpressurePipeline(size_t dop,
+                              std::unique_ptr<pipelang::ImperativePipeline>& result) {
+  result = std::make_unique<pipelang::ImperativePipeline>("Backpressure", dop);
+  auto& pipeline = *result;
+  auto source = pipeline.DeclSource("Source");
+  auto pipe = pipeline.DeclPipe("Pipe", {source});
+  auto sink = pipeline.DeclSink("Sink", {pipe});
+  source->HasMore();
+  pipe->PipeEven();
+  sink->Backpressure();
+  source->Finished(Batch{});
+  pipe->PipeEven();
+  sink->NeedsMore();
+
+  auto logical = pipeline.ToLogicalPipeline();
+  ASSERT_EQ(logical.Name(), "Backpressure");
+  ASSERT_EQ(logical.Plexes().size(), 1);
+  ASSERT_EQ(logical.Plexes()[0].source_op, source);
+  ASSERT_EQ(logical.Plexes()[0].pipe_ops.size(), 1);
+  ASSERT_EQ(logical.SinkOp(), sink);
+
+  ASSERT_EQ(pipeline.Traces().size(), 6);
+  ASSERT_EQ(pipeline.Traces()[0],
+            (pipelang::ImperativeTrace{"Source", "Source",
+                                       OpOutput::SourcePipeHasMore({}).ToString()}));
+  ASSERT_EQ(
+      pipeline.Traces()[1],
+      (pipelang::ImperativeTrace{"Pipe", "Pipe", OpOutput::PipeEven({}).ToString()}));
+  ASSERT_EQ(pipeline.Traces()[2],
+            (pipelang::ImperativeTrace{"Sink", "Sink",
+                                       OpOutput::SinkBackpressure({}).ToString()}));
+  ASSERT_EQ(
+      pipeline.Traces()[3],
+      (pipelang::ImperativeTrace{"Source", "Source", OpOutput::Finished({}).ToString()}));
+  ASSERT_EQ(
+      pipeline.Traces()[4],
+      (pipelang::ImperativeTrace{"Pipe", "Pipe", OpOutput::PipeEven({}).ToString()}));
+  ASSERT_EQ(pipeline.Traces()[5],
+            (pipelang::ImperativeTrace{"Sink", "Sink",
+                                       OpOutput::PipeSinkNeedsMore().ToString()}));
+}
+
+TYPED_TEST(PipelineTaskTest, Backpressure) {
+  std::unique_ptr<pipelang::ImperativePipeline> pipeline;
+  MakeBackpressurePipeline(4, pipeline);
+  this->TestTracePipeline(*pipeline);
+}
