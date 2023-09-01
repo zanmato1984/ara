@@ -1240,3 +1240,8 @@ TYPED_TEST(PipelineTaskTest, MultiDrain) {
 
   this->TestTracePipeline(*pipeline);
 }
+
+// TODO: Pipe/Drain after implicit sources.
+// TODO: Multi-plex.
+// TODO: Multi-physical.
+// TODO: Backpressure everywhere.
