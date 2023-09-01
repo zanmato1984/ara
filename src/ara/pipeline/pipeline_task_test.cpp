@@ -20,21 +20,25 @@ using namespace ara::pipeline;
 using namespace ara::task;
 using namespace ara::schedule;
 
+std::string TaskName(const std::string& pipeline_name, size_t id = 0) {
+  return "Task of PhysicalPipeline" + std::to_string(id) + "(" + pipeline_name + ")";
+}
+
 namespace pipelang {
 
 using ImperativeInstruction = OpResult;
 
 struct ImperativeTrace {
-  std::string op;
+  std::string entity;
   std::string method;
-  std::optional<std::string> payload;
+  std::string payload;
 
   bool operator==(const ImperativeTrace& other) const {
-    return op == other.op && method == other.method && payload == other.payload;
+    return entity == other.entity && method == other.method && payload == other.payload;
   }
 
   friend void PrintTo(const ImperativeTrace& trace, std::ostream* os) {
-    *os << trace.op << "::" << trace.method << "(" << trace.payload.value_or("") << ")";
+    *os << trace.entity << "::" << trace.method << "(" << trace.payload << ")";
   }
 };
 
@@ -56,14 +60,13 @@ class ImperativePipeline {
 
   ImperativeSource* DeclImplicitSource(std::string, ImperativePipe*);
 
-  const std::vector<std::shared_ptr<ImperativeSource>>& Sources() const {
-    return sources_;
-  }
+  void Trace(ImperativeTrace trace) { traces_.push_back(std::move(trace)); }
 
   const std::vector<ImperativeTrace>& Traces() const { return traces_; }
 
   LogicalPipeline ToLogicalPipeline() const;
 
+  const std::string& Name() const { return name_; }
   size_t Dop() const { return dop_; }
 
  private:
@@ -88,10 +91,15 @@ class ImperativeOp : public internal::Meta {
   void SetChild(std::shared_ptr<ImperativeOp> child) { child_ = std::move(child); }
 
  protected:
-  void InstructAndTrace(ImperativeInstruction instruction, std::string method) {
+  void OpInstructAndTrace(ImperativeInstruction instruction, std::string method) {
     ImperativeTrace trace{Meta::Name(), std::move(method), instruction->ToString()};
     instructions_.emplace_back(std::move(instruction));
-    pipeline_->traces_.emplace_back(std::move(trace));
+    pipeline_->Trace(std::move(trace));
+  }
+
+  void TaskTrace(ImperativeInstruction instruction, size_t pipeline_id = 0) {
+    pipeline_->Trace(ImperativeTrace{TaskName(pipeline_->Name(), pipeline_id), "Run",
+                                     instruction->ToString()});
   }
 
   ImperativeInstruction Fetch(ThreadId thread_id) {
@@ -116,10 +124,17 @@ class ImperativeSource : public ImperativeOp, public SourceOp {
       : ImperativeOp(std::move(name), "ImperativeSource", pipeline),
         SourceOp(ImperativeOp::Name(), ImperativeOp::Desc()) {}
 
-  void NotReady() { InstructAndTrace(OpOutput::SourceNotReady(), "Source"); }
-  void HasMore() { InstructAndTrace(OpOutput::SourcePipeHasMore(Batch{}), "Source"); }
-  void Finished(std::optional<Batch> batch = std::nullopt) {
-    InstructAndTrace(OpOutput::Finished(std::move(batch)), "Source");
+  void NotReady(size_t task_id = 0) {
+    OpInstructAndTrace(OpOutput::SourceNotReady(), "Source");
+    TaskTrace(OpOutput::SourceNotReady(), task_id);
+  }
+  void HasMore() { OpInstructAndTrace(OpOutput::SourcePipeHasMore(Batch{}), "Source"); }
+  void Finished(std::optional<Batch> batch = std::nullopt, size_t task_id = 0) {
+    bool has_value = batch.has_value();
+    OpInstructAndTrace(OpOutput::Finished(std::move(batch)), "Source");
+    if (!has_value) {
+      TaskTrace(OpOutput::Finished(), task_id);
+    }
   }
 
   PipelineSource Source() override {
@@ -146,27 +161,42 @@ class ImperativePipe : public ImperativeOp, public PipeOp {
     implicit_source_ = std::move(implicit_source);
   }
 
-  void PipeEven() { InstructAndTrace(OpOutput::PipeEven(Batch{}), "Pipe"); }
-  void PipeNeedsMore() { InstructAndTrace(OpOutput::PipeSinkNeedsMore(), "Pipe"); }
-  void PipeHasMore() { InstructAndTrace(OpOutput::SourcePipeHasMore(Batch{}), "Pipe"); }
-  void PipeYield() { InstructAndTrace(OpOutput::PipeYield(), "Pipe"); }
-  void PipeYieldBack() { InstructAndTrace(OpOutput::PipeYieldBack(), "Pipe"); }
+  void PipeEven() { OpInstructAndTrace(OpOutput::PipeEven(Batch{}), "Pipe"); }
+  void PipeNeedsMore(size_t task_id = 0) {
+    OpInstructAndTrace(OpOutput::PipeSinkNeedsMore(), "Pipe");
+    TaskTrace(OpOutput::PipeSinkNeedsMore(), task_id);
+  }
+  void PipeHasMore() { OpInstructAndTrace(OpOutput::SourcePipeHasMore(Batch{}), "Pipe"); }
+  void PipeYield(size_t task_id = 0) {
+    OpInstructAndTrace(OpOutput::PipeYield(), "Pipe");
+    TaskTrace(OpOutput::PipeYield(), task_id);
+  }
+  void PipeYieldBack(size_t task_id = 0) {
+    OpInstructAndTrace(OpOutput::PipeYieldBack(), "Pipe");
+    TaskTrace(OpOutput::PipeYieldBack());
+  }
 
   void DrainHasMore() {
     has_drain_ = true;
-    InstructAndTrace(OpOutput::SourcePipeHasMore(Batch{}), "Drain");
+    OpInstructAndTrace(OpOutput::SourcePipeHasMore(Batch{}), "Drain");
   }
-  void DrainYield() {
+  void DrainYield(size_t task_id = 0) {
     has_drain_ = true;
-    InstructAndTrace(OpOutput::PipeYield(), "Drain");
+    OpInstructAndTrace(OpOutput::PipeYield(), "Drain");
+    TaskTrace(OpOutput::PipeYield(), task_id);
   }
-  void DrainFinished(std::optional<Batch> batch = std::nullopt) {
+  void DrainYieldBack(size_t task_id = 0) {
     has_drain_ = true;
-    InstructAndTrace(OpOutput::Finished(std::move(batch)), "Drain");
+    OpInstructAndTrace(OpOutput::PipeYieldBack(), "Drain");
+    TaskTrace(OpOutput::PipeYieldBack(), task_id);
   }
-  void DrainYieldBack() {
+  void DrainFinished(std::optional<Batch> batch = std::nullopt, size_t task_id = 0) {
     has_drain_ = true;
-    InstructAndTrace(OpOutput::PipeYieldBack(), "Drain");
+    bool has_value = batch.has_value();
+    OpInstructAndTrace(OpOutput::Finished(std::move(batch)), "Drain");
+    if (!has_value) {
+      TaskTrace(OpOutput::Finished(), task_id);
+    }
   }
 
   PipelinePipe Pipe() override {
@@ -198,8 +228,14 @@ class ImperativeSink : public ImperativeOp, public SinkOp {
         SinkOp(ImperativeOp::Name(), ImperativeOp::Desc()),
         finished_(false) {}
 
-  void NeedsMore() { InstructAndTrace(OpOutput::PipeSinkNeedsMore(), "Sink"); }
-  void Backpressure() { InstructAndTrace(OpOutput::SinkBackpressure({}), "Sink"); }
+  void NeedsMore(size_t task_id = 0) {
+    OpInstructAndTrace(OpOutput::PipeSinkNeedsMore(), "Sink");
+    TaskTrace(OpOutput::PipeSinkNeedsMore(), task_id);
+  }
+  void Backpressure(size_t task_id = 0) {
+    OpInstructAndTrace(OpOutput::SinkBackpressure({}), "Sink");
+    TaskTrace(OpOutput::SinkBackpressure({}), task_id);
+  }
 
   PipelineSink Sink() override {
     return [&](const PipelineContext&, const TaskContext& task_context,
@@ -207,14 +243,14 @@ class ImperativeSink : public ImperativeOp, public SinkOp {
       auto result = Fetch(thread_id);
       if (result.ok() && result->IsSinkBackpressure()) {
         ARA_CHECK(task_context.backpressure_pair_factory.has_value());
-        auto backpressure_pair = task_context.backpressure_pair_factory.value()(
-            task_context, Task("", "", {}), thread_id);
-        ARA_RETURN_NOT_OK(backpressure_pair);
+        ARA_ASSIGN_OR_RAISE(auto backpressure_pair,
+                            task_context.backpressure_pair_factory.value()(
+                                task_context, Task("", "", {}), thread_id));
         {
           std::lock_guard<std::mutex> lock(mutex_);
-          backpressure_callbacks_.push_back(std::move(backpressure_pair->second));
+          backpressure_callbacks_.push_back(std::move(backpressure_pair.second));
         }
-        return OpOutput::SinkBackpressure(std::move(backpressure_pair->first));
+        return OpOutput::SinkBackpressure(std::move(backpressure_pair.first));
       } else {
         return std::move(result);
       }
@@ -319,10 +355,17 @@ LogicalPipeline ImperativePipeline::ToLogicalPipeline() const {
   return LogicalPipeline(name_, std::move(plexes), sink);
 }
 
-// TODO: Trace the task begin/end.
 class ImperativeTracer : public PipelineObserver {
  public:
   ImperativeTracer(size_t dop = 1) : traces_(dop) {}
+
+  Status OnPipelineTaskEnd(const PipelineTask& pipeline_task, size_t plex,
+                           const PipelineContext&, const task::TaskContext&,
+                           ThreadId thread_id, const OpResult& result) override {
+    traces_[thread_id].push_back(
+        ImperativeTrace{pipeline_task.Name(), "Run", result->ToString()});
+    return Status::OK();
+  }
 
   Status OnPipelineSourceEnd(const PipelineTask& pipeline_task, size_t plex,
                              const PipelineContext&, const task::TaskContext&,
@@ -458,23 +501,27 @@ TYPED_TEST_SUITE(PipelineTaskTest, SchedulerTypes);
 
 void MakeEmptySourcePipeline(size_t dop,
                              std::unique_ptr<pipelang::ImperativePipeline>& result) {
-  result = std::make_unique<pipelang::ImperativePipeline>("EmptySource", dop);
+  auto name = "EmptySource";
+  result = std::make_unique<pipelang::ImperativePipeline>(name, dop);
   auto& pipeline = *result;
   auto source = pipeline.DeclSource("Source");
   auto sink = pipeline.DeclSink("Sink", {source});
   source->Finished();
 
   auto logical = pipeline.ToLogicalPipeline();
-  ASSERT_EQ(logical.Name(), "EmptySource");
+  ASSERT_EQ(logical.Name(), name);
   ASSERT_EQ(logical.Plexes().size(), 1);
   ASSERT_EQ(logical.Plexes()[0].source_op, source);
   ASSERT_TRUE(logical.Plexes()[0].pipe_ops.empty());
   ASSERT_EQ(logical.SinkOp(), sink);
 
-  ASSERT_EQ(pipeline.Traces().size(), 1);
+  ASSERT_EQ(pipeline.Traces().size(), 2);
   ASSERT_EQ(
       pipeline.Traces()[0],
       (pipelang::ImperativeTrace{"Source", "Source", OpOutput::Finished().ToString()}));
+  ASSERT_EQ(pipeline.Traces()[1],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::Finished().ToString()}));
 }
 
 TYPED_TEST(PipelineTaskTest, EmptySource) {
@@ -485,7 +532,8 @@ TYPED_TEST(PipelineTaskTest, EmptySource) {
 
 void MakeEmptySourceNotReadyPipeline(
     size_t dop, std::unique_ptr<pipelang::ImperativePipeline>& result) {
-  result = std::make_unique<pipelang::ImperativePipeline>("EmptySourceNotReady", dop);
+  auto name = "EmptySourceNotReady";
+  result = std::make_unique<pipelang::ImperativePipeline>(name, dop);
   auto& pipeline = *result;
   auto source = pipeline.DeclSource("Source");
   auto sink = pipeline.DeclSink("Sink", {source});
@@ -493,19 +541,25 @@ void MakeEmptySourceNotReadyPipeline(
   source->Finished();
 
   auto logical = pipeline.ToLogicalPipeline();
-  ASSERT_EQ(logical.Name(), "EmptySourceNotReady");
+  ASSERT_EQ(logical.Name(), name);
   ASSERT_EQ(logical.Plexes().size(), 1);
   ASSERT_EQ(logical.Plexes()[0].source_op, source);
   ASSERT_TRUE(logical.Plexes()[0].pipe_ops.empty());
   ASSERT_EQ(logical.SinkOp(), sink);
 
-  ASSERT_EQ(pipeline.Traces().size(), 2);
+  ASSERT_EQ(pipeline.Traces().size(), 4);
   ASSERT_EQ(pipeline.Traces()[0],
             (pipelang::ImperativeTrace{"Source", "Source",
                                        OpOutput::SourceNotReady().ToString()}));
+  ASSERT_EQ(pipeline.Traces()[1],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::SourceNotReady().ToString()}));
   ASSERT_EQ(
-      pipeline.Traces()[1],
+      pipeline.Traces()[2],
       (pipelang::ImperativeTrace{"Source", "Source", OpOutput::Finished().ToString()}));
+  ASSERT_EQ(pipeline.Traces()[3],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::Finished().ToString()}));
 }
 
 TYPED_TEST(PipelineTaskTest, EmptySourceNotReady) {
@@ -516,7 +570,8 @@ TYPED_TEST(PipelineTaskTest, EmptySourceNotReady) {
 
 void MakeTwoSourcesOneNotReadyPipeline(
     size_t dop, std::unique_ptr<pipelang::ImperativePipeline>& result) {
-  result = std::make_unique<pipelang::ImperativePipeline>("TwoSourceOneNotReady", dop);
+  auto name = "TwoSourceOneNotReady";
+  result = std::make_unique<pipelang::ImperativePipeline>(name, dop);
   auto& pipeline = *result;
   auto source1 = pipeline.DeclSource("Source1");
   auto source2 = pipeline.DeclSource("Source2");
@@ -526,23 +581,32 @@ void MakeTwoSourcesOneNotReadyPipeline(
   source1->Finished();
 
   auto logical = pipeline.ToLogicalPipeline();
-  ASSERT_EQ(logical.Name(), "TwoSourceOneNotReady");
+  ASSERT_EQ(logical.Name(), name);
   ASSERT_EQ(logical.Plexes().size(), 2);
   ASSERT_EQ(logical.Plexes()[0].source_op, source1);
   ASSERT_EQ(logical.Plexes()[1].source_op, source2);
   ASSERT_TRUE(logical.Plexes()[0].pipe_ops.empty());
   ASSERT_EQ(logical.SinkOp(), sink);
 
-  ASSERT_EQ(pipeline.Traces().size(), 3);
+  ASSERT_EQ(pipeline.Traces().size(), 6);
   ASSERT_EQ(pipeline.Traces()[0],
             (pipelang::ImperativeTrace{"Source1", "Source",
                                        OpOutput::SourceNotReady().ToString()}));
-  ASSERT_EQ(
-      pipeline.Traces()[1],
-      (pipelang::ImperativeTrace{"Source2", "Source", OpOutput::Finished().ToString()}));
+  ASSERT_EQ(pipeline.Traces()[1],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::SourceNotReady().ToString()}));
   ASSERT_EQ(
       pipeline.Traces()[2],
+      (pipelang::ImperativeTrace{"Source2", "Source", OpOutput::Finished().ToString()}));
+  ASSERT_EQ(pipeline.Traces()[3],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::Finished().ToString()}));
+  ASSERT_EQ(
+      pipeline.Traces()[4],
       (pipelang::ImperativeTrace{"Source1", "Source", OpOutput::Finished().ToString()}));
+  ASSERT_EQ(pipeline.Traces()[5],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::Finished().ToString()}));
 }
 
 TYPED_TEST(PipelineTaskTest, TwoSourceOneNotReady) {
@@ -553,7 +617,8 @@ TYPED_TEST(PipelineTaskTest, TwoSourceOneNotReady) {
 
 void MakeOnePassPipeline(size_t dop,
                          std::unique_ptr<pipelang::ImperativePipeline>& result) {
-  result = std::make_unique<pipelang::ImperativePipeline>("OnePass", dop);
+  auto name = "OnePass";
+  result = std::make_unique<pipelang::ImperativePipeline>(name, dop);
   auto& pipeline = *result;
   auto source = pipeline.DeclSource("Source");
   auto sink = pipeline.DeclSink("Sink", {source});
@@ -562,22 +627,28 @@ void MakeOnePassPipeline(size_t dop,
   source->Finished();
 
   auto logical = pipeline.ToLogicalPipeline();
-  ASSERT_EQ(logical.Name(), "OnePass");
+  ASSERT_EQ(logical.Name(), name);
   ASSERT_EQ(logical.Plexes().size(), 1);
   ASSERT_EQ(logical.Plexes()[0].source_op, source);
   ASSERT_TRUE(logical.Plexes()[0].pipe_ops.empty());
   ASSERT_EQ(logical.SinkOp(), sink);
 
-  ASSERT_EQ(pipeline.Traces().size(), 3);
+  ASSERT_EQ(pipeline.Traces().size(), 5);
   ASSERT_EQ(pipeline.Traces()[0],
             (pipelang::ImperativeTrace{"Source", "Source",
                                        OpOutput::SourcePipeHasMore({}).ToString()}));
   ASSERT_EQ(pipeline.Traces()[1],
             (pipelang::ImperativeTrace{"Sink", "Sink",
                                        OpOutput::PipeSinkNeedsMore().ToString()}));
+  ASSERT_EQ(pipeline.Traces()[2],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::PipeSinkNeedsMore().ToString()}));
   ASSERT_EQ(
-      pipeline.Traces()[2],
+      pipeline.Traces()[3],
       (pipelang::ImperativeTrace{"Source", "Source", OpOutput::Finished().ToString()}));
+  ASSERT_EQ(pipeline.Traces()[4],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::Finished().ToString()}));
 }
 
 TYPED_TEST(PipelineTaskTest, OnePass) {
@@ -588,27 +659,35 @@ TYPED_TEST(PipelineTaskTest, OnePass) {
 
 void MakeOnePassDirectFinishPipeline(
     size_t dop, std::unique_ptr<pipelang::ImperativePipeline>& result) {
-  result = std::make_unique<pipelang::ImperativePipeline>("OnePassDirectFinish", dop);
+  auto name = "OnePassDirectFinish";
+  result = std::make_unique<pipelang::ImperativePipeline>(name, dop);
   auto& pipeline = *result;
   auto source = pipeline.DeclSource("Source");
   auto sink = pipeline.DeclSink("Sink", {source});
   source->Finished(Batch{});
   sink->NeedsMore();
+  pipeline.Trace({TaskName(name), "Run", OpOutput::Finished().ToString()});
 
   auto logical = pipeline.ToLogicalPipeline();
-  ASSERT_EQ(logical.Name(), "OnePassDirectFinish");
+  ASSERT_EQ(logical.Name(), name);
   ASSERT_EQ(logical.Plexes().size(), 1);
   ASSERT_EQ(logical.Plexes()[0].source_op, source);
   ASSERT_TRUE(logical.Plexes()[0].pipe_ops.empty());
   ASSERT_EQ(logical.SinkOp(), sink);
 
-  ASSERT_EQ(pipeline.Traces().size(), 2);
+  ASSERT_EQ(pipeline.Traces().size(), 4);
   ASSERT_EQ(
       pipeline.Traces()[0],
       (pipelang::ImperativeTrace{"Source", "Source", OpOutput::Finished({}).ToString()}));
   ASSERT_EQ(pipeline.Traces()[1],
             (pipelang::ImperativeTrace{"Sink", "Sink",
                                        OpOutput::PipeSinkNeedsMore().ToString()}));
+  ASSERT_EQ(pipeline.Traces()[2],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::PipeSinkNeedsMore().ToString()}));
+  ASSERT_EQ(pipeline.Traces()[3],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::Finished().ToString()}));
 }
 
 TYPED_TEST(PipelineTaskTest, OnePassDirectFinish) {
@@ -619,7 +698,8 @@ TYPED_TEST(PipelineTaskTest, OnePassDirectFinish) {
 
 void MakeOnePassWithPipePipeline(size_t dop,
                                  std::unique_ptr<pipelang::ImperativePipeline>& result) {
-  result = std::make_unique<pipelang::ImperativePipeline>("OnePassWithPipe", dop);
+  auto name = "OnePassWithPipe";
+  result = std::make_unique<pipelang::ImperativePipeline>(name, dop);
   auto& pipeline = *result;
   auto source = pipeline.DeclSource("Source");
   auto pipe = pipeline.DeclPipe("Pipe", {source});
@@ -630,14 +710,14 @@ void MakeOnePassWithPipePipeline(size_t dop,
   source->Finished();
 
   auto logical = pipeline.ToLogicalPipeline();
-  ASSERT_EQ(logical.Name(), "OnePassWithPipe");
+  ASSERT_EQ(logical.Name(), name);
   ASSERT_EQ(logical.Plexes().size(), 1);
   ASSERT_EQ(logical.Plexes()[0].source_op, source);
   ASSERT_EQ(logical.Plexes()[0].pipe_ops.size(), 1);
   ASSERT_EQ(logical.Plexes()[0].pipe_ops[0], pipe);
   ASSERT_EQ(logical.SinkOp(), sink);
 
-  ASSERT_EQ(pipeline.Traces().size(), 4);
+  ASSERT_EQ(pipeline.Traces().size(), 6);
   ASSERT_EQ(pipeline.Traces()[0],
             (pipelang::ImperativeTrace{"Source", "Source",
                                        OpOutput::SourcePipeHasMore({}).ToString()}));
@@ -647,9 +727,15 @@ void MakeOnePassWithPipePipeline(size_t dop,
   ASSERT_EQ(pipeline.Traces()[2],
             (pipelang::ImperativeTrace{"Sink", "Sink",
                                        OpOutput::PipeSinkNeedsMore().ToString()}));
+  ASSERT_EQ(pipeline.Traces()[3],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::PipeSinkNeedsMore().ToString()}));
   ASSERT_EQ(
-      pipeline.Traces()[3],
+      pipeline.Traces()[4],
       (pipelang::ImperativeTrace{"Source", "Source", OpOutput::Finished().ToString()}));
+  ASSERT_EQ(pipeline.Traces()[5],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::Finished().ToString()}));
 }
 
 TYPED_TEST(PipelineTaskTest, OnePassWithPipe) {
@@ -660,7 +746,8 @@ TYPED_TEST(PipelineTaskTest, OnePassWithPipe) {
 
 void MakePipeNeedsMorePipeline(size_t dop,
                                std::unique_ptr<pipelang::ImperativePipeline>& result) {
-  result = std::make_unique<pipelang::ImperativePipeline>("PipeNeedsMore", dop);
+  auto name = "PipeNeedsMore";
+  result = std::make_unique<pipelang::ImperativePipeline>(name, dop);
   auto& pipeline = *result;
   auto source = pipeline.DeclSource("Source");
   auto pipe = pipeline.DeclPipe("Pipe", {source});
@@ -670,31 +757,41 @@ void MakePipeNeedsMorePipeline(size_t dop,
   source->Finished(Batch{});
   pipe->PipeEven();
   sink->NeedsMore();
+  pipeline.Trace({TaskName(name), "Run", OpOutput::Finished().ToString()});
 
   auto logical = pipeline.ToLogicalPipeline();
-  ASSERT_EQ(logical.Name(), "PipeNeedsMore");
+  ASSERT_EQ(logical.Name(), name);
   ASSERT_EQ(logical.Plexes().size(), 1);
   ASSERT_EQ(logical.Plexes()[0].source_op, source);
   ASSERT_EQ(logical.Plexes()[0].pipe_ops.size(), 1);
   ASSERT_EQ(logical.Plexes()[0].pipe_ops[0], pipe);
   ASSERT_EQ(logical.SinkOp(), sink);
 
-  ASSERT_EQ(pipeline.Traces().size(), 5);
+  ASSERT_EQ(pipeline.Traces().size(), 8);
   ASSERT_EQ(pipeline.Traces()[0],
             (pipelang::ImperativeTrace{"Source", "Source",
                                        OpOutput::SourcePipeHasMore({}).ToString()}));
   ASSERT_EQ(pipeline.Traces()[1],
             (pipelang::ImperativeTrace{"Pipe", "Pipe",
                                        OpOutput::PipeSinkNeedsMore().ToString()}));
-  ASSERT_EQ(
-      pipeline.Traces()[2],
-      (pipelang::ImperativeTrace{"Source", "Source", OpOutput::Finished({}).ToString()}));
+  ASSERT_EQ(pipeline.Traces()[2],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::PipeSinkNeedsMore().ToString()}));
   ASSERT_EQ(
       pipeline.Traces()[3],
+      (pipelang::ImperativeTrace{"Source", "Source", OpOutput::Finished({}).ToString()}));
+  ASSERT_EQ(
+      pipeline.Traces()[4],
       (pipelang::ImperativeTrace{"Pipe", "Pipe", OpOutput::PipeEven({}).ToString()}));
-  ASSERT_EQ(pipeline.Traces()[4],
+  ASSERT_EQ(pipeline.Traces()[5],
             (pipelang::ImperativeTrace{"Sink", "Sink",
                                        OpOutput::PipeSinkNeedsMore().ToString()}));
+  ASSERT_EQ(pipeline.Traces()[6],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::PipeSinkNeedsMore().ToString()}));
+  ASSERT_EQ(pipeline.Traces()[7],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::Finished().ToString()}));
 }
 
 TYPED_TEST(PipelineTaskTest, PipeNeedsMore) {
@@ -705,7 +802,8 @@ TYPED_TEST(PipelineTaskTest, PipeNeedsMore) {
 
 void MakePipeHasMorePipeline(size_t dop,
                              std::unique_ptr<pipelang::ImperativePipeline>& result) {
-  result = std::make_unique<pipelang::ImperativePipeline>("PipeHasMore", dop);
+  auto name = "PipeHasMore";
+  result = std::make_unique<pipelang::ImperativePipeline>(name, dop);
   auto& pipeline = *result;
   auto source = pipeline.DeclSource("Source");
   auto pipe = pipeline.DeclPipe("Pipe", {source});
@@ -718,14 +816,14 @@ void MakePipeHasMorePipeline(size_t dop,
   source->Finished();
 
   auto logical = pipeline.ToLogicalPipeline();
-  ASSERT_EQ(logical.Name(), "PipeHasMore");
+  ASSERT_EQ(logical.Name(), name);
   ASSERT_EQ(logical.Plexes().size(), 1);
   ASSERT_EQ(logical.Plexes()[0].source_op, source);
   ASSERT_EQ(logical.Plexes()[0].pipe_ops.size(), 1);
   ASSERT_EQ(logical.Plexes()[0].pipe_ops[0], pipe);
   ASSERT_EQ(logical.SinkOp(), sink);
 
-  ASSERT_EQ(pipeline.Traces().size(), 6);
+  ASSERT_EQ(pipeline.Traces().size(), 9);
   ASSERT_EQ(pipeline.Traces()[0],
             (pipelang::ImperativeTrace{"Source", "Source",
                                        OpOutput::SourcePipeHasMore({}).ToString()}));
@@ -735,15 +833,24 @@ void MakePipeHasMorePipeline(size_t dop,
   ASSERT_EQ(pipeline.Traces()[2],
             (pipelang::ImperativeTrace{"Sink", "Sink",
                                        OpOutput::PipeSinkNeedsMore().ToString()}));
-  ASSERT_EQ(
-      pipeline.Traces()[3],
-      (pipelang::ImperativeTrace{"Pipe", "Pipe", OpOutput::PipeEven({}).ToString()}));
-  ASSERT_EQ(pipeline.Traces()[4],
-            (pipelang::ImperativeTrace{"Sink", "Sink",
+  ASSERT_EQ(pipeline.Traces()[3],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
                                        OpOutput::PipeSinkNeedsMore().ToString()}));
   ASSERT_EQ(
-      pipeline.Traces()[5],
+      pipeline.Traces()[4],
+      (pipelang::ImperativeTrace{"Pipe", "Pipe", OpOutput::PipeEven({}).ToString()}));
+  ASSERT_EQ(pipeline.Traces()[5],
+            (pipelang::ImperativeTrace{"Sink", "Sink",
+                                       OpOutput::PipeSinkNeedsMore().ToString()}));
+  ASSERT_EQ(pipeline.Traces()[6],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::PipeSinkNeedsMore().ToString()}));
+  ASSERT_EQ(
+      pipeline.Traces()[7],
       (pipelang::ImperativeTrace{"Source", "Source", OpOutput::Finished({}).ToString()}));
+  ASSERT_EQ(pipeline.Traces()[8],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::Finished().ToString()}));
 }
 
 TYPED_TEST(PipelineTaskTest, PipeHasMore) {
@@ -754,7 +861,8 @@ TYPED_TEST(PipelineTaskTest, PipeHasMore) {
 
 void MakePipeYieldPipeline(size_t dop,
                            std::unique_ptr<pipelang::ImperativePipeline>& result) {
-  result = std::make_unique<pipelang::ImperativePipeline>("PipeYield", dop);
+  auto name = "PipeYield";
+  result = std::make_unique<pipelang::ImperativePipeline>(name, dop);
   auto& pipeline = *result;
   auto source = pipeline.DeclSource("Source");
   auto pipe = pipeline.DeclPipe("Pipe", {source});
@@ -762,51 +870,44 @@ void MakePipeYieldPipeline(size_t dop,
   source->HasMore();
   pipe->PipeYield();
   pipe->PipeYieldBack();
-  pipe->PipeEven();
-  sink->NeedsMore();
-  source->HasMore();
-  pipe->PipeYield();
-  pipe->PipeYieldBack();
   pipe->PipeNeedsMore();
   source->Finished();
 
   auto logical = pipeline.ToLogicalPipeline();
-  ASSERT_EQ(logical.Name(), "PipeYield");
+  ASSERT_EQ(logical.Name(), name);
   ASSERT_EQ(logical.Plexes().size(), 1);
   ASSERT_EQ(logical.Plexes()[0].source_op, source);
   ASSERT_EQ(logical.Plexes()[0].pipe_ops.size(), 1);
   ASSERT_EQ(logical.Plexes()[0].pipe_ops[0], pipe);
   ASSERT_EQ(logical.SinkOp(), sink);
 
-  ASSERT_EQ(pipeline.Traces().size(), 10);
+  ASSERT_EQ(pipeline.Traces().size(), 9);
   ASSERT_EQ(pipeline.Traces()[0],
             (pipelang::ImperativeTrace{"Source", "Source",
                                        OpOutput::SourcePipeHasMore({}).ToString()}));
   ASSERT_EQ(pipeline.Traces()[1], (pipelang::ImperativeTrace{
                                       "Pipe", "Pipe", OpOutput::PipeYield().ToString()}));
-  ASSERT_EQ(
-      pipeline.Traces()[2],
-      (pipelang::ImperativeTrace{"Pipe", "Pipe", OpOutput::PipeYieldBack().ToString()}));
+  ASSERT_EQ(pipeline.Traces()[2],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::PipeYield().ToString()}));
   ASSERT_EQ(
       pipeline.Traces()[3],
-      (pipelang::ImperativeTrace{"Pipe", "Pipe", OpOutput::PipeEven({}).ToString()}));
-  ASSERT_EQ(pipeline.Traces()[4],
-            (pipelang::ImperativeTrace{"Sink", "Sink",
-                                       OpOutput::PipeSinkNeedsMore().ToString()}));
-  ASSERT_EQ(pipeline.Traces()[5],
-            (pipelang::ImperativeTrace{"Source", "Source",
-                                       OpOutput::SourcePipeHasMore({}).ToString()}));
-  ASSERT_EQ(pipeline.Traces()[6], (pipelang::ImperativeTrace{
-                                      "Pipe", "Pipe", OpOutput::PipeYield().ToString()}));
-  ASSERT_EQ(
-      pipeline.Traces()[7],
       (pipelang::ImperativeTrace{"Pipe", "Pipe", OpOutput::PipeYieldBack().ToString()}));
-  ASSERT_EQ(pipeline.Traces()[8],
+  ASSERT_EQ(pipeline.Traces()[4],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::PipeYieldBack().ToString()}));
+  ASSERT_EQ(pipeline.Traces()[5],
             (pipelang::ImperativeTrace{"Pipe", "Pipe",
                                        OpOutput::PipeSinkNeedsMore().ToString()}));
+  ASSERT_EQ(pipeline.Traces()[6],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::PipeSinkNeedsMore().ToString()}));
   ASSERT_EQ(
-      pipeline.Traces()[9],
+      pipeline.Traces()[7],
       (pipelang::ImperativeTrace{"Source", "Source", OpOutput::Finished({}).ToString()}));
+  ASSERT_EQ(pipeline.Traces()[8],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::Finished().ToString()}));
 }
 
 TYPED_TEST(PipelineTaskTest, PipeYield) {
@@ -817,7 +918,8 @@ TYPED_TEST(PipelineTaskTest, PipeYield) {
 
 void MakeDrainPipeline(size_t dop,
                        std::unique_ptr<pipelang::ImperativePipeline>& result) {
-  result = std::make_unique<pipelang::ImperativePipeline>("Drain", dop);
+  auto name = "Drain";
+  result = std::make_unique<pipelang::ImperativePipeline>(name, dop);
   auto& pipeline = *result;
   auto source = pipeline.DeclSource("Source");
   auto pipe = pipeline.DeclPipe("Pipe", {source});
@@ -836,16 +938,17 @@ void MakeDrainPipeline(size_t dop,
   sink->NeedsMore();
   pipe->DrainFinished(Batch{});
   sink->NeedsMore();
+  pipeline.Trace({TaskName(name), "Run", OpOutput::Finished().ToString()});
 
   auto logical = pipeline.ToLogicalPipeline();
-  ASSERT_EQ(logical.Name(), "Drain");
+  ASSERT_EQ(logical.Name(), name);
   ASSERT_EQ(logical.Plexes().size(), 1);
   ASSERT_EQ(logical.Plexes()[0].source_op, source);
   ASSERT_EQ(logical.Plexes()[0].pipe_ops.size(), 1);
   ASSERT_EQ(logical.Plexes()[0].pipe_ops[0], pipe);
   ASSERT_EQ(logical.SinkOp(), sink);
 
-  ASSERT_EQ(pipeline.Traces().size(), 14);
+  ASSERT_EQ(pipeline.Traces().size(), 22);
   ASSERT_EQ(pipeline.Traces()[0],
             (pipelang::ImperativeTrace{"Source", "Source",
                                        OpOutput::SourcePipeHasMore({}).ToString()}));
@@ -855,39 +958,63 @@ void MakeDrainPipeline(size_t dop,
   ASSERT_EQ(pipeline.Traces()[2],
             (pipelang::ImperativeTrace{"Sink", "Sink",
                                        OpOutput::PipeSinkNeedsMore().ToString()}));
-  ASSERT_EQ(
-      pipeline.Traces()[3],
-      (pipelang::ImperativeTrace{"Source", "Source", OpOutput::Finished({}).ToString()}));
+  ASSERT_EQ(pipeline.Traces()[3],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::PipeSinkNeedsMore().ToString()}));
   ASSERT_EQ(
       pipeline.Traces()[4],
+      (pipelang::ImperativeTrace{"Source", "Source", OpOutput::Finished({}).ToString()}));
+  ASSERT_EQ(
+      pipeline.Traces()[5],
       (pipelang::ImperativeTrace{"Pipe", "Pipe", OpOutput::PipeEven({}).ToString()}));
-  ASSERT_EQ(pipeline.Traces()[5],
-            (pipelang::ImperativeTrace{"Sink", "Sink",
-                                       OpOutput::PipeSinkNeedsMore().ToString()}));
   ASSERT_EQ(pipeline.Traces()[6],
-            (pipelang::ImperativeTrace{"Pipe", "Drain",
-                                       OpOutput::SourcePipeHasMore({}).ToString()}));
+            (pipelang::ImperativeTrace{"Sink", "Sink",
+                                       OpOutput::PipeSinkNeedsMore().ToString()}));
   ASSERT_EQ(pipeline.Traces()[7],
-            (pipelang::ImperativeTrace{"Sink", "Sink",
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
                                        OpOutput::PipeSinkNeedsMore().ToString()}));
-  ASSERT_EQ(
-      pipeline.Traces()[8],
-      (pipelang::ImperativeTrace{"Pipe", "Drain", OpOutput::PipeYield().ToString()}));
-  ASSERT_EQ(
-      pipeline.Traces()[9],
-      (pipelang::ImperativeTrace{"Pipe", "Drain", OpOutput::PipeYieldBack().ToString()}));
-  ASSERT_EQ(pipeline.Traces()[10],
+  ASSERT_EQ(pipeline.Traces()[8],
             (pipelang::ImperativeTrace{"Pipe", "Drain",
                                        OpOutput::SourcePipeHasMore({}).ToString()}));
-  ASSERT_EQ(pipeline.Traces()[11],
+  ASSERT_EQ(pipeline.Traces()[9],
             (pipelang::ImperativeTrace{"Sink", "Sink",
+                                       OpOutput::PipeSinkNeedsMore().ToString()}));
+  ASSERT_EQ(pipeline.Traces()[10],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
                                        OpOutput::PipeSinkNeedsMore().ToString()}));
   ASSERT_EQ(
-      pipeline.Traces()[12],
-      (pipelang::ImperativeTrace{"Pipe", "Drain", OpOutput::Finished({}).ToString()}));
-  ASSERT_EQ(pipeline.Traces()[13],
+      pipeline.Traces()[11],
+      (pipelang::ImperativeTrace{"Pipe", "Drain", OpOutput::PipeYield().ToString()}));
+  ASSERT_EQ(pipeline.Traces()[12],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::PipeYield().ToString()}));
+  ASSERT_EQ(
+      pipeline.Traces()[13],
+      (pipelang::ImperativeTrace{"Pipe", "Drain", OpOutput::PipeYieldBack().ToString()}));
+  ASSERT_EQ(pipeline.Traces()[14],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::PipeYieldBack().ToString()}));
+  ASSERT_EQ(pipeline.Traces()[15],
+            (pipelang::ImperativeTrace{"Pipe", "Drain",
+                                       OpOutput::SourcePipeHasMore({}).ToString()}));
+  ASSERT_EQ(pipeline.Traces()[16],
             (pipelang::ImperativeTrace{"Sink", "Sink",
                                        OpOutput::PipeSinkNeedsMore().ToString()}));
+  ASSERT_EQ(pipeline.Traces()[17],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::PipeSinkNeedsMore().ToString()}));
+  ASSERT_EQ(
+      pipeline.Traces()[18],
+      (pipelang::ImperativeTrace{"Pipe", "Drain", OpOutput::Finished({}).ToString()}));
+  ASSERT_EQ(pipeline.Traces()[19],
+            (pipelang::ImperativeTrace{"Sink", "Sink",
+                                       OpOutput::PipeSinkNeedsMore().ToString()}));
+  ASSERT_EQ(pipeline.Traces()[20],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::PipeSinkNeedsMore().ToString()}));
+  ASSERT_EQ(pipeline.Traces()[21],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::Finished().ToString()}));
 }
 
 TYPED_TEST(PipelineTaskTest, Drain) {
@@ -898,7 +1025,8 @@ TYPED_TEST(PipelineTaskTest, Drain) {
 
 void MakeImplicitSourcePipeline(size_t dop,
                                 std::unique_ptr<pipelang::ImperativePipeline>& result) {
-  result = std::make_unique<pipelang::ImperativePipeline>("ImplicitSource", dop);
+  auto name = "ImplicitSource";
+  result = std::make_unique<pipelang::ImperativePipeline>(name, dop);
   auto& pipeline = *result;
   auto source = pipeline.DeclSource("Source");
   auto pipe = pipeline.DeclPipe("Pipe", {source});
@@ -907,17 +1035,19 @@ void MakeImplicitSourcePipeline(size_t dop,
   source->Finished(Batch{});
   pipe->PipeEven();
   sink->NeedsMore();
-  implicit_source->Finished(Batch{});
-  sink->NeedsMore();
+  pipeline.Trace({TaskName(name), "Run", OpOutput::Finished().ToString()});
+  implicit_source->Finished(Batch{}, 1);
+  sink->NeedsMore(1);
+  pipeline.Trace({TaskName(name, 1), "Run", OpOutput::Finished().ToString()});
 
   auto logical = pipeline.ToLogicalPipeline();
-  ASSERT_EQ(logical.Name(), "ImplicitSource");
+  ASSERT_EQ(logical.Name(), name);
   ASSERT_EQ(logical.Plexes().size(), 1);
   ASSERT_EQ(logical.Plexes()[0].source_op, source);
   ASSERT_EQ(logical.Plexes()[0].pipe_ops.size(), 1);
   ASSERT_EQ(logical.SinkOp(), sink);
 
-  ASSERT_EQ(pipeline.Traces().size(), 5);
+  ASSERT_EQ(pipeline.Traces().size(), 9);
   ASSERT_EQ(
       pipeline.Traces()[0],
       (pipelang::ImperativeTrace{"Source", "Source", OpOutput::Finished({}).ToString()}));
@@ -928,11 +1058,23 @@ void MakeImplicitSourcePipeline(size_t dop,
             (pipelang::ImperativeTrace{"Sink", "Sink",
                                        OpOutput::PipeSinkNeedsMore().ToString()}));
   ASSERT_EQ(pipeline.Traces()[3],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::PipeSinkNeedsMore().ToString()}));
+  ASSERT_EQ(pipeline.Traces()[4],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::Finished().ToString()}));
+  ASSERT_EQ(pipeline.Traces()[5],
             (pipelang::ImperativeTrace{"ImplicitSource", "Source",
                                        OpOutput::Finished({}).ToString()}));
-  ASSERT_EQ(pipeline.Traces()[4],
+  ASSERT_EQ(pipeline.Traces()[6],
             (pipelang::ImperativeTrace{"Sink", "Sink",
                                        OpOutput::PipeSinkNeedsMore().ToString()}));
+  ASSERT_EQ(pipeline.Traces()[7],
+            (pipelang::ImperativeTrace{TaskName(name, 1), "Run",
+                                       OpOutput::PipeSinkNeedsMore().ToString()}));
+  ASSERT_EQ(pipeline.Traces()[8],
+            (pipelang::ImperativeTrace{TaskName(name, 1), "Run",
+                                       OpOutput::Finished().ToString()}));
 }
 
 TYPED_TEST(PipelineTaskTest, ImplicitSource) {
@@ -943,7 +1085,8 @@ TYPED_TEST(PipelineTaskTest, ImplicitSource) {
 
 void MakeBackpressurePipeline(size_t dop,
                               std::unique_ptr<pipelang::ImperativePipeline>& result) {
-  result = std::make_unique<pipelang::ImperativePipeline>("Backpressure", dop);
+  auto name = "Backpressure";
+  result = std::make_unique<pipelang::ImperativePipeline>(name, dop);
   auto& pipeline = *result;
   auto source = pipeline.DeclSource("Source");
   auto pipe = pipeline.DeclPipe("Pipe", {source});
@@ -954,15 +1097,16 @@ void MakeBackpressurePipeline(size_t dop,
   source->Finished(Batch{});
   pipe->PipeEven();
   sink->NeedsMore();
+  pipeline.Trace({TaskName(name), "Run", OpOutput::Finished().ToString()});
 
   auto logical = pipeline.ToLogicalPipeline();
-  ASSERT_EQ(logical.Name(), "Backpressure");
+  ASSERT_EQ(logical.Name(), name);
   ASSERT_EQ(logical.Plexes().size(), 1);
   ASSERT_EQ(logical.Plexes()[0].source_op, source);
   ASSERT_EQ(logical.Plexes()[0].pipe_ops.size(), 1);
   ASSERT_EQ(logical.SinkOp(), sink);
 
-  ASSERT_EQ(pipeline.Traces().size(), 6);
+  ASSERT_EQ(pipeline.Traces().size(), 9);
   ASSERT_EQ(pipeline.Traces()[0],
             (pipelang::ImperativeTrace{"Source", "Source",
                                        OpOutput::SourcePipeHasMore({}).ToString()}));
@@ -972,15 +1116,24 @@ void MakeBackpressurePipeline(size_t dop,
   ASSERT_EQ(pipeline.Traces()[2],
             (pipelang::ImperativeTrace{"Sink", "Sink",
                                        OpOutput::SinkBackpressure({}).ToString()}));
-  ASSERT_EQ(
-      pipeline.Traces()[3],
-      (pipelang::ImperativeTrace{"Source", "Source", OpOutput::Finished({}).ToString()}));
+  ASSERT_EQ(pipeline.Traces()[3],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::SinkBackpressure({}).ToString()}));
   ASSERT_EQ(
       pipeline.Traces()[4],
+      (pipelang::ImperativeTrace{"Source", "Source", OpOutput::Finished({}).ToString()}));
+  ASSERT_EQ(
+      pipeline.Traces()[5],
       (pipelang::ImperativeTrace{"Pipe", "Pipe", OpOutput::PipeEven({}).ToString()}));
-  ASSERT_EQ(pipeline.Traces()[5],
+  ASSERT_EQ(pipeline.Traces()[6],
             (pipelang::ImperativeTrace{"Sink", "Sink",
                                        OpOutput::PipeSinkNeedsMore().ToString()}));
+  ASSERT_EQ(pipeline.Traces()[7],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::PipeSinkNeedsMore().ToString()}));
+  ASSERT_EQ(pipeline.Traces()[8],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::Finished().ToString()}));
 }
 
 TYPED_TEST(PipelineTaskTest, Backpressure) {
@@ -990,8 +1143,9 @@ TYPED_TEST(PipelineTaskTest, Backpressure) {
 }
 
 TYPED_TEST(PipelineTaskTest, MultiPipe) {
-  size_t dop = 1;
-  auto pipeline = std::make_unique<pipelang::ImperativePipeline>("MultiPipe", dop);
+  size_t dop = 4;
+  auto name = "MultiPipe";
+  auto pipeline = std::make_unique<pipelang::ImperativePipeline>(name, dop);
   auto source = pipeline->DeclSource("Source");
   auto pipe1 = pipeline->DeclPipe("Pipe1", {source});
   auto pipe2 = pipeline->DeclPipe("Pipe2", {pipe1});
@@ -1042,6 +1196,8 @@ TYPED_TEST(PipelineTaskTest, MultiPipe) {
   pipe1->PipeEven();
   pipe2->PipeEven();
   sink->NeedsMore();
+
+  pipeline->Trace({TaskName(name), "Run", OpOutput::Finished().ToString()});
 
   this->TestTracePipeline(*pipeline);
 }
