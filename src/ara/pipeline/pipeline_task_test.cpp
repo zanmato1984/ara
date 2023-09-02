@@ -60,7 +60,7 @@ class ImperativePipeline {
 
   ImperativeSource* DeclImplicitSource(std::string, ImperativePipe*);
 
-  void TaskFinished(size_t task_id = 0) {
+  void PlexFinished(size_t task_id = 0) {
     Trace(ImperativeTrace{TaskName(name_, task_id), "Run",
                           OpOutput::Finished().ToString()});
   }
@@ -505,7 +505,7 @@ void MakeEmptySourcePipeline(size_t dop,
   auto source = pipeline->DeclSource("Source");
   auto sink = pipeline->DeclSink("Sink", {source});
   source->Finished();
-  pipeline->TaskFinished();
+  pipeline->PlexFinished();
 
   auto logical = pipeline->ToLogicalPipeline();
   ASSERT_EQ(logical.Name(), name);
@@ -538,7 +538,7 @@ void MakeEmptySourceNotReadyPipeline(
   auto sink = pipeline->DeclSink("Sink", {source});
   source->NotReady();
   source->Finished();
-  pipeline->TaskFinished();
+  pipeline->PlexFinished();
 
   auto logical = pipeline->ToLogicalPipeline();
   ASSERT_EQ(logical.Name(), name);
@@ -578,9 +578,9 @@ void MakeTwoSourcesOneNotReadyPipeline(
   auto sink = pipeline->DeclSink("Sink", {source1, source2});
   source1->NotReady();
   source2->Finished();
-  pipeline->TaskFinished();
+  pipeline->PlexFinished();
   source1->Finished();
-  pipeline->TaskFinished();
+  pipeline->PlexFinished();
 
   auto logical = pipeline->ToLogicalPipeline();
   ASSERT_EQ(logical.Name(), name);
@@ -627,7 +627,7 @@ void MakeOnePassPipeline(size_t dop,
   source->HasMore();
   sink->NeedsMore();
   source->Finished();
-  pipeline->TaskFinished();
+  pipeline->PlexFinished();
 
   auto logical = pipeline->ToLogicalPipeline();
   ASSERT_EQ(logical.Name(), name);
@@ -669,7 +669,7 @@ void MakeOnePassDirectFinishPipeline(
   auto sink = pipeline->DeclSink("Sink", {source});
   source->Finished(Batch{});
   sink->NeedsMore();
-  pipeline->TaskFinished();
+  pipeline->PlexFinished();
 
   auto logical = pipeline->ToLogicalPipeline();
   ASSERT_EQ(logical.Name(), name);
@@ -711,7 +711,7 @@ void MakeOnePassWithPipePipeline(size_t dop,
   pipe->PipeEven();
   sink->NeedsMore();
   source->Finished();
-  pipeline->TaskFinished();
+  pipeline->PlexFinished();
 
   auto logical = pipeline->ToLogicalPipeline();
   ASSERT_EQ(logical.Name(), name);
@@ -761,7 +761,7 @@ void MakePipeNeedsMorePipeline(size_t dop,
   source->Finished(Batch{});
   pipe->PipeEven();
   sink->NeedsMore();
-  pipeline->TaskFinished();
+  pipeline->PlexFinished();
 
   auto logical = pipeline->ToLogicalPipeline();
   ASSERT_EQ(logical.Name(), name);
@@ -818,7 +818,7 @@ void MakePipeHasMorePipeline(size_t dop,
   pipe->PipeEven();
   sink->NeedsMore();
   source->Finished();
-  pipeline->TaskFinished();
+  pipeline->PlexFinished();
 
   auto logical = pipeline->ToLogicalPipeline();
   ASSERT_EQ(logical.Name(), name);
@@ -877,7 +877,7 @@ void MakePipeYieldPipeline(size_t dop,
   pipe->PipeYieldBack();
   pipe->PipeNeedsMore();
   source->Finished();
-  pipeline->TaskFinished();
+  pipeline->PlexFinished();
 
   auto logical = pipeline->ToLogicalPipeline();
   ASSERT_EQ(logical.Name(), name);
@@ -945,7 +945,7 @@ void MakeDrainPipeline(size_t dop,
   sink->NeedsMore();
   pipe->DrainFinished(Batch{});
   sink->NeedsMore();
-  pipeline->TaskFinished();
+  pipeline->PlexFinished();
 
   auto logical = pipeline->ToLogicalPipeline();
   ASSERT_EQ(logical.Name(), name);
@@ -1042,10 +1042,10 @@ void MakeImplicitSourcePipeline(size_t dop,
   source->Finished(Batch{});
   pipe->PipeEven();
   sink->NeedsMore();
-  pipeline->TaskFinished();
+  pipeline->PlexFinished();
   implicit_source->Finished(Batch{});
   sink->NeedsMore(1);
-  pipeline->TaskFinished(1);
+  pipeline->PlexFinished(1);
 
   auto logical = pipeline->ToLogicalPipeline();
   ASSERT_EQ(logical.Name(), name);
@@ -1104,7 +1104,7 @@ void MakeBackpressurePipeline(size_t dop,
   source->Finished(Batch{});
   pipe->PipeEven();
   sink->NeedsMore();
-  pipeline->TaskFinished();
+  pipeline->PlexFinished();
 
   auto logical = pipeline->ToLogicalPipeline();
   ASSERT_EQ(logical.Name(), name);
@@ -1208,7 +1208,7 @@ TYPED_TEST(PipelineTaskTest, MultiPipe) {
   pipe2->PipeEven();
   sink->NeedsMore();
 
-  pipeline->TaskFinished();
+  pipeline->PlexFinished();
 
   this->TestTracePipeline(*pipeline);
 }
@@ -1242,7 +1242,39 @@ TYPED_TEST(PipelineTaskTest, MultiDrain) {
   sink->NeedsMore();
 
   pipe2->DrainFinished();
-  pipeline->TaskFinished();
+  pipeline->PlexFinished();
+
+  this->TestTracePipeline(*pipeline);
+}
+
+TYPED_TEST(PipelineTaskTest, MultiPlex) {
+  size_t dop = 4;
+  auto name = "MultiPlex";
+  auto pipeline = std::make_unique<pipelang::ImperativePipeline>(name, dop);
+  auto source1 = pipeline->DeclSource("Source1");
+  auto source2 = pipeline->DeclSource("Source2");
+  auto pipe1 = pipeline->DeclPipe("Pipe1", {source1});
+  auto pipe2 = pipeline->DeclPipe("Pipe2", {source2});
+  auto sink = pipeline->DeclSink("Sink", {pipe1, pipe2});
+
+  source1->NotReady();
+  source2->NotReady();
+
+  source1->HasMore();
+  pipe1->PipeEven();
+  sink->NeedsMore();
+
+  source1->NotReady();
+  source2->HasMore();
+  pipe2->PipeEven();
+  sink->NeedsMore();
+
+  source1->Finished();
+  pipeline->PlexFinished();
+  source2->Finished();
+  pipeline->PlexFinished();
+
+  // TODO: More.
 
   this->TestTracePipeline(*pipeline);
 }
