@@ -1274,6 +1274,8 @@ TYPED_TEST(PipelineTaskTest, MultiPlex) {
   source2->Finished();
   pipeline->PlexFinished();
 
+  // TODO: Source 2 HAS_MORE in some pipe, and source 1 also HAS_MORE? Shall it proceed
+  // with plex 2 instead of plex 1, i.e., for reduce the memory pressure of plex 2?
   // TODO: More.
 
   this->TestTracePipeline(*pipeline);
