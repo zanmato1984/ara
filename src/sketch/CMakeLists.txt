@@ -50,3 +50,7 @@ add_ara_test(sketch_aggregation_test "${SKETCH_AGGREGATION_TEST_SRC}")
 set(SKETCH_ASYNC_BACKPRESSURE_TEST_SRC
         "${CMAKE_CURRENT_SOURCE_DIR}/sketch_async_backpressure_test.cpp")
 add_ara_test(sketch_async_backpressure_test "${SKETCH_ASYNC_BACKPRESSURE_TEST_SRC}")
+
+set(SKETCH_ASYNC_TEST_SRC
+        "${CMAKE_CURRENT_SOURCE_DIR}/sketch_async_test.cpp")
+add_ara_test(sketch_async_test "${SKETCH_ASYNC_TEST_SRC}")
