@@ -4,23 +4,6 @@
 
 namespace ara::task {
 
-Status TaskGroup::OnBegin(const TaskContext& context) {
-  if (context.task_observer == nullptr) {
-    return Status::OK();
-  }
-
-  return context.task_observer->Observe(&TaskObserver::OnTaskGroupBegin, *this, context);
-}
-
-Status TaskGroup::OnEnd(const TaskContext& context, const TaskResult& result) {
-  if (context.task_observer == nullptr) {
-    return Status::OK();
-  }
-
-  return context.task_observer->Observe(&TaskObserver::OnTaskGroupEnd, *this, context,
-                                        result);
-}
-
 Status TaskGroup::NotifyFinish(const TaskContext& context) const {
   if (!notify_.has_value()) {
     return Status::OK();

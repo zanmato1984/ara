@@ -1,18 +1,17 @@
 #pragma once
 
+#include <ara/common/meta.h>
 #include <ara/task/task.h>
 
 namespace ara::task {
 
-// TODO: Task hint to CPU/IO thread pool.
-
-class TaskGroup : public detail::TaskMeta {
+class TaskGroup : public internal::Meta {
  public:
   using NotifyFinishFunc = std::function<Status(const TaskContext&)>;
 
   TaskGroup(std::string name, std::string desc, Task task, size_t num_tasks,
             std::optional<Continuation> cont, std::optional<NotifyFinishFunc> notify)
-      : TaskMeta(std::move(name), std::move(desc)),
+      : Meta(std::move(name), std::move(desc)),
         task_(std::move(task)),
         cont_(std::move(cont)),
         num_tasks_(num_tasks),
@@ -24,9 +23,6 @@ class TaskGroup : public detail::TaskMeta {
 
   const std::optional<Continuation>& GetContinuation() const { return cont_; }
 
-  Status OnBegin(const TaskContext&);
-  Status OnEnd(const TaskContext&, const TaskResult&);
-
   Status NotifyFinish(const TaskContext&) const;
 
  private:
@@ -35,5 +31,7 @@ class TaskGroup : public detail::TaskMeta {
   std::optional<Continuation> cont_;
   std::optional<NotifyFinishFunc> notify_;
 };
+
+using TaskGroups = std::vector<TaskGroup>;
 
 }  // namespace ara::task

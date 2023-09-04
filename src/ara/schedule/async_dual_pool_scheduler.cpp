@@ -1,4 +1,4 @@
-#include "async_double_pool_scheduler.h"
+#include "async_dual_pool_scheduler.h"
 #include "schedule_context.h"
 #include "schedule_observer.h"
 
@@ -12,9 +12,12 @@ const std::string AsyncHandle::kName = "AsyncHandle";
 
 TaskResult AsyncHandle::DoWait(const ScheduleContext&) { return future_.wait().value(); }
 
-const std::string AsyncDoublePoolScheduler::kName = "AsyncDoublePoolScheduler";
+const std::string AsyncDualPoolScheduler::kName = "AsyncDualPoolScheduler";
+const std::string AsyncDualPoolScheduler::kDesc =
+    "Scheduler that uses folly::future for task parallelism and dual thread pool "
+    "executors (folly::CPU/IOThreadPoolExecutor) for CPU/IO tasks";
 
-Result<std::unique_ptr<TaskGroupHandle>> AsyncDoublePoolScheduler::DoSchedule(
+Result<std::unique_ptr<TaskGroupHandle>> AsyncDualPoolScheduler::DoSchedule(
     const ScheduleContext& schedule_context, const TaskGroup& task_group) {
   auto& task = task_group.GetTask();
   auto num_tasks = task_group.NumTasks();
@@ -73,7 +76,7 @@ Result<std::unique_ptr<TaskGroupHandle>> AsyncDoublePoolScheduler::DoSchedule(
                                        std::move(results), std::move(make_future));
 }
 
-AsyncDoublePoolScheduler::ConcreteTask AsyncDoublePoolScheduler::MakeTask(
+AsyncDualPoolScheduler::ConcreteTask AsyncDualPoolScheduler::MakeTask(
     const ScheduleContext& schedule_context, const Task& task, const TaskContext& context,
     TaskId task_id, TaskResult& result) const {
   auto [p, f] = folly::makePromiseContract<folly::Unit>(cpu_executor_);
@@ -130,9 +133,10 @@ AsyncDoublePoolScheduler::ConcreteTask AsyncDoublePoolScheduler::MakeTask(
       });
     }
 
-    return folly::via(cpu_executor_).then([&, task_id](auto&&) {
-      result = task(context, task_id);
-    });
+    folly::Executor* executor =
+        task.Hint().type == task::TaskHint::Type::CPU ? cpu_executor_ : io_executor_;
+    return folly::via(executor).then(
+        [&, task_id](auto&&) { result = task(context, task_id); });
   };
 
   auto task_f =
@@ -146,14 +150,14 @@ AsyncDoublePoolScheduler::ConcreteTask AsyncDoublePoolScheduler::MakeTask(
 }
 
 std::optional<BackpressurePairFactory>
-AsyncDoublePoolScheduler::MakeBackpressurePairFactory(
+AsyncDualPoolScheduler::MakeBackpressurePairFactory(
     const ScheduleContext& schedule_context) const {
   return [&](const TaskContext& task_context, const Task& task, TaskId task_id) {
     return MakeBackpressureAndResetPair(schedule_context, task_context, task, task_id);
   };
 }
 
-Result<BackpressureAndResetPair> AsyncDoublePoolScheduler::MakeBackpressureAndResetPair(
+Result<BackpressureAndResetPair> AsyncDualPoolScheduler::MakeBackpressureAndResetPair(
     const ScheduleContext& schedule_context, const TaskContext& task_context,
     const Task& task, TaskId task_id) const {
   auto [p, f] = folly::makePromiseContract<folly::Unit>(cpu_executor_);

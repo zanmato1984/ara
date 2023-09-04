@@ -21,6 +21,8 @@ const std::string NaiveParallelHandle::kName = "NaiveParallelHandle";
 TaskResult NaiveParallelHandle::DoWait(const ScheduleContext&) { return future_.get(); }
 
 const std::string NaiveParallelScheduler::kName = "NaiveParallelScheduler";
+const std::string NaiveParallelScheduler::kDesc =
+    "Scheduler that use naive std::thread for each task";
 
 Result<std::unique_ptr<TaskGroupHandle>> NaiveParallelScheduler::DoSchedule(
     const ScheduleContext& schedule_context, const TaskGroup& task_group) {
@@ -96,7 +98,6 @@ NaiveParallelScheduler::ConcreteTask NaiveParallelScheduler::MakeTask(
               ARA_RETURN_NOT_OK(schedule_context.schedule_observer->Observe(
                   &ScheduleObserver::OnTaskYield, schedule_context, task, task_id));
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
           } else if (result->IsBackpressure()) {
             if (schedule_context.schedule_observer != nullptr) {
               ARA_RETURN_NOT_OK(schedule_context.schedule_observer->Observe(

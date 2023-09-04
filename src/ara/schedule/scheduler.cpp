@@ -19,8 +19,7 @@ using task::TaskResult;
 
 TaskGroupHandle::TaskGroupHandle(const std::string& name, const TaskGroup& task_group,
                                  TaskContext task_context)
-    : name_(name + "(" + task_group.Name() + ")"),
-      desc_(name + "(" + task_group.Desc() + ")"),
+    : Meta(name + "(" + task_group.Name() + ")", name + "(" + task_group.Desc() + ")"),
       task_group_(task_group),
       task_context_(std::move(task_context)) {}
 
@@ -54,8 +53,8 @@ Result<std::unique_ptr<TaskGroupHandle>> Scheduler::Schedule(
 TaskContext Scheduler::MakeTaskContext(const ScheduleContext& schedule_context) const {
   auto task_observer = TaskObserver::Make(*schedule_context.query_context);
   auto backpressure_factory = MakeBackpressurePairFactory(schedule_context);
-  return {schedule_context.query_context, schedule_context.query_id,
-          std::move(backpressure_factory), std::move(task_observer)};
+  return {schedule_context.query_context, std::move(backpressure_factory),
+          std::move(task_observer)};
 }
 
 std::unique_ptr<Scheduler> Scheduler::Make(const QueryContext&) { return nullptr; }

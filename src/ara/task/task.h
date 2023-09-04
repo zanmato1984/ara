@@ -1,8 +1,8 @@
 #pragma once
 
+#include <ara/common/meta.h>
 #include <ara/task/defines.h>
 #include <ara/task/task_context.h>
-#include <ara/task/task_meta.h>
 #include <ara/util/defines.h>
 
 namespace ara::task {
@@ -20,13 +20,13 @@ template <typename T>
 struct TaskTraits;
 
 template <typename Impl>
-class InternalTask : public TaskMeta {
+class InternalTask : public internal::Meta {
  public:
   using Signature = typename TaskTraits<Impl>::Signature;
   using ReturnType = typename TaskTraits<Impl>::ReturnType;
 
   InternalTask(std::string name, std::string desc, Signature f, TaskHint hint = {})
-      : TaskMeta(std::move(name), std::move(desc)),
+      : Meta(std::move(name), std::move(desc)),
         f_(std::move(f)),
         hint_(std::move(hint)) {}
 
@@ -48,7 +48,7 @@ class InternalTask : public TaskMeta {
     return result;
   }
 
-  const TaskHint& GetHint() const { return hint_; }
+  const TaskHint& Hint() const { return hint_; }
 
  private:
   friend Impl;

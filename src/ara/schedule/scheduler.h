@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ara/common/defines.h>
+#include <ara/common/meta.h>
 #include <ara/common/query_context.h>
 #include <ara/task/backpressure.h>
 #include <ara/task/defines.h>
@@ -18,15 +19,11 @@ namespace schedule {
 
 class ScheduleContext;
 
-class TaskGroupHandle {
+class TaskGroupHandle : public internal::Meta {
  public:
   TaskGroupHandle(const std::string&, const task::TaskGroup&, task::TaskContext);
 
   virtual ~TaskGroupHandle() = default;
-
-  const std::string& Name() const { return name_; }
-
-  const std::string& Desc() const { return desc_; }
 
   task::TaskResult Wait(const ScheduleContext&);
 
@@ -34,15 +31,14 @@ class TaskGroupHandle {
   virtual task::TaskResult DoWait(const ScheduleContext&) = 0;
 
  protected:
-  std::string name_;
-  std::string desc_;
   const task::TaskGroup& task_group_;
   task::TaskContext task_context_;
 };
 
-class Scheduler {
+class Scheduler : public internal::Meta {
  public:
-  Scheduler(std::string name) : name_(std::move(name)) {}
+  Scheduler(std::string name, std::string desc)
+      : Meta(std::move(name), std::move(desc)) {}
 
   virtual ~Scheduler() = default;
 

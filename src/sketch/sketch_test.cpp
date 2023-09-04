@@ -2013,7 +2013,6 @@ class SortSink : public SinkOp {
 using namespace ara::sketch;
 
 TEST(PipelineTest, EmptyPipeline) {
-  size_t dop = 8;
   BlackHoleSink sink;
   LogicalPipeline pipeline{{}, &sink};
   auto stages = PipelineStageBuilder(pipeline).Build();
@@ -2021,7 +2020,6 @@ TEST(PipelineTest, EmptyPipeline) {
 }
 
 TEST(PipelineTest, SinglePlexPipeline) {
-  size_t dop = 8;
   InfiniteSource source({});
   IdentityPipe pipe;
   BlackHoleSink sink;
@@ -2033,7 +2031,6 @@ TEST(PipelineTest, SinglePlexPipeline) {
 }
 
 TEST(PipelineTest, DoublePlexPipeline) {
-  size_t dop = 8;
   InfiniteSource source_1({}), source_2({});
   IdentityPipe pipe;
   BlackHoleSink sink;
@@ -2045,7 +2042,6 @@ TEST(PipelineTest, DoublePlexPipeline) {
 }
 
 TEST(PipelineTest, DoubleStagePipeline) {
-  size_t dop = 8;
   InfiniteSource source({});
   IdentityWithAnotherSourcePipe pipe(std::make_unique<InfiniteSource>(Batch{}));
   BlackHoleSink sink;
@@ -2060,7 +2056,6 @@ TEST(PipelineTest, DoubleStagePipeline) {
 }
 
 TEST(PipelineTest, DoubleStageDoublePlexPipeline) {
-  size_t dop = 8;
   InfiniteSource source_1({}), source_2({});
   IdentityWithAnotherSourcePipe pipe_1(std::make_unique<InfiniteSource>(Batch{})),
       pipe_2(std::make_unique<MemorySource>(std::list<Batch>()));
