@@ -80,37 +80,37 @@ TEST(CompilePipelineTest, EmptyPipeline) {
   ASSERT_TRUE(logical_pipeline.Desc().empty());
 }
 
-TEST(CompilePipelineTest, SinglePlexPipeline) {
+TEST(CompilePipelineTest, SingleChannelPipeline) {
   PipelineContext context;
   FooSource source;
   FooPipe pipe;
   FooSink sink;
-  LogicalPipeline logical_pipeline("SinglePlexPipeline", {{&source, {&pipe}}}, &sink);
+  LogicalPipeline logical_pipeline("SingleChannelPipeline", {{&source, {&pipe}}}, &sink);
   auto physical_pipelines = CompilePipeline(context, logical_pipeline);
   ASSERT_EQ(physical_pipelines.size(), 1);
   ASSERT_TRUE(physical_pipelines[0].ImplicitSources().empty());
-  ASSERT_EQ(physical_pipelines[0].Plexes().size(), 1);
+  ASSERT_EQ(physical_pipelines[0].Channels().size(), 1);
 
-  std::string desc_exp = "Plex0: FooSource -> FooPipe -> FooSink";
+  std::string desc_exp = "Channel0: FooSource -> FooPipe -> FooSink";
   ASSERT_EQ(logical_pipeline.Desc(), desc_exp);
   ASSERT_EQ(physical_pipelines[0].Desc(), desc_exp);
 }
 
-TEST(CompilePipelineTest, DoublePlexPipeline) {
+TEST(CompilePipelineTest, DoubleChannelPipeline) {
   PipelineContext context;
   FooSource source1, source2;
   FooPipe pipe;
   FooSink sink;
-  LogicalPipeline logical_pipeline("DoublePlexPipeline",
+  LogicalPipeline logical_pipeline("DoubleChannelPipeline",
                                    {{&source1, {&pipe}}, {&source2, {&pipe}}}, &sink);
   auto physical_pipelines = CompilePipeline(context, logical_pipeline);
   ASSERT_EQ(physical_pipelines.size(), 1);
   ASSERT_TRUE(physical_pipelines[0].ImplicitSources().empty());
-  ASSERT_EQ(physical_pipelines[0].Plexes().size(), 2);
+  ASSERT_EQ(physical_pipelines[0].Channels().size(), 2);
 
   std::string desc_exp =
-      "Plex0: FooSource -> FooPipe -> FooSink\n"
-      "Plex1: FooSource -> FooPipe -> FooSink";
+      "Channel0: FooSource -> FooPipe -> FooSink\n"
+      "Channel1: FooSource -> FooPipe -> FooSink";
   ASSERT_EQ(logical_pipeline.Desc(), desc_exp);
   ASSERT_EQ(physical_pipelines[0].Desc(), desc_exp);
 }
@@ -128,18 +128,18 @@ TEST(CompilePipelineTest, DoublePhysicalPipeline) {
   ASSERT_TRUE(physical_pipelines[0].ImplicitSources().empty());
   ASSERT_EQ(physical_pipelines[1].ImplicitSources().size(), 1);
   ASSERT_EQ(physical_pipelines[1].ImplicitSources()[0].get(), implicit_source);
-  ASSERT_EQ(physical_pipelines[0].Plexes().size(), 1);
-  ASSERT_EQ(physical_pipelines[1].Plexes().size(), 1);
+  ASSERT_EQ(physical_pipelines[0].Channels().size(), 1);
+  ASSERT_EQ(physical_pipelines[1].Channels().size(), 1);
 
-  std::string logical_desc_exp = "Plex0: FooSource -> FooPipe -> FooSink";
+  std::string logical_desc_exp = "Channel0: FooSource -> FooPipe -> FooSink";
   ASSERT_EQ(logical_pipeline.Desc(), logical_desc_exp);
-  std::string physical_desc_exp0 = "Plex0: FooSource -> FooPipe -> FooSink";
-  std::string physical_desc_exp1 = "Plex0: FooSource -> FooSink";
+  std::string physical_desc_exp0 = "Channel0: FooSource -> FooPipe -> FooSink";
+  std::string physical_desc_exp1 = "Channel0: FooSource -> FooSink";
   ASSERT_EQ(physical_pipelines[0].Desc(), physical_desc_exp0);
   ASSERT_EQ(physical_pipelines[1].Desc(), physical_desc_exp1);
 }
 
-TEST(CompilePipelineTest, DoublePhysicalDoublePlexPipeline) {
+TEST(CompilePipelineTest, DoublePhysicalDoubleChannelPipeline) {
   PipelineContext context;
   FooSource source1, source2;
   auto implicit_source1_ptr = std::make_unique<FooSource>();
@@ -157,19 +157,19 @@ TEST(CompilePipelineTest, DoublePhysicalDoublePlexPipeline) {
   ASSERT_EQ(physical_pipelines[1].ImplicitSources().size(), 2);
   ASSERT_EQ(physical_pipelines[1].ImplicitSources()[0].get(), implicit_source1);
   ASSERT_EQ(physical_pipelines[1].ImplicitSources()[1].get(), implicit_source2);
-  ASSERT_EQ(physical_pipelines[0].Plexes().size(), 2);
-  ASSERT_EQ(physical_pipelines[1].Plexes().size(), 2);
+  ASSERT_EQ(physical_pipelines[0].Channels().size(), 2);
+  ASSERT_EQ(physical_pipelines[1].Channels().size(), 2);
 
   std::string logical_desc_exp =
-      "Plex0: FooSource -> FooPipe -> FooSink\n"
-      "Plex1: FooSource -> FooPipe -> FooSink";
+      "Channel0: FooSource -> FooPipe -> FooSink\n"
+      "Channel1: FooSource -> FooPipe -> FooSink";
   ASSERT_EQ(logical_pipeline.Desc(), logical_desc_exp);
   std::string physical_desc_exp0 =
-      "Plex0: FooSource -> FooPipe -> FooSink\n"
-      "Plex1: FooSource -> FooPipe -> FooSink";
+      "Channel0: FooSource -> FooPipe -> FooSink\n"
+      "Channel1: FooSource -> FooPipe -> FooSink";
   std::string physical_desc_exp1 =
-      "Plex0: FooSource -> FooSink\n"
-      "Plex1: FooSource -> FooSink";
+      "Channel0: FooSource -> FooSink\n"
+      "Channel1: FooSource -> FooSink";
   ASSERT_EQ(physical_pipelines[0].Desc(), physical_desc_exp0);
   ASSERT_EQ(physical_pipelines[1].Desc(), physical_desc_exp1);
 }
@@ -198,21 +198,21 @@ TEST(CompilePipelineTest, TripplePhysicalPipeline) {
   ASSERT_EQ(physical_pipelines[1].ImplicitSources()[0].get(), implicit_source1);
   ASSERT_EQ(physical_pipelines[1].ImplicitSources()[1].get(), implicit_source2);
   ASSERT_EQ(physical_pipelines[2].ImplicitSources()[0].get(), implicit_source3);
-  ASSERT_EQ(physical_pipelines[0].Plexes().size(), 2);
-  ASSERT_EQ(physical_pipelines[1].Plexes().size(), 2);
-  ASSERT_EQ(physical_pipelines[2].Plexes().size(), 1);
+  ASSERT_EQ(physical_pipelines[0].Channels().size(), 2);
+  ASSERT_EQ(physical_pipelines[1].Channels().size(), 2);
+  ASSERT_EQ(physical_pipelines[2].Channels().size(), 1);
 
   std::string logical_desc_exp =
-      "Plex0: FooSource -> FooPipe -> FooPipe -> FooSink\n"
-      "Plex1: FooSource -> FooPipe -> FooPipe -> FooSink";
+      "Channel0: FooSource -> FooPipe -> FooPipe -> FooSink\n"
+      "Channel1: FooSource -> FooPipe -> FooPipe -> FooSink";
   ASSERT_EQ(logical_pipeline.Desc(), logical_desc_exp);
   std::string physical_desc_exp0 =
-      "Plex0: FooSource -> FooPipe -> FooPipe -> FooSink\n"
-      "Plex1: FooSource -> FooPipe -> FooPipe -> FooSink";
+      "Channel0: FooSource -> FooPipe -> FooPipe -> FooSink\n"
+      "Channel1: FooSource -> FooPipe -> FooPipe -> FooSink";
   std::string physical_desc_exp1 =
-      "Plex0: FooSource -> FooPipe -> FooSink\n"
-      "Plex1: FooSource -> FooPipe -> FooSink";
-  std::string physical_desc_exp2 = "Plex0: FooSource -> FooSink";
+      "Channel0: FooSource -> FooPipe -> FooSink\n"
+      "Channel1: FooSource -> FooPipe -> FooSink";
+  std::string physical_desc_exp2 = "Channel0: FooSource -> FooSink";
   ASSERT_EQ(physical_pipelines[0].Desc(), physical_desc_exp0);
   ASSERT_EQ(physical_pipelines[1].Desc(), physical_desc_exp1);
   ASSERT_EQ(physical_pipelines[2].Desc(), physical_desc_exp2);
@@ -250,27 +250,27 @@ TEST(CompilePipelineTest, OddQuadroStagePipeline) {
   ASSERT_EQ(physical_pipelines[1].ImplicitSources()[1].get(), implicit_source3);
   ASSERT_EQ(physical_pipelines[2].ImplicitSources()[0].get(), implicit_source2);
   ASSERT_EQ(physical_pipelines[3].ImplicitSources()[0].get(), implicit_source4);
-  ASSERT_EQ(physical_pipelines[0].Plexes().size(), 4);
-  ASSERT_EQ(physical_pipelines[1].Plexes().size(), 2);
-  ASSERT_EQ(physical_pipelines[2].Plexes().size(), 1);
-  ASSERT_EQ(physical_pipelines[3].Plexes().size(), 1);
+  ASSERT_EQ(physical_pipelines[0].Channels().size(), 4);
+  ASSERT_EQ(physical_pipelines[1].Channels().size(), 2);
+  ASSERT_EQ(physical_pipelines[2].Channels().size(), 1);
+  ASSERT_EQ(physical_pipelines[3].Channels().size(), 1);
 
   std::string logical_desc_exp =
-      "Plex0: FooSource -> FooPipe -> FooPipe -> FooPipe -> FooSink\n"
-      "Plex1: FooSource -> FooPipe -> FooPipe -> FooSink\n"
-      "Plex2: FooSource -> FooPipe -> FooPipe -> FooSink\n"
-      "Plex3: FooSource -> FooPipe -> FooSink";
+      "Channel0: FooSource -> FooPipe -> FooPipe -> FooPipe -> FooSink\n"
+      "Channel1: FooSource -> FooPipe -> FooPipe -> FooSink\n"
+      "Channel2: FooSource -> FooPipe -> FooPipe -> FooSink\n"
+      "Channel3: FooSource -> FooPipe -> FooSink";
   ASSERT_EQ(logical_pipeline.Desc(), logical_desc_exp);
   std::string physical_desc_exp0 =
-      "Plex0: FooSource -> FooPipe -> FooPipe -> FooPipe -> FooSink\n"
-      "Plex1: FooSource -> FooPipe -> FooPipe -> FooSink\n"
-      "Plex2: FooSource -> FooPipe -> FooPipe -> FooSink\n"
-      "Plex3: FooSource -> FooPipe -> FooSink";
+      "Channel0: FooSource -> FooPipe -> FooPipe -> FooPipe -> FooSink\n"
+      "Channel1: FooSource -> FooPipe -> FooPipe -> FooSink\n"
+      "Channel2: FooSource -> FooPipe -> FooPipe -> FooSink\n"
+      "Channel3: FooSource -> FooPipe -> FooSink";
   std::string physical_desc_exp1 =
-      "Plex0: FooSource -> FooPipe -> FooPipe -> FooSink\n"
-      "Plex1: FooSource -> FooPipe -> FooSink";
-  std::string physical_desc_exp2 = "Plex0: FooSource -> FooPipe -> FooSink";
-  std::string physical_desc_exp3 = "Plex0: FooSource -> FooSink";
+      "Channel0: FooSource -> FooPipe -> FooPipe -> FooSink\n"
+      "Channel1: FooSource -> FooPipe -> FooSink";
+  std::string physical_desc_exp2 = "Channel0: FooSource -> FooPipe -> FooSink";
+  std::string physical_desc_exp3 = "Channel0: FooSource -> FooSink";
   ASSERT_EQ(physical_pipelines[0].Desc(), physical_desc_exp0);
   ASSERT_EQ(physical_pipelines[1].Desc(), physical_desc_exp1);
   ASSERT_EQ(physical_pipelines[2].Desc(), physical_desc_exp2);
