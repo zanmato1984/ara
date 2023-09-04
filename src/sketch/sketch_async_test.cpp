@@ -1,6 +1,6 @@
 #include <arrow/api.h>
 #include <arrow/util/logging.h>
-#include <folly/executors/CPUThreadPoolExecutor.h>
+#include <folly/MPMCQueue.h>
 #include <folly/futures/Future.h>
 #include <gtest/gtest.h>
 
@@ -21,7 +21,7 @@ using Result = arrow::Result<T>;
 using Block = std::any;
 using Unblock = std::function<Status()>;
 using BlockPair = std::pair<Block, Unblock>;
-using BlockPariFactory = std::function<Result<BlockPair>()>;
+using BlockPairFactory = std::function<Result<BlockPair>()>;
 
 struct TaskStatus {
  private:
@@ -86,7 +86,7 @@ using TaskResult = arrow::Result<TaskStatus>;
 using TaskId = size_t;
 
 struct TaskContext {
-    BlockPairFactory block_pair_factory;
+  BlockPairFactory block_pair_factory;
 };
 
 using ThreadId = size_t;
@@ -193,5 +193,21 @@ struct OpOutput {
   static OpOutput Cancelled() { return OpOutput(Code::CANCELLED); }
 };
 using OpResult = arrow::Result<OpOutput>;
+
+class MockAsyncSource {
+ public:
+  MockAsyncSource(folly::MPMCQueue<Batch>& queue) : queue_(queue) {}
+
+  OpResult operator()(const TaskContext&, ThreadId) {
+    Batch batch;
+    if (!queue_.read(batch)) {
+      return OpOutput::SourceNotReady();
+    }
+    return OpOutput::SourcePipeHasMore(std::move(batch));
+  }
+
+ private:
+  folly::MPMCQueue<Batch>& queue_;
+};
 
 }  // namespace ara::sketch
