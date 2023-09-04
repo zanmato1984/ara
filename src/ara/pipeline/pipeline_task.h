@@ -21,11 +21,11 @@ class PhysicalPipeline;
 
 class PipelineTask : public internal::Meta {
  public:
-  class Plex {
+  class Channel {
    public:
-    Plex(const PipelineTask&, size_t, size_t);
+    Channel(const PipelineTask&, size_t, size_t);
 
-    Plex(Plex&& other) : Plex(other.task_, other.plex_id_, other.dop_) {}
+    Channel(Channel&& other) : Channel(other.task_, other.channel_id_, other.dop_) {}
 
     OpResult operator()(const PipelineContext&, const task::TaskContext&, ThreadId);
 
@@ -35,7 +35,7 @@ class PipelineTask : public internal::Meta {
 
    private:
     const PipelineTask& task_;
-    const size_t plex_id_;
+    const size_t channel_id_;
     const size_t dop_;
 
     PipelineSource source_;
@@ -59,11 +59,11 @@ class PipelineTask : public internal::Meta {
 
   const PhysicalPipeline& Pipeline() const { return pipeline_; }
 
-  const std::vector<Plex>& Plexes() const { return plexes_; }
+  const std::vector<Channel>& Channels() const { return channels_; }
 
  private:
   const PhysicalPipeline& pipeline_;
-  std::vector<Plex> plexes_;
+  std::vector<Channel> channels_;
 
   struct ThreadLocal {
     ThreadLocal(size_t size) : finished(size, false) {}

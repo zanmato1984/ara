@@ -13,16 +13,16 @@ using task::TaskContext;
 using task::TaskResult;
 using task::TaskStatus;
 
-PipelineTask::Plex::Plex(const PipelineTask& task, size_t plex_id, size_t dop)
+PipelineTask::Channel::Channel(const PipelineTask& task, size_t channel_id, size_t dop)
     : task_(task),
-      plex_id_(plex_id),
+      channel_id_(channel_id),
       dop_(dop),
-      source_(task_.pipeline_.Plexes()[plex_id].source_op->Source()),
-      pipes_(task_.pipeline_.Plexes()[plex_id].pipe_ops.size()),
-      sink_(task_.pipeline_.Plexes()[plex_id].sink_op->Sink()),
+      source_(task_.pipeline_.Channels()[channel_id].source_op->Source()),
+      pipes_(task_.pipeline_.Channels()[channel_id].pipe_ops.size()),
+      sink_(task_.pipeline_.Channels()[channel_id].sink_op->Sink()),
       thread_locals_(dop),
       cancelled_(false) {
-  const auto& pipe_ops = task_.pipeline_.Plexes()[plex_id].pipe_ops;
+  const auto& pipe_ops = task_.pipeline_.Channels()[channel_id].pipe_ops;
   std::transform(pipe_ops.begin(), pipe_ops.end(), pipes_.begin(), [&](auto* pipe_op) {
     return std::make_pair(pipe_op->Pipe(), pipe_op->Drain());
   });
@@ -43,15 +43,15 @@ PipelineTask::Plex::Plex(const PipelineTask& task, size_t plex_id, size_t dop)
         &PipelineObserver::Method, __VA_ARGS__));                  \
   }
 
-OpResult PipelineTask::Plex::operator()(const PipelineContext& pipeline_context,
-                                        const TaskContext& task_context,
-                                        ThreadId thread_id) {
-  OBSERVE(OnPipelineTaskBegin, task_, plex_id_, pipeline_context, task_context,
+OpResult PipelineTask::Channel::operator()(const PipelineContext& pipeline_context,
+                                           const TaskContext& task_context,
+                                           ThreadId thread_id) {
+  OBSERVE(OnPipelineTaskBegin, task_, channel_id_, pipeline_context, task_context,
           thread_id);
 
   if (cancelled_) {
-    OBSERVE(OnPipelineTaskEnd, task_, plex_id_, pipeline_context, task_context, thread_id,
-            OpOutput::Cancelled());
+    OBSERVE(OnPipelineTaskEnd, task_, channel_id_, pipeline_context, task_context,
+            thread_id, OpOutput::Cancelled());
     return OpOutput::Cancelled();
   }
 
@@ -59,25 +59,25 @@ OpResult PipelineTask::Plex::operator()(const PipelineContext& pipeline_context,
     auto pipe_id = thread_locals_[thread_id].pipe_stack.top();
     thread_locals_[thread_id].pipe_stack.pop();
     auto result = Pipe(pipeline_context, task_context, thread_id, pipe_id, std::nullopt);
-    OBSERVE(OnPipelineTaskEnd, task_, plex_id_, pipeline_context, task_context, thread_id,
-            result);
+    OBSERVE(OnPipelineTaskEnd, task_, channel_id_, pipeline_context, task_context,
+            thread_id, result);
     return result;
   }
 
   if (!thread_locals_[thread_id].source_done) {
-    OBSERVE(OnPipelineSourceBegin, task_, plex_id_, pipeline_context, task_context,
+    OBSERVE(OnPipelineSourceBegin, task_, channel_id_, pipeline_context, task_context,
             thread_id);
     auto result = source_(pipeline_context, task_context, thread_id);
-    OBSERVE(OnPipelineSourceEnd, task_, plex_id_, pipeline_context, task_context,
+    OBSERVE(OnPipelineSourceEnd, task_, channel_id_, pipeline_context, task_context,
             thread_id, result);
     if (!result.ok()) {
       cancelled_ = true;
-      OBSERVE(OnPipelineTaskEnd, task_, plex_id_, pipeline_context, task_context,
+      OBSERVE(OnPipelineTaskEnd, task_, channel_id_, pipeline_context, task_context,
               thread_id, result);
       return result.status();
     }
     if (result->IsSourceNotReady()) {
-      OBSERVE(OnPipelineTaskEnd, task_, plex_id_, pipeline_context, task_context,
+      OBSERVE(OnPipelineTaskEnd, task_, channel_id_, pipeline_context, task_context,
               thread_id, OpOutput::SourceNotReady());
       return OpOutput::SourceNotReady();
     } else if (result->IsFinished()) {
@@ -85,7 +85,7 @@ OpResult PipelineTask::Plex::operator()(const PipelineContext& pipeline_context,
       if (result->GetBatch().has_value()) {
         auto new_result = Pipe(pipeline_context, task_context, thread_id, 0,
                                std::move(result->GetBatch()));
-        OBSERVE(OnPipelineTaskEnd, task_, plex_id_, pipeline_context, task_context,
+        OBSERVE(OnPipelineTaskEnd, task_, channel_id_, pipeline_context, task_context,
                 thread_id, new_result);
         return new_result;
       }
@@ -94,44 +94,44 @@ OpResult PipelineTask::Plex::operator()(const PipelineContext& pipeline_context,
       ARA_CHECK(result->GetBatch().has_value());
       auto new_result = Pipe(pipeline_context, task_context, thread_id, 0,
                              std::move(result->GetBatch()));
-      OBSERVE(OnPipelineTaskEnd, task_, plex_id_, pipeline_context, task_context,
+      OBSERVE(OnPipelineTaskEnd, task_, channel_id_, pipeline_context, task_context,
               thread_id, new_result);
       return new_result;
     }
   }
 
   if (thread_locals_[thread_id].draining >= thread_locals_[thread_id].drains.size()) {
-    OBSERVE(OnPipelineTaskEnd, task_, plex_id_, pipeline_context, task_context, thread_id,
-            OpOutput::Finished());
+    OBSERVE(OnPipelineTaskEnd, task_, channel_id_, pipeline_context, task_context,
+            thread_id, OpOutput::Finished());
     return OpOutput::Finished();
   }
 
   for (; thread_locals_[thread_id].draining < thread_locals_[thread_id].drains.size();
        ++thread_locals_[thread_id].draining) {
     auto drain_id = thread_locals_[thread_id].drains[thread_locals_[thread_id].draining];
-    OBSERVE(OnPipelineDrainBegin, task_, plex_id_, drain_id, pipeline_context,
+    OBSERVE(OnPipelineDrainBegin, task_, channel_id_, drain_id, pipeline_context,
             task_context, thread_id);
     auto result =
         pipes_[drain_id].second.value()(pipeline_context, task_context, thread_id);
-    OBSERVE(OnPipelineDrainEnd, task_, plex_id_, drain_id, pipeline_context, task_context,
-            thread_id, result);
+    OBSERVE(OnPipelineDrainEnd, task_, channel_id_, drain_id, pipeline_context,
+            task_context, thread_id, result);
     if (!result.ok()) {
       cancelled_ = true;
-      OBSERVE(OnPipelineTaskEnd, task_, plex_id_, pipeline_context, task_context,
+      OBSERVE(OnPipelineTaskEnd, task_, channel_id_, pipeline_context, task_context,
               thread_id, result);
       return result.status();
     }
     if (thread_locals_[thread_id].yield) {
       ARA_CHECK(result->IsPipeYieldBack());
       thread_locals_[thread_id].yield = false;
-      OBSERVE(OnPipelineTaskEnd, task_, plex_id_, pipeline_context, task_context,
+      OBSERVE(OnPipelineTaskEnd, task_, channel_id_, pipeline_context, task_context,
               thread_id, OpOutput::PipeYieldBack());
       return OpOutput::PipeYieldBack();
     }
     if (result->IsPipeYield()) {
       ARA_CHECK(!thread_locals_[thread_id].yield);
       thread_locals_[thread_id].yield = true;
-      OBSERVE(OnPipelineTaskEnd, task_, plex_id_, pipeline_context, task_context,
+      OBSERVE(OnPipelineTaskEnd, task_, channel_id_, pipeline_context, task_context,
               thread_id, OpOutput::PipeYield());
       return OpOutput::PipeYield();
     }
@@ -142,26 +142,26 @@ OpResult PipelineTask::Plex::operator()(const PipelineContext& pipeline_context,
       }
       auto new_result = Pipe(pipeline_context, task_context, thread_id, drain_id + 1,
                              std::move(result->GetBatch()));
-      OBSERVE(OnPipelineTaskEnd, task_, plex_id_, pipeline_context, task_context,
+      OBSERVE(OnPipelineTaskEnd, task_, channel_id_, pipeline_context, task_context,
               thread_id, new_result);
       return new_result;
     }
   }
 
-  OBSERVE(OnPipelineTaskEnd, task_, plex_id_, pipeline_context, task_context, thread_id,
-          OpOutput::Finished());
+  OBSERVE(OnPipelineTaskEnd, task_, channel_id_, pipeline_context, task_context,
+          thread_id, OpOutput::Finished());
   return OpOutput::Finished();
 }
 
-OpResult PipelineTask::Plex::Pipe(const PipelineContext& pipeline_context,
-                                  const TaskContext& task_context, ThreadId thread_id,
-                                  size_t pipe_id, std::optional<Batch> input) {
+OpResult PipelineTask::Channel::Pipe(const PipelineContext& pipeline_context,
+                                     const TaskContext& task_context, ThreadId thread_id,
+                                     size_t pipe_id, std::optional<Batch> input) {
   for (size_t i = pipe_id; i < pipes_.size(); ++i) {
-    OBSERVE(OnPipelinePipeBegin, task_, plex_id_, i, pipeline_context, task_context,
+    OBSERVE(OnPipelinePipeBegin, task_, channel_id_, i, pipeline_context, task_context,
             thread_id, input);
     auto result =
         pipes_[i].first(pipeline_context, task_context, thread_id, std::move(input));
-    OBSERVE(OnPipelinePipeEnd, task_, plex_id_, i, pipeline_context, task_context,
+    OBSERVE(OnPipelinePipeEnd, task_, channel_id_, i, pipeline_context, task_context,
             thread_id, result);
     if (!result.ok()) {
       cancelled_ = true;
@@ -192,11 +192,11 @@ OpResult PipelineTask::Plex::Pipe(const PipelineContext& pipeline_context,
     }
   }
 
-  OBSERVE(OnPipelineSinkBegin, task_, plex_id_, pipeline_context, task_context, thread_id,
-          input);
+  OBSERVE(OnPipelineSinkBegin, task_, channel_id_, pipeline_context, task_context,
+          thread_id, input);
   auto result = sink_(pipeline_context, task_context, thread_id, std::move(input));
-  OBSERVE(OnPipelineSinkEnd, task_, plex_id_, pipeline_context, task_context, thread_id,
-          result);
+  OBSERVE(OnPipelineSinkEnd, task_, channel_id_, pipeline_context, task_context,
+          thread_id, result);
   if (!result.ok()) {
     cancelled_ = true;
     return result.status();
@@ -207,11 +207,11 @@ OpResult PipelineTask::Plex::Pipe(const PipelineContext& pipeline_context,
 
 PipelineTask::PipelineTask(const PhysicalPipeline& pipeline, size_t dop)
     : Meta("Task of " + pipeline.Name(), pipeline.Desc()), pipeline_(pipeline) {
-  for (size_t i = 0; i < pipeline_.Plexes().size(); ++i) {
-    plexes_.emplace_back(*this, i, dop);
+  for (size_t i = 0; i < pipeline_.Channels().size(); ++i) {
+    channels_.emplace_back(*this, i, dop);
   }
   for (size_t i = 0; i < dop; ++i) {
-    thread_locals_.emplace_back(plexes_.size());
+    thread_locals_.emplace_back(channels_.size());
   }
 }
 
@@ -241,12 +241,13 @@ TaskResult OpResultToTaskResult(OpResult op_result) {
 TaskResult PipelineTask::operator()(const PipelineContext& pipeline_context,
                                     const TaskContext& task_context, ThreadId thread_id) {
   bool all_finished = true;
-  for (size_t i = 0; i < plexes_.size(); ++i) {
+  for (size_t i = 0; i < channels_.size(); ++i) {
     if (thread_locals_[thread_id].finished[i]) {
       continue;
     }
-    auto& plex = plexes_[i];
-    ARA_ASSIGN_OR_RAISE(auto op_result, plex(pipeline_context, task_context, thread_id));
+    auto& channel = channels_[i];
+    ARA_ASSIGN_OR_RAISE(auto op_result,
+                        channel(pipeline_context, task_context, thread_id));
     if (op_result.IsFinished()) {
       ARA_CHECK(!op_result.GetBatch().has_value());
       thread_locals_[thread_id].finished[i] = true;

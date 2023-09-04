@@ -60,7 +60,7 @@ class ImperativePipeline {
 
   ImperativeSource* DeclImplicitSource(std::string, ImperativePipe*);
 
-  void PlexFinished(size_t task_id = 0) {
+  void ChannelFinished(size_t task_id = 0) {
     Trace(ImperativeTrace{TaskName(name_, task_id), "Run",
                           OpOutput::Finished().ToString()});
   }
@@ -334,7 +334,7 @@ ImperativeSource* ImperativePipeline::DeclImplicitSource(std::string name,
 }
 
 LogicalPipeline ImperativePipeline::ToLogicalPipeline() const {
-  std::vector<LogicalPipeline::Plex> plexes;
+  std::vector<LogicalPipeline::Channel> channels;
   ImperativeSink* sink = nullptr;
   for (auto& source : sources_) {
     std::vector<PipeOp*> pipe_ops;
@@ -348,16 +348,16 @@ LogicalPipeline ImperativePipeline::ToLogicalPipeline() const {
     } else {
       ARA_CHECK(sink == dynamic_cast<ImperativeSink*>(op));
     }
-    plexes.emplace_back(LogicalPipeline::Plex{source.get(), std::move(pipe_ops)});
+    channels.emplace_back(LogicalPipeline::Channel{source.get(), std::move(pipe_ops)});
   }
-  return LogicalPipeline(name_, std::move(plexes), sink);
+  return LogicalPipeline(name_, std::move(channels), sink);
 }
 
 class ImperativeTracer : public PipelineObserver {
  public:
   ImperativeTracer(size_t dop = 1) : traces_(dop) {}
 
-  Status OnPipelineTaskEnd(const PipelineTask& pipeline_task, size_t plex,
+  Status OnPipelineTaskEnd(const PipelineTask& pipeline_task, size_t channel,
                            const PipelineContext&, const task::TaskContext&,
                            ThreadId thread_id, const OpResult& result) override {
     traces_[thread_id].push_back(
@@ -365,37 +365,37 @@ class ImperativeTracer : public PipelineObserver {
     return Status::OK();
   }
 
-  Status OnPipelineSourceEnd(const PipelineTask& pipeline_task, size_t plex,
+  Status OnPipelineSourceEnd(const PipelineTask& pipeline_task, size_t channel,
                              const PipelineContext&, const task::TaskContext&,
                              ThreadId thread_id, const OpResult& result) override {
-    auto source_name = pipeline_task.Pipeline().Plexes()[plex].source_op->Name();
+    auto source_name = pipeline_task.Pipeline().Channels()[channel].source_op->Name();
     traces_[thread_id].push_back(
         ImperativeTrace{std::move(source_name), "Source", result->ToString()});
     return Status::OK();
   }
 
-  Status OnPipelinePipeEnd(const PipelineTask& pipeline_task, size_t plex, size_t pipe,
+  Status OnPipelinePipeEnd(const PipelineTask& pipeline_task, size_t channel, size_t pipe,
                            const PipelineContext&, const task::TaskContext&,
                            ThreadId thread_id, const OpResult& result) override {
-    auto pipe_name = pipeline_task.Pipeline().Plexes()[plex].pipe_ops[pipe]->Name();
+    auto pipe_name = pipeline_task.Pipeline().Channels()[channel].pipe_ops[pipe]->Name();
     traces_[thread_id].push_back(
         ImperativeTrace{std::move(pipe_name), "Pipe", result->ToString()});
     return Status::OK();
   }
 
-  Status OnPipelineDrainEnd(const PipelineTask& pipeline_task, size_t plex, size_t pipe,
-                            const PipelineContext&, const task::TaskContext&,
+  Status OnPipelineDrainEnd(const PipelineTask& pipeline_task, size_t channel,
+                            size_t pipe, const PipelineContext&, const task::TaskContext&,
                             ThreadId thread_id, const OpResult& result) override {
-    auto pipe_name = pipeline_task.Pipeline().Plexes()[plex].pipe_ops[pipe]->Name();
+    auto pipe_name = pipeline_task.Pipeline().Channels()[channel].pipe_ops[pipe]->Name();
     traces_[thread_id].push_back(
         ImperativeTrace{std::move(pipe_name), "Drain", result->ToString()});
     return Status::OK();
   }
 
-  Status OnPipelineSinkEnd(const PipelineTask& pipeline_task, size_t plex,
+  Status OnPipelineSinkEnd(const PipelineTask& pipeline_task, size_t channel,
                            const PipelineContext&, const task::TaskContext&,
                            ThreadId thread_id, const OpResult& result) override {
-    auto sink_name = pipeline_task.Pipeline().Plexes()[plex].sink_op->Name();
+    auto sink_name = pipeline_task.Pipeline().Channels()[channel].sink_op->Name();
     traces_[thread_id].push_back(
         ImperativeTrace{std::move(sink_name), "Sink", result->ToString()});
     return Status::OK();
@@ -455,9 +455,9 @@ class PipelineTaskTest : public testing::Test {
     for (const auto& physical_pipeline : physical_pipelines) {
       PipelineTask pipeline_task(physical_pipeline, dop);
 
-      for (const auto& plex : physical_pipeline.Plexes()) {
-        ASSERT_TRUE(plex.source_op->Frontend(pipeline_context).empty());
-        ASSERT_TRUE(!plex.source_op->Backend(pipeline_context).has_value());
+      for (const auto& channel : physical_pipeline.Channels()) {
+        ASSERT_TRUE(channel.source_op->Frontend(pipeline_context).empty());
+        ASSERT_TRUE(!channel.source_op->Backend(pipeline_context).has_value());
       }
 
       Task task(pipeline_task.Name(), pipeline_task.Desc(),
@@ -505,13 +505,13 @@ void MakeEmptySourcePipeline(size_t dop,
   auto source = pipeline->DeclSource("Source");
   auto sink = pipeline->DeclSink("Sink", {source});
   source->Finished();
-  pipeline->PlexFinished();
+  pipeline->ChannelFinished();
 
   auto logical = pipeline->ToLogicalPipeline();
   ASSERT_EQ(logical.Name(), name);
-  ASSERT_EQ(logical.Plexes().size(), 1);
-  ASSERT_EQ(logical.Plexes()[0].source_op, source);
-  ASSERT_TRUE(logical.Plexes()[0].pipe_ops.empty());
+  ASSERT_EQ(logical.Channels().size(), 1);
+  ASSERT_EQ(logical.Channels()[0].source_op, source);
+  ASSERT_TRUE(logical.Channels()[0].pipe_ops.empty());
   ASSERT_EQ(logical.SinkOp(), sink);
 
   ASSERT_EQ(pipeline->Traces().size(), 2);
@@ -538,13 +538,13 @@ void MakeEmptySourceNotReadyPipeline(
   auto sink = pipeline->DeclSink("Sink", {source});
   source->NotReady();
   source->Finished();
-  pipeline->PlexFinished();
+  pipeline->ChannelFinished();
 
   auto logical = pipeline->ToLogicalPipeline();
   ASSERT_EQ(logical.Name(), name);
-  ASSERT_EQ(logical.Plexes().size(), 1);
-  ASSERT_EQ(logical.Plexes()[0].source_op, source);
-  ASSERT_TRUE(logical.Plexes()[0].pipe_ops.empty());
+  ASSERT_EQ(logical.Channels().size(), 1);
+  ASSERT_EQ(logical.Channels()[0].source_op, source);
+  ASSERT_TRUE(logical.Channels()[0].pipe_ops.empty());
   ASSERT_EQ(logical.SinkOp(), sink);
 
   ASSERT_EQ(pipeline->Traces().size(), 4);
@@ -578,16 +578,16 @@ void MakeTwoSourcesOneNotReadyPipeline(
   auto sink = pipeline->DeclSink("Sink", {source1, source2});
   source1->NotReady();
   source2->Finished();
-  pipeline->PlexFinished();
+  pipeline->ChannelFinished();
   source1->Finished();
-  pipeline->PlexFinished();
+  pipeline->ChannelFinished();
 
   auto logical = pipeline->ToLogicalPipeline();
   ASSERT_EQ(logical.Name(), name);
-  ASSERT_EQ(logical.Plexes().size(), 2);
-  ASSERT_EQ(logical.Plexes()[0].source_op, source1);
-  ASSERT_EQ(logical.Plexes()[1].source_op, source2);
-  ASSERT_TRUE(logical.Plexes()[0].pipe_ops.empty());
+  ASSERT_EQ(logical.Channels().size(), 2);
+  ASSERT_EQ(logical.Channels()[0].source_op, source1);
+  ASSERT_EQ(logical.Channels()[1].source_op, source2);
+  ASSERT_TRUE(logical.Channels()[0].pipe_ops.empty());
   ASSERT_EQ(logical.SinkOp(), sink);
 
   ASSERT_EQ(pipeline->Traces().size(), 6);
@@ -627,13 +627,13 @@ void MakeOnePassPipeline(size_t dop,
   source->HasMore();
   sink->NeedsMore();
   source->Finished();
-  pipeline->PlexFinished();
+  pipeline->ChannelFinished();
 
   auto logical = pipeline->ToLogicalPipeline();
   ASSERT_EQ(logical.Name(), name);
-  ASSERT_EQ(logical.Plexes().size(), 1);
-  ASSERT_EQ(logical.Plexes()[0].source_op, source);
-  ASSERT_TRUE(logical.Plexes()[0].pipe_ops.empty());
+  ASSERT_EQ(logical.Channels().size(), 1);
+  ASSERT_EQ(logical.Channels()[0].source_op, source);
+  ASSERT_TRUE(logical.Channels()[0].pipe_ops.empty());
   ASSERT_EQ(logical.SinkOp(), sink);
 
   ASSERT_EQ(pipeline->Traces().size(), 5);
@@ -669,13 +669,13 @@ void MakeOnePassDirectFinishPipeline(
   auto sink = pipeline->DeclSink("Sink", {source});
   source->Finished(Batch{});
   sink->NeedsMore();
-  pipeline->PlexFinished();
+  pipeline->ChannelFinished();
 
   auto logical = pipeline->ToLogicalPipeline();
   ASSERT_EQ(logical.Name(), name);
-  ASSERT_EQ(logical.Plexes().size(), 1);
-  ASSERT_EQ(logical.Plexes()[0].source_op, source);
-  ASSERT_TRUE(logical.Plexes()[0].pipe_ops.empty());
+  ASSERT_EQ(logical.Channels().size(), 1);
+  ASSERT_EQ(logical.Channels()[0].source_op, source);
+  ASSERT_TRUE(logical.Channels()[0].pipe_ops.empty());
   ASSERT_EQ(logical.SinkOp(), sink);
 
   ASSERT_EQ(pipeline->Traces().size(), 4);
@@ -711,14 +711,14 @@ void MakeOnePassWithPipePipeline(size_t dop,
   pipe->PipeEven();
   sink->NeedsMore();
   source->Finished();
-  pipeline->PlexFinished();
+  pipeline->ChannelFinished();
 
   auto logical = pipeline->ToLogicalPipeline();
   ASSERT_EQ(logical.Name(), name);
-  ASSERT_EQ(logical.Plexes().size(), 1);
-  ASSERT_EQ(logical.Plexes()[0].source_op, source);
-  ASSERT_EQ(logical.Plexes()[0].pipe_ops.size(), 1);
-  ASSERT_EQ(logical.Plexes()[0].pipe_ops[0], pipe);
+  ASSERT_EQ(logical.Channels().size(), 1);
+  ASSERT_EQ(logical.Channels()[0].source_op, source);
+  ASSERT_EQ(logical.Channels()[0].pipe_ops.size(), 1);
+  ASSERT_EQ(logical.Channels()[0].pipe_ops[0], pipe);
   ASSERT_EQ(logical.SinkOp(), sink);
 
   ASSERT_EQ(pipeline->Traces().size(), 6);
@@ -761,14 +761,14 @@ void MakePipeNeedsMorePipeline(size_t dop,
   source->Finished(Batch{});
   pipe->PipeEven();
   sink->NeedsMore();
-  pipeline->PlexFinished();
+  pipeline->ChannelFinished();
 
   auto logical = pipeline->ToLogicalPipeline();
   ASSERT_EQ(logical.Name(), name);
-  ASSERT_EQ(logical.Plexes().size(), 1);
-  ASSERT_EQ(logical.Plexes()[0].source_op, source);
-  ASSERT_EQ(logical.Plexes()[0].pipe_ops.size(), 1);
-  ASSERT_EQ(logical.Plexes()[0].pipe_ops[0], pipe);
+  ASSERT_EQ(logical.Channels().size(), 1);
+  ASSERT_EQ(logical.Channels()[0].source_op, source);
+  ASSERT_EQ(logical.Channels()[0].pipe_ops.size(), 1);
+  ASSERT_EQ(logical.Channels()[0].pipe_ops[0], pipe);
   ASSERT_EQ(logical.SinkOp(), sink);
 
   ASSERT_EQ(pipeline->Traces().size(), 8);
@@ -818,14 +818,14 @@ void MakePipeHasMorePipeline(size_t dop,
   pipe->PipeEven();
   sink->NeedsMore();
   source->Finished();
-  pipeline->PlexFinished();
+  pipeline->ChannelFinished();
 
   auto logical = pipeline->ToLogicalPipeline();
   ASSERT_EQ(logical.Name(), name);
-  ASSERT_EQ(logical.Plexes().size(), 1);
-  ASSERT_EQ(logical.Plexes()[0].source_op, source);
-  ASSERT_EQ(logical.Plexes()[0].pipe_ops.size(), 1);
-  ASSERT_EQ(logical.Plexes()[0].pipe_ops[0], pipe);
+  ASSERT_EQ(logical.Channels().size(), 1);
+  ASSERT_EQ(logical.Channels()[0].source_op, source);
+  ASSERT_EQ(logical.Channels()[0].pipe_ops.size(), 1);
+  ASSERT_EQ(logical.Channels()[0].pipe_ops[0], pipe);
   ASSERT_EQ(logical.SinkOp(), sink);
 
   ASSERT_EQ(pipeline->Traces().size(), 9);
@@ -877,14 +877,14 @@ void MakePipeYieldPipeline(size_t dop,
   pipe->PipeYieldBack();
   pipe->PipeNeedsMore();
   source->Finished();
-  pipeline->PlexFinished();
+  pipeline->ChannelFinished();
 
   auto logical = pipeline->ToLogicalPipeline();
   ASSERT_EQ(logical.Name(), name);
-  ASSERT_EQ(logical.Plexes().size(), 1);
-  ASSERT_EQ(logical.Plexes()[0].source_op, source);
-  ASSERT_EQ(logical.Plexes()[0].pipe_ops.size(), 1);
-  ASSERT_EQ(logical.Plexes()[0].pipe_ops[0], pipe);
+  ASSERT_EQ(logical.Channels().size(), 1);
+  ASSERT_EQ(logical.Channels()[0].source_op, source);
+  ASSERT_EQ(logical.Channels()[0].pipe_ops.size(), 1);
+  ASSERT_EQ(logical.Channels()[0].pipe_ops[0], pipe);
   ASSERT_EQ(logical.SinkOp(), sink);
 
   ASSERT_EQ(pipeline->Traces().size(), 9);
@@ -945,14 +945,14 @@ void MakeDrainPipeline(size_t dop,
   sink->NeedsMore();
   pipe->DrainFinished(Batch{});
   sink->NeedsMore();
-  pipeline->PlexFinished();
+  pipeline->ChannelFinished();
 
   auto logical = pipeline->ToLogicalPipeline();
   ASSERT_EQ(logical.Name(), name);
-  ASSERT_EQ(logical.Plexes().size(), 1);
-  ASSERT_EQ(logical.Plexes()[0].source_op, source);
-  ASSERT_EQ(logical.Plexes()[0].pipe_ops.size(), 1);
-  ASSERT_EQ(logical.Plexes()[0].pipe_ops[0], pipe);
+  ASSERT_EQ(logical.Channels().size(), 1);
+  ASSERT_EQ(logical.Channels()[0].source_op, source);
+  ASSERT_EQ(logical.Channels()[0].pipe_ops.size(), 1);
+  ASSERT_EQ(logical.Channels()[0].pipe_ops[0], pipe);
   ASSERT_EQ(logical.SinkOp(), sink);
 
   ASSERT_EQ(pipeline->Traces().size(), 22);
@@ -1042,16 +1042,16 @@ void MakeImplicitSourcePipeline(size_t dop,
   source->Finished(Batch{});
   pipe->PipeEven();
   sink->NeedsMore();
-  pipeline->PlexFinished();
+  pipeline->ChannelFinished();
   implicit_source->Finished(Batch{});
   sink->NeedsMore(1);
-  pipeline->PlexFinished(1);
+  pipeline->ChannelFinished(1);
 
   auto logical = pipeline->ToLogicalPipeline();
   ASSERT_EQ(logical.Name(), name);
-  ASSERT_EQ(logical.Plexes().size(), 1);
-  ASSERT_EQ(logical.Plexes()[0].source_op, source);
-  ASSERT_EQ(logical.Plexes()[0].pipe_ops.size(), 1);
+  ASSERT_EQ(logical.Channels().size(), 1);
+  ASSERT_EQ(logical.Channels()[0].source_op, source);
+  ASSERT_EQ(logical.Channels()[0].pipe_ops.size(), 1);
   ASSERT_EQ(logical.SinkOp(), sink);
 
   ASSERT_EQ(pipeline->Traces().size(), 9);
@@ -1104,13 +1104,13 @@ void MakeBackpressurePipeline(size_t dop,
   source->Finished(Batch{});
   pipe->PipeEven();
   sink->NeedsMore();
-  pipeline->PlexFinished();
+  pipeline->ChannelFinished();
 
   auto logical = pipeline->ToLogicalPipeline();
   ASSERT_EQ(logical.Name(), name);
-  ASSERT_EQ(logical.Plexes().size(), 1);
-  ASSERT_EQ(logical.Plexes()[0].source_op, source);
-  ASSERT_EQ(logical.Plexes()[0].pipe_ops.size(), 1);
+  ASSERT_EQ(logical.Channels().size(), 1);
+  ASSERT_EQ(logical.Channels()[0].source_op, source);
+  ASSERT_EQ(logical.Channels()[0].pipe_ops.size(), 1);
   ASSERT_EQ(logical.SinkOp(), sink);
 
   ASSERT_EQ(pipeline->Traces().size(), 9);
@@ -1208,7 +1208,7 @@ TYPED_TEST(PipelineTaskTest, MultiPipe) {
   pipe2->PipeEven();
   sink->NeedsMore();
 
-  pipeline->PlexFinished();
+  pipeline->ChannelFinished();
 
   this->TestTracePipeline(*pipeline);
 }
@@ -1242,14 +1242,14 @@ TYPED_TEST(PipelineTaskTest, MultiDrain) {
   sink->NeedsMore();
 
   pipe2->DrainFinished();
-  pipeline->PlexFinished();
+  pipeline->ChannelFinished();
 
   this->TestTracePipeline(*pipeline);
 }
 
-TYPED_TEST(PipelineTaskTest, MultiPlex) {
+TYPED_TEST(PipelineTaskTest, MultiChannel) {
   size_t dop = 4;
-  auto name = "MultiPlex";
+  auto name = "MultiChannel";
   auto pipeline = std::make_unique<pipelang::ImperativePipeline>(name, dop);
   auto source1 = pipeline->DeclSource("Source1");
   auto source2 = pipeline->DeclSource("Source2");
@@ -1270,18 +1270,19 @@ TYPED_TEST(PipelineTaskTest, MultiPlex) {
   sink->NeedsMore();
 
   source1->Finished();
-  pipeline->PlexFinished();
+  pipeline->ChannelFinished();
   source2->Finished();
-  pipeline->PlexFinished();
+  pipeline->ChannelFinished();
 
   // TODO: Source 2 HAS_MORE in some pipe, and source 1 also HAS_MORE? Shall it proceed
-  // with plex 2 instead of plex 1, i.e., for reduce the memory pressure of plex 2?
+  // with channel 2 instead of channel 1, i.e., for reduce the memory pressure of channel
+  // 2?
   // TODO: More.
 
   this->TestTracePipeline(*pipeline);
 }
 
 // TODO: Pipe/Drain after implicit sources.
-// TODO: Multi-plex.
+// TODO: Multi-channel.
 // TODO: Multi-physical.
 // TODO: Backpressure everywhere.

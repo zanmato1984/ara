@@ -7,17 +7,18 @@
 
 namespace ara::pipeline {
 
-std::string PhysicalPipeline::Explain(const std::vector<PhysicalPipeline::Plex>& plexes) {
+std::string PhysicalPipeline::Explain(
+    const std::vector<PhysicalPipeline::Channel>& channels) {
   std::stringstream ss;
-  for (size_t i = 0; i < plexes.size(); ++i) {
+  for (size_t i = 0; i < channels.size(); ++i) {
     if (i > 0) {
       ss << std::endl;
     }
-    ss << "Plex" << i << ": " << plexes[i].source_op->Name() << " -> ";
-    for (size_t j = 0; j < plexes[i].pipe_ops.size(); ++j) {
-      ss << plexes[i].pipe_ops[j]->Name() << " -> ";
+    ss << "Channel" << i << ": " << channels[i].source_op->Name() << " -> ";
+    for (size_t j = 0; j < channels[i].pipe_ops.size(); ++j) {
+      ss << channels[i].pipe_ops[j]->Name() << " -> ";
     }
-    ss << plexes[i].sink_op->Name();
+    ss << channels[i].sink_op->Name();
   }
   return ss.str();
 }
@@ -39,23 +40,24 @@ class PipelineCompiler {
   void ExtractTopology(const PipelineContext&) {
     std::unordered_map<PipeOp*, SourceOp*> pipe_source_map;
     auto sink = logical_pipeline_.SinkOp();
-    for (auto& plex : logical_pipeline_.Plexes()) {
+    for (auto& channel : logical_pipeline_.Channels()) {
       size_t id = 0;
-      topology_.emplace(plex.source_op,
-                        std::pair<size_t, LogicalPipeline::Plex>{id++, plex});
-      sources_keep_order_.push_back(plex.source_op);
-      for (size_t i = 0; i < plex.pipe_ops.size(); ++i) {
-        auto pipe = plex.pipe_ops[i];
+      topology_.emplace(channel.source_op,
+                        std::pair<size_t, LogicalPipeline::Channel>{id++, channel});
+      sources_keep_order_.push_back(channel.source_op);
+      for (size_t i = 0; i < channel.pipe_ops.size(); ++i) {
+        auto pipe = channel.pipe_ops[i];
         if (pipe_source_map.count(pipe) == 0) {
           if (auto implicit_source_up = pipe->ImplicitSource();
               implicit_source_up != nullptr) {
             auto implicit_source = implicit_source_up.get();
             pipe_source_map.emplace(pipe, implicit_source);
-            LogicalPipeline::Plex new_plex{
-                implicit_source,
-                std::vector<PipeOp*>(plex.pipe_ops.begin() + i + 1, plex.pipe_ops.end())};
-            topology_.emplace(implicit_source, std::pair<size_t, LogicalPipeline::Plex>{
-                                                   id++, std::move(new_plex)});
+            LogicalPipeline::Channel new_channel{
+                implicit_source, std::vector<PipeOp*>(channel.pipe_ops.begin() + i + 1,
+                                                      channel.pipe_ops.end())};
+            topology_.emplace(implicit_source,
+                              std::pair<size_t, LogicalPipeline::Channel>{
+                                  id++, std::move(new_channel)});
             sources_keep_order_.push_back(implicit_source);
             implicit_sources_keepalive_.emplace(implicit_source,
                                                 std::move(implicit_source_up));
@@ -86,16 +88,17 @@ class PipelineCompiler {
     std::vector<PhysicalPipeline> physical_pipelines;
     for (auto& [id, physical_info] : physical_pipelines_) {
       auto sources_keepalive = std::move(physical_info.first);
-      auto logical_plexes = std::move(physical_info.second);
-      std::vector<PhysicalPipeline::Plex> physical_plexes(logical_plexes.size());
-      std::transform(
-          logical_plexes.begin(), logical_plexes.end(), physical_plexes.begin(),
-          [&](auto& plex) -> PhysicalPipeline::Plex {
-            return {plex.source_op, std::move(plex.pipe_ops), logical_pipeline_.SinkOp()};
-          });
+      auto logical_channels = std::move(physical_info.second);
+      std::vector<PhysicalPipeline::Channel> physical_channels(logical_channels.size());
+      std::transform(logical_channels.begin(), logical_channels.end(),
+                     physical_channels.begin(),
+                     [&](auto& channel) -> PhysicalPipeline::Channel {
+                       return {channel.source_op, std::move(channel.pipe_ops),
+                               logical_pipeline_.SinkOp()};
+                     });
       auto name =
           "PhysicalPipeline" + std::to_string(id) + "(" + logical_pipeline_.Name() + ")";
-      physical_pipelines.emplace_back(std::move(name), std::move(physical_plexes),
+      physical_pipelines.emplace_back(std::move(name), std::move(physical_channels),
                                       std::move(sources_keepalive));
     }
     return physical_pipelines;
@@ -103,11 +106,11 @@ class PipelineCompiler {
 
   const LogicalPipeline& logical_pipeline_;
 
-  std::unordered_map<SourceOp*, std::pair<size_t, LogicalPipeline::Plex>> topology_;
+  std::unordered_map<SourceOp*, std::pair<size_t, LogicalPipeline::Channel>> topology_;
   std::vector<SourceOp*> sources_keep_order_;
   std::unordered_map<SourceOp*, std::unique_ptr<SourceOp>> implicit_sources_keepalive_;
   std::map<size_t, std::pair<std::vector<std::unique_ptr<SourceOp>>,
-                             std::vector<LogicalPipeline::Plex>>>
+                             std::vector<LogicalPipeline::Channel>>>
       physical_pipelines_;
 };
 
