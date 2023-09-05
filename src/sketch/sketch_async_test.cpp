@@ -22,10 +22,13 @@ using Result = arrow::Result<T>;
 
 using Batch = std::vector<int>;
 
-using Block = std::any;
-using Unblock = std::function<Status(std::optional<Batch>)>;
-using BlockPair = std::pair<Block, Unblock>;
-using BlockPairFactory = std::function<Result<BlockPair>()>;
+class Resumable {
+ public:
+  virtual ~Resumable() = default;
+  virtual void Resume() = 0;
+};
+using ResumablePtr = std::shared_ptr<Resumable>;
+using ResumableFactory = std::function<Result<std::shared_ptr<Resumable>>()>;
 
 struct TaskStatus {
  private:
@@ -36,7 +39,7 @@ struct TaskStatus {
     FINISHED,
     CANCELLED,
   } code_;
-  Block block_;
+  ResumablePtr resumable_ = nullptr;
 
   explicit TaskStatus(Code code) : code_(code) {}
 
@@ -47,14 +50,14 @@ struct TaskStatus {
   bool IsFinished() const { return code_ == Code::FINISHED; }
   bool IsCancelled() const { return code_ == Code::CANCELLED; }
 
-  Block& GetBlock() {
+  ResumablePtr& GetResumable() {
     ARA_CHECK(IsBlocking());
-    return block_;
+    return resumable_;
   }
 
-  const Block& GetBlock() const {
+  const ResumablePtr& GetResumable() const {
     ARA_CHECK(IsBlocking());
-    return block_;
+    return resumable_;
   }
 
   bool operator==(const TaskStatus& other) const { return code_ == other.code_; }
@@ -76,9 +79,9 @@ struct TaskStatus {
 
  public:
   static TaskStatus Continue() { return TaskStatus(Code::CONTINUE); }
-  static TaskStatus Blocking(Block block) {
+  static TaskStatus Blocking(ResumablePtr resumable) {
     auto status = TaskStatus(Code::BLOCKING);
-    status.block_ = std::move(block);
+    status.resumable_ = std::move(resumable);
     return status;
   }
   static TaskStatus Yield() { return TaskStatus{Code::YIELD}; }
@@ -90,7 +93,7 @@ using TaskResult = arrow::Result<TaskStatus>;
 using TaskId = size_t;
 
 struct TaskContext {
-  BlockPairFactory block_pair_factory;
+  ResumableFactory resumable_factory;
 };
 
 using ThreadId = size_t;
@@ -102,13 +105,14 @@ struct OpOutput {
     PIPE_SINK_NEEDS_MORE,
     PIPE_EVEN,
     SOURCE_PIPE_HAS_MORE,
-    BLOCKING,
     PIPE_YIELD,
     PIPE_YIELD_BACK,
+    BLOCKING,
     FINISHED,
     CANCELLED,
   } code_;
-  std::variant<Block, std::optional<Batch>> payload_;
+  std::optional<Batch> batch_;
+  ResumablePtr resumable_;
 
   explicit OpOutput(Code code) : code_(code) {}
 
@@ -117,30 +121,25 @@ struct OpOutput {
   bool IsPipeSinkNeedsMore() const { return code_ == Code::PIPE_SINK_NEEDS_MORE; }
   bool IsPipeEven() const { return code_ == Code::PIPE_EVEN; }
   bool IsSourcePipeHasMore() const { return code_ == Code::SOURCE_PIPE_HAS_MORE; }
-  bool IsBlocking() const { return code_ == Code::BLOCKING; }
   bool IsPipeYield() const { return code_ == Code::PIPE_YIELD; }
   bool IsPipeYieldBack() const { return code_ == Code::PIPE_YIELD_BACK; }
+  bool IsBlocking() const { return code_ == Code::BLOCKING; }
   bool IsFinished() const { return code_ == Code::FINISHED; }
   bool IsCancelled() const { return code_ == Code::CANCELLED; }
 
   std::optional<Batch>& GetBatch() {
-    ARA_CHECK(IsPipeEven() || IsSourcePipeHasMore() || IsFinished());
-    return std::get<std::optional<Batch>>(payload_);
+    ARA_CHECK(IsPipeEven() || IsSourcePipeHasMore() || IsFinished() || IsBlocking());
+    return batch_;
   }
 
   const std::optional<Batch>& GetBatch() const {
-    ARA_CHECK(IsPipeEven() || IsSourcePipeHasMore() || IsFinished());
-    return std::get<std::optional<Batch>>(payload_);
+    ARA_CHECK(IsPipeEven() || IsSourcePipeHasMore() || IsFinished() || IsBlocking());
+    return batch_;
   }
 
-  Block& GetBlock() {
+  ResumablePtr GetResumable() const {
     ARA_CHECK(IsBlocking());
-    return std::get<Block>(payload_);
-  }
-
-  const Block& GetBlock() const {
-    ARA_CHECK(IsBlocking());
-    return std::get<Block>(payload_);
+    return resumable_;
   }
 
   bool operator==(const OpOutput& other) const { return code_ == other.code_; }
@@ -173,24 +172,24 @@ struct OpOutput {
   static OpOutput PipeSinkNeedsMore() { return OpOutput(Code::PIPE_SINK_NEEDS_MORE); }
   static OpOutput PipeEven(Batch batch) {
     auto output = OpOutput(Code::PIPE_EVEN);
-    output.payload_ = std::optional{std::move(batch)};
+    output.batch_ = std::optional{std::move(batch)};
     return output;
   }
   static OpOutput SourcePipeHasMore(Batch batch) {
     auto output = OpOutput(Code::SOURCE_PIPE_HAS_MORE);
-    output.payload_ = std::optional{std::move(batch)};
-    return output;
-  }
-  static OpOutput Blocking(Block block) {
-    auto output = OpOutput(Code::BLOCKING);
-    output.payload_ = std::move(block);
+    output.batch_ = std::optional{std::move(batch)};
     return output;
   }
   static OpOutput PipeYield() { return OpOutput(Code::PIPE_YIELD); }
   static OpOutput PipeYieldBack() { return OpOutput(Code::PIPE_YIELD_BACK); }
+  static OpOutput Blocking(ResumablePtr resumable) {
+    auto output = OpOutput(Code::BLOCKING);
+    output.resumable_ = std::move(resumable);
+    return output;
+  }
   static OpOutput Finished(std::optional<Batch> batch = std::nullopt) {
     auto output = OpOutput(Code::FINISHED);
-    output.payload_ = std::optional{std::move(batch)};
+    output.batch_ = std::optional{std::move(batch)};
     return output;
   }
   static OpOutput Cancelled() { return OpOutput(Code::CANCELLED); }
@@ -209,63 +208,65 @@ class SourceOp {
 class MockAsyncSource : public SourceOp {
  public:
   MockAsyncSource(size_t q_size, size_t dop)
-      : data_queue_(q_size), unblock_queue_(dop), finished_(false) {}
+      : data_queue_(q_size), resumable_queue_(dop), finished_(false) {}
 
   std::future<Status> AsyncEventLoop(size_t num_data, std::chrono::milliseconds delay) {
     return std::async(std::launch::async, [this, num_data, delay]() {
       for (size_t i = 0; i < num_data; ++i) {
         std::this_thread::sleep_for(delay);
-        ARA_RETURN_NOT_OK(Produce());
+        ARA_RETURN_NOT_OK(Produce(Batch{}));
       }
-      finished_ = true;
+      ARA_RETURN_NOT_OK(Produce(std::nullopt));
       return Status::OK();
     });
   }
 
-  Status Produce() {
-    Batch batch;
-    Unblock unblock;
-    if (unblock_queue_.read(unblock)) {
-      // Shortcut.
-      return unblock(std::move(batch));
-    }
-
-    {
+  Status Produce(std::optional<Batch> batch) {
+    std::vector<ResumablePtr> to_resume;
+    if (!batch.has_value()) {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (!unblock_queue_.read(unblock)) {
-        data_queue_.blockingWrite(std::move(batch));
-        return Status::OK();
+      finished_ = true;
+      ResumablePtr resumable;
+      while (resumable_queue_.read(resumable)) {
+        to_resume.push_back(std::move(resumable));
+      }
+    } else {
+      data_queue_.blockingWrite(std::move(batch.value()));
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (data_queue_.size() > 0 && resumable_queue_.size() > 0) {
+        ResumablePtr resumable;
+        ARA_CHECK(resumable_queue_.read(resumable));
+        to_resume.push_back(std::move(resumable));
       }
     }
+    for (auto& resumable : to_resume) {
+      resumable->Resume();
+    }
 
-    return unblock(std::move(batch));
+    return Status::OK();
   }
 
   OpResult Consume(const TaskContext& context) {
     Batch batch;
-    Unblock unblock;
+    // Fast path.
     if (data_queue_.read(batch)) {
-      // Shortcut.
       return OpOutput::SourcePipeHasMore(std::move(batch));
     }
 
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      if (!data_queue_.read(batch)) {
-        ARA_ASSIGN_OR_RAISE(auto pair, context.block_pair_factory());
-        ARA_CHECK(unblock_queue_.write(std::move(pair.second)));
-        return OpOutput::Blocking(std::move(pair.first));
-      }
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (finished_) {
+      return OpOutput::Finished();
+    } else if (data_queue_.read(batch)) {
+      return OpOutput::SourcePipeHasMore(std::move(batch));
+    } else {
+      ARA_ASSIGN_OR_RAISE(auto resumable, context.resumable_factory());
+      ARA_CHECK(resumable_queue_.write(resumable));
+      return OpOutput::Blocking(std::move(resumable));
     }
-
-    return OpOutput::SourcePipeHasMore(std::move(batch));
   }
 
   PipelineSource Source() override {
     return [this](const TaskContext& context, ThreadId) -> OpResult {
-      if (finished_ && data_queue_.size() == 0) {
-        return OpOutput::Finished();
-      }
       return Consume(context);
     };
   }
@@ -273,9 +274,8 @@ class MockAsyncSource : public SourceOp {
  private:
   std::mutex mutex_;
   folly::MPMCQueue<Batch> data_queue_;
-  folly::MPMCQueue<Unblock> unblock_queue_;
-
-  std::atomic_bool finished_;
+  folly::MPMCQueue<ResumablePtr> resumable_queue_;
+  bool finished_;
 };
 
 }  // namespace ara::sketch
