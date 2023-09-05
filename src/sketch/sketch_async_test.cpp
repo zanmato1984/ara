@@ -248,11 +248,6 @@ class MockAsyncSource : public SourceOp {
 
   OpResult Consume(const TaskContext& context) {
     Batch batch;
-    // Fast path.
-    if (data_queue_.read(batch)) {
-      return OpOutput::SourcePipeHasMore(std::move(batch));
-    }
-
     std::lock_guard<std::mutex> lock(mutex_);
     if (finished_) {
       return OpOutput::Finished();
