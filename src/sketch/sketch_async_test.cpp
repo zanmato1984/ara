@@ -4,6 +4,8 @@
 #include <folly/futures/Future.h>
 #include <gtest/gtest.h>
 
+#include <future>
+
 #define ARA_CHECK ARROW_CHECK
 #define ARA_CHECK_OK ARROW_CHECK_OK
 
@@ -18,8 +20,10 @@ using Status = arrow::Status;
 template <typename T>
 using Result = arrow::Result<T>;
 
+using Batch = std::vector<int>;
+
 using Block = std::any;
-using Unblock = std::function<Status()>;
+using Unblock = std::function<Status(std::optional<Batch>)>;
 using BlockPair = std::pair<Block, Unblock>;
 using BlockPairFactory = std::function<Result<BlockPair>()>;
 
@@ -90,7 +94,6 @@ struct TaskContext {
 };
 
 using ThreadId = size_t;
-using Batch = std::vector<int>;
 
 struct OpOutput {
  private:
@@ -194,20 +197,85 @@ struct OpOutput {
 };
 using OpResult = arrow::Result<OpOutput>;
 
-class MockAsyncSource {
- public:
-  MockAsyncSource(folly::MPMCQueue<Batch>& queue) : queue_(queue) {}
+using PipelineSource = std::function<OpResult(const TaskContext&, ThreadId)>;
 
-  OpResult operator()(const TaskContext&, ThreadId) {
+class SourceOp {
+ public:
+  virtual ~SourceOp() = default;
+  virtual PipelineSource Source() = 0;
+  //   virtual TaskGroups Frontend(const PipelineContext&) = 0;
+};
+
+class MockAsyncSource : public SourceOp {
+ public:
+  MockAsyncSource(size_t q_size, size_t dop)
+      : data_queue_(q_size), unblock_queue_(dop), finished_(false) {}
+
+  std::future<Status> AsyncEventLoop(size_t num_data, std::chrono::milliseconds delay) {
+    return std::async(std::launch::async, [this, num_data, delay]() {
+      for (size_t i = 0; i < num_data; ++i) {
+        std::this_thread::sleep_for(delay);
+        ARA_RETURN_NOT_OK(Produce());
+      }
+      finished_ = true;
+      return Status::OK();
+    });
+  }
+
+  Status Produce() {
     Batch batch;
-    if (!queue_.read(batch)) {
-      return OpOutput::SourceNotReady();
+    Unblock unblock;
+    if (unblock_queue_.read(unblock)) {
+      // Shortcut.
+      return unblock(std::move(batch));
     }
+
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!unblock_queue_.read(unblock)) {
+        data_queue_.blockingWrite(std::move(batch));
+        return Status::OK();
+      }
+    }
+
+    return unblock(std::move(batch));
+  }
+
+  OpResult Consume(const TaskContext& context) {
+    Batch batch;
+    Unblock unblock;
+    if (data_queue_.read(batch)) {
+      // Shortcut.
+      return OpOutput::SourcePipeHasMore(std::move(batch));
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!data_queue_.read(batch)) {
+        ARA_ASSIGN_OR_RAISE(auto pair, context.block_pair_factory());
+        ARA_CHECK(unblock_queue_.write(std::move(pair.second)));
+        return OpOutput::Blocking(std::move(pair.first));
+      }
+    }
+
     return OpOutput::SourcePipeHasMore(std::move(batch));
   }
 
+  PipelineSource Source() override {
+    return [this](const TaskContext& context, ThreadId) -> OpResult {
+      if (finished_ && data_queue_.size() == 0) {
+        return OpOutput::Finished();
+      }
+      return Consume(context);
+    };
+  }
+
  private:
-  folly::MPMCQueue<Batch>& queue_;
+  std::mutex mutex_;
+  folly::MPMCQueue<Batch> data_queue_;
+  folly::MPMCQueue<Unblock> unblock_queue_;
+
+  std::atomic_bool finished_;
 };
 
 }  // namespace ara::sketch
