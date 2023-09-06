@@ -24,8 +24,10 @@ using Batch = std::vector<int>;
 
 class Resumable {
  public:
+  using Callback = std::function<void()>;
   virtual ~Resumable() = default;
   virtual void Resume() = 0;
+  virtual void AddCallback(Callback) = 0;
 };
 using ResumablePtr = std::shared_ptr<Resumable>;
 using ResumableFactory = std::function<Result<std::shared_ptr<Resumable>>()>;
@@ -108,7 +110,6 @@ using ThreadId = size_t;
 struct OpOutput {
  private:
   enum class Code {
-    SOURCE_NOT_READY,
     PIPE_SINK_NEEDS_MORE,
     PIPE_EVEN,
     SOURCE_PIPE_HAS_MORE,
@@ -124,7 +125,6 @@ struct OpOutput {
   explicit OpOutput(Code code) : code_(code) {}
 
  public:
-  bool IsSourceNotReady() const { return code_ == Code::SOURCE_NOT_READY; }
   bool IsPipeSinkNeedsMore() const { return code_ == Code::PIPE_SINK_NEEDS_MORE; }
   bool IsPipeEven() const { return code_ == Code::PIPE_EVEN; }
   bool IsSourcePipeHasMore() const { return code_ == Code::SOURCE_PIPE_HAS_MORE; }
@@ -158,8 +158,6 @@ struct OpOutput {
 
   std::string ToString() const {
     switch (code_) {
-      case Code::SOURCE_NOT_READY:
-        return "SOURCE_NOT_READY";
       case Code::PIPE_SINK_NEEDS_MORE:
         return "PIPE_SINK_NEEDS_MORE";
       case Code::PIPE_EVEN:
@@ -180,7 +178,6 @@ struct OpOutput {
   }
 
  public:
-  static OpOutput SourceNotReady() { return OpOutput(Code::SOURCE_NOT_READY); }
   static OpOutput PipeSinkNeedsMore() { return OpOutput(Code::PIPE_SINK_NEEDS_MORE); }
   static OpOutput PipeEven(Batch batch) {
     auto output = OpOutput(Code::PIPE_EVEN);
@@ -238,8 +235,7 @@ class SinkOp {
   virtual std::optional<TaskGroup> Backend() = 0;
 };
 
-class Pipeline {
- public:
+struct Pipeline {
   struct Channel {
     SourceOp* source_op;
     std::vector<PipeOp*> pipe_ops;
@@ -247,6 +243,269 @@ class Pipeline {
   };
 
   std::vector<Channel> channels;
+};
+
+class PipelineTask {
+ public:
+  class Channel {
+   public:
+    Channel(const Pipeline::Channel& channel, size_t dop)
+        : dop_(dop),
+          source_(channel.source_op->Source()),
+          pipes_(channel.pipe_ops.size()),
+          sink_(channel.sink_op->Sink()),
+          thread_locals_(dop),
+          cancelled_(false) {
+      const auto& pipe_ops = channel.pipe_ops;
+      std::transform(pipe_ops.begin(), pipe_ops.end(), pipes_.begin(),
+                     [&](auto* pipe_op) {
+                       return std::make_pair(pipe_op->Pipe(), pipe_op->Drain());
+                     });
+      std::vector<size_t> drains;
+      for (size_t i = 0; i < pipes_.size(); ++i) {
+        if (pipes_[i].second.has_value()) {
+          drains.push_back(i);
+        }
+      }
+      for (size_t i = 0; i < dop; ++i) {
+        thread_locals_[i].drains = drains;
+      }
+    }
+
+    Channel(Channel&& other)
+        : dop_(other.dop_),
+          source_(std::move(other.source_)),
+          pipes_(std::move(other.pipes_)),
+          sink_(std::move(other.sink_)),
+          thread_locals_(std::move(other.thread_locals_)),
+          cancelled_(other.cancelled_.load()) {}
+
+    OpResult operator()(const TaskContext& task_context, ThreadId thread_id) {
+      if (cancelled_) {
+        return OpOutput::Cancelled();
+      }
+
+      if (thread_locals_[thread_id].sinking) {
+        thread_locals_[thread_id].sinking = false;
+        auto result = Sink(task_context, thread_id, std::nullopt);
+      }
+
+      if (!thread_locals_[thread_id].pipe_stack.empty()) {
+        auto pipe_id = thread_locals_[thread_id].pipe_stack.top();
+        thread_locals_[thread_id].pipe_stack.pop();
+        auto result = Pipe(task_context, thread_id, pipe_id, std::nullopt);
+        return result;
+      }
+
+      if (!thread_locals_[thread_id].source_done) {
+        auto result = source_(task_context, thread_id);
+        if (!result.ok()) {
+          cancelled_ = true;
+          return result.status();
+        }
+        if (result->IsBlocking()) {
+          return result;
+        } else if (result->IsFinished()) {
+          thread_locals_[thread_id].source_done = true;
+          if (result->GetBatch().has_value()) {
+            auto new_result =
+                Pipe(task_context, thread_id, 0, std::move(result->GetBatch()));
+            return new_result;
+          }
+        } else {
+          ARA_CHECK(result->IsSourcePipeHasMore());
+          ARA_CHECK(result->GetBatch().has_value());
+          auto new_result =
+              Pipe(task_context, thread_id, 0, std::move(result->GetBatch()));
+          return new_result;
+        }
+      }
+
+      if (thread_locals_[thread_id].draining >= thread_locals_[thread_id].drains.size()) {
+        return OpOutput::Finished();
+      }
+
+      for (; thread_locals_[thread_id].draining < thread_locals_[thread_id].drains.size();
+           ++thread_locals_[thread_id].draining) {
+        auto drain_id =
+            thread_locals_[thread_id].drains[thread_locals_[thread_id].draining];
+        auto result = pipes_[drain_id].second.value()(task_context, thread_id);
+        if (!result.ok()) {
+          cancelled_ = true;
+          return result.status();
+        }
+        if (thread_locals_[thread_id].yield) {
+          ARA_CHECK(result->IsPipeYieldBack());
+          thread_locals_[thread_id].yield = false;
+          return OpOutput::PipeYieldBack();
+        }
+        if (result->IsPipeYield()) {
+          ARA_CHECK(!thread_locals_[thread_id].yield);
+          thread_locals_[thread_id].yield = true;
+          return OpOutput::PipeYield();
+        }
+        if (result->IsBlocking()) {
+          return result;
+        }
+        ARA_CHECK(result->IsSourcePipeHasMore() || result->IsFinished());
+        if (result->GetBatch().has_value()) {
+          if (result->IsFinished()) {
+            ++thread_locals_[thread_id].draining;
+          }
+          auto new_result =
+              Pipe(task_context, thread_id, drain_id + 1, std::move(result->GetBatch()));
+          return new_result;
+        }
+      }
+
+      return OpOutput::Finished();
+    }
+
+    OpResult Pipe(const TaskContext& task_context, ThreadId thread_id, size_t pipe_id,
+                  std::optional<Batch> input) {
+      for (size_t i = pipe_id; i < pipes_.size(); ++i) {
+        auto result = pipes_[i].first(task_context, thread_id, std::move(input));
+        if (!result.ok()) {
+          cancelled_ = true;
+          return result.status();
+        }
+        if (thread_locals_[thread_id].yield) {
+          ARA_CHECK(result->IsPipeYieldBack());
+          thread_locals_[thread_id].pipe_stack.push(i);
+          thread_locals_[thread_id].yield = false;
+          return OpOutput::PipeYieldBack();
+        }
+        if (result->IsPipeYield()) {
+          ARA_CHECK(!thread_locals_[thread_id].yield);
+          thread_locals_[thread_id].pipe_stack.push(i);
+          thread_locals_[thread_id].yield = true;
+          return OpOutput::PipeYield();
+        }
+        if (result->IsBlocking()) {
+          thread_locals_[thread_id].pipe_stack.push(i);
+          return result;
+        }
+        ARA_CHECK(result->IsPipeSinkNeedsMore() || result->IsPipeEven() ||
+                  result->IsSourcePipeHasMore());
+        if (result->IsPipeEven() || result->IsSourcePipeHasMore()) {
+          if (result->IsSourcePipeHasMore()) {
+            thread_locals_[thread_id].pipe_stack.push(i);
+          }
+          ARA_CHECK(result->GetBatch().has_value());
+          input = std::move(result->GetBatch());
+        } else {
+          return OpOutput::PipeSinkNeedsMore();
+        }
+      }
+
+      return Sink(task_context, thread_id, std::move(input));
+    }
+
+    OpResult Sink(const TaskContext& task_context, ThreadId thread_id,
+                  std::optional<Batch> input) {
+      auto result = sink_(task_context, thread_id, std::move(input));
+      if (!result.ok()) {
+        cancelled_ = true;
+        return result.status();
+      }
+      ARA_CHECK(result->IsPipeSinkNeedsMore() || result->IsBlocking());
+      if (result->IsBlocking()) {
+        thread_locals_[thread_id].sinking = true;
+      }
+      return result;
+    }
+
+   private:
+    size_t dop_;
+    PipelineSource source_;
+    std::vector<std::pair<PipelinePipe, std::optional<PipelineDrain>>> pipes_;
+    PipelineSink sink_;
+
+    struct ThreadLocal {
+      bool sinking = false;
+      std::stack<size_t> pipe_stack;
+      bool source_done = false;
+      std::vector<size_t> drains;
+      size_t draining = 0;
+      bool yield = false;
+    };
+    std::vector<ThreadLocal> thread_locals_;
+    std::atomic_bool cancelled_;
+  };
+
+ public:
+  PipelineTask(const Pipeline& pipeline, size_t dop) : dop_(dop) {
+    for (const auto& channel : pipeline.channels) {
+      channels_.emplace_back(channel, dop);
+    }
+    for (size_t i = 0; i < dop; ++i) {
+      thread_locals_.emplace_back(channels_.size());
+    }
+  }
+
+  TaskResult operator()(const TaskContext& task_context, ThreadId thread_id) {
+    bool all_finished = true;
+    bool all_blocking = false;
+    std::vector<ResumablePtr> resumables;
+    for (size_t i = 0; i < channels_.size(); ++i) {
+      if (thread_locals_[thread_id].finished[i]) {
+        continue;
+      } else if (thread_locals_[thread_id].blocking[i]) {
+        return TaskStatus::Blocking(thread_locals_[thread_id].resumables[i]);
+      }
+      auto& channel = channels_[i];
+      ARA_ASSIGN_OR_RAISE(auto op_result, channel(task_context, thread_id));
+      if (op_result.IsFinished()) {
+        ARA_CHECK(!op_result.GetBatch().has_value());
+        thread_locals_[thread_id].finished[i] = true;
+      } else {
+        all_finished = false;
+      }
+      // if (op_result->IsBlocking()) {
+
+      // }
+      // if (!op_result.IsFinished() && !op_result.IsSourceNotReady()) {
+      //   return OpResultToTaskResult(std::move(op_result));
+      // }
+    }
+    if (all_finished) {
+      return TaskStatus::Finished();
+    } else {
+      return TaskStatus::Continue();
+    }
+  }
+
+ private:
+  static TaskResult OpResultToTaskResult(OpResult op_result) {
+    if (!op_result.ok()) {
+      return op_result.status();
+    }
+    if (op_result->IsBlocking()) {
+      return TaskStatus::Blocking(std::move(op_result->GetResumable()));
+    }
+    if (op_result->IsPipeYield()) {
+      return TaskStatus::Yield();
+    }
+    if (op_result->IsFinished()) {
+      return TaskStatus::Finished();
+    }
+    if (op_result->IsCancelled()) {
+      return TaskStatus::Cancelled();
+    }
+    return TaskStatus::Continue();
+  }
+
+ private:
+  size_t dop_;
+  std::vector<Channel> channels_;
+
+  struct ThreadLocal {
+    ThreadLocal(size_t size) : finished(size, false), blocking(size, false) {}
+
+    std::vector<bool> finished;
+    std::vector<bool> blocking;
+  };
+  std::vector<ThreadLocal> thread_locals_;
 };
 
 class MockAsyncSource : public SourceOp {
@@ -319,6 +578,76 @@ class MockAsyncSource : public SourceOp {
   folly::MPMCQueue<Batch> data_queue_;
   folly::MPMCQueue<ResumablePtr> resumable_queue_;
   bool finished_;
+};
+
+class SyncResumable : public Resumable {
+ public:
+  virtual void Wait() = 0;
+};
+
+class ConcreteSyncResumable : public SyncResumable {
+ public:
+  void Resume() override {
+    std::unique_lock<std::mutex> lock(mutex);
+    ready = true;
+    cv.notify_one();
+    for (const auto& cb : callbacks) {
+      cb();
+    }
+  }
+
+  void AddCallback(std::function<void()> cb) override {
+    std::unique_lock<std::mutex> lock(mutex);
+    if (ready) {
+      cb();
+    } else {
+      callbacks.push_back(cb);
+    }
+  }
+
+  void Wait() override {
+    std::unique_lock<std::mutex> lock(mutex);
+    while (!ready) {
+      cv.wait(lock);
+    }
+  }
+
+ private:
+  std::mutex mutex;
+  std::condition_variable cv;
+  bool ready = false;
+  std::vector<std::function<void()>> callbacks;
+};
+
+class AnySyncResumable : public SyncResumable {
+ public:
+  AnySyncResumable(const std::vector<ResumablePtr>& resumables)
+      : resumables_(resumables), any_ready_(false) {
+    for (auto& resumable : resumables) {
+      resumable->AddCallback([this]() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        any_ready_ = true;
+        cv_.notify_one();
+      });
+    }
+  }
+
+  void Resume() override { ARA_CHECK(false); }
+
+  void AddCallback(std::function<void()>) override { ARA_CHECK(false); }
+
+  void Wait() override {
+    std::unique_lock<std::mutex> lock(mutex_);
+    while (!any_ready_) {
+      cv_.wait(lock);
+    }
+  }
+
+ private:
+  std::vector<ResumablePtr> resumables_;
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  bool any_ready_;
 };
 
 }  // namespace ara::sketch
