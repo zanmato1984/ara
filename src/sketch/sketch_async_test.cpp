@@ -96,6 +96,13 @@ struct TaskContext {
   ResumableFactory resumable_factory;
 };
 
+using Task = std::function<TaskResult(const TaskContext&, TaskId)>;
+using TaskCont = std::function<TaskResult(const TaskContext&)>;
+using TaskNotifyFinish = std::function<arrow::Status()>;
+using TaskGroup =
+    std::tuple<Task, size_t, std::optional<TaskCont>, std::optional<TaskNotifyFinish>>;
+using TaskGroups = std::vector<TaskGroup>;
+
 using ThreadId = size_t;
 
 struct OpOutput {
@@ -137,7 +144,12 @@ struct OpOutput {
     return batch_;
   }
 
-  ResumablePtr GetResumable() const {
+  ResumablePtr& GetResumable() {
+    ARA_CHECK(IsBlocking());
+    return resumable_;
+  }
+
+  const ResumablePtr& GetResumable() const {
     ARA_CHECK(IsBlocking());
     return resumable_;
   }
@@ -197,12 +209,44 @@ struct OpOutput {
 using OpResult = arrow::Result<OpOutput>;
 
 using PipelineSource = std::function<OpResult(const TaskContext&, ThreadId)>;
+using PipelinePipe =
+    std::function<OpResult(const TaskContext&, ThreadId, std::optional<Batch>)>;
+using PipelineDrain = std::function<OpResult(const TaskContext&, ThreadId)>;
+using PipelineSink =
+    std::function<OpResult(const TaskContext&, ThreadId, std::optional<Batch>)>;
 
 class SourceOp {
  public:
   virtual ~SourceOp() = default;
   virtual PipelineSource Source() = 0;
-  //   virtual TaskGroups Frontend(const PipelineContext&) = 0;
+  virtual TaskGroups Frontend() = 0;
+  virtual std::optional<TaskGroup> Backend() = 0;
+};
+
+class PipeOp {
+ public:
+  virtual ~PipeOp() = default;
+  virtual PipelinePipe Pipe() = 0;
+  virtual std::optional<PipelineDrain> Drain() = 0;
+};
+
+class SinkOp {
+ public:
+  virtual ~SinkOp() = default;
+  virtual PipelineSink Sink() = 0;
+  virtual TaskGroups Frontend() = 0;
+  virtual std::optional<TaskGroup> Backend() = 0;
+};
+
+class Pipeline {
+ public:
+  struct Channel {
+    SourceOp* source_op;
+    std::vector<PipeOp*> pipe_ops;
+    SinkOp* sink_op;
+  };
+
+  std::vector<Channel> channels;
 };
 
 class MockAsyncSource : public SourceOp {
@@ -265,6 +309,10 @@ class MockAsyncSource : public SourceOp {
       return Consume(context);
     };
   }
+
+  TaskGroups Frontend() override { return {}; }
+
+  std::optional<TaskGroup> Backend() override { return {}; }
 
  private:
   std::mutex mutex_;
