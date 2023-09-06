@@ -259,3 +259,30 @@ TEST(FollyFutureTest, WhileDoSwitchExecutor) {
   iter++;
   ASSERT_EQ(iter->second, 21);
 }
+
+TEST(FollyFutureTest, RacyCallback) {
+  folly::CPUThreadPoolExecutor executor(4);
+  size_t rounds = 100000;
+  for (size_t i = 0; i < rounds; ++i) {
+    std::atomic_bool start = false;
+    auto pair = folly::makePromiseContract<int>();
+    auto& promise = pair.first;
+    auto& future = pair.second;
+    auto fulfill_task = std::async(std::launch::async, [&]() {
+      while (!start) {
+      }
+      promise.setValue(i);
+    });
+    auto get_task = std::async(std::launch::async, [&]() {
+      while (!start) {
+      }
+      std::move(future)
+          .via(&executor)
+          .thenValue([&](int value) { EXPECT_EQ(value, i); })
+          .wait();
+    });
+    start = true;
+    fulfill_task.get();
+    get_task.get();
+  }
+}
