@@ -10,7 +10,7 @@ class TaskGroup : public internal::Meta {
   using NotifyFinishFunc = std::function<Status(const TaskContext&)>;
 
   TaskGroup(std::string name, std::string desc, Task task, size_t num_tasks,
-            std::optional<Continuation> cont, std::optional<NotifyFinishFunc> notify)
+            std::optional<Continuation> cont, NotifyFinishFunc notify)
       : Meta(std::move(name), std::move(desc)),
         task_(std::move(task)),
         cont_(std::move(cont)),
@@ -29,7 +29,7 @@ class TaskGroup : public internal::Meta {
   Task task_;
   size_t num_tasks_;
   std::optional<Continuation> cont_;
-  std::optional<NotifyFinishFunc> notify_;
+  NotifyFinishFunc notify_;
 };
 
 using TaskGroups = std::vector<TaskGroup>;

@@ -68,8 +68,8 @@ struct BackpressureImpl {
 };
 }  // namespace detail
 
-std::optional<task::BackpressurePairFactory>
-NaiveParallelScheduler::MakeBackpressurePairFactory(const ScheduleContext&) const {
+task::BackpressurePairFactory NaiveParallelScheduler::MakeBackpressurePairFactory(
+    const ScheduleContext&) const {
   return
       [&](const TaskContext&, const Task&, TaskId) -> Result<BackpressureAndResetPair> {
         auto impl = std::make_shared<detail::BackpressureImpl>();

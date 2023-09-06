@@ -149,8 +149,7 @@ AsyncDualPoolScheduler::ConcreteTask AsyncDualPoolScheduler::MakeTask(
   return {std::move(p), std::move(task_f)};
 }
 
-std::optional<BackpressurePairFactory>
-AsyncDualPoolScheduler::MakeBackpressurePairFactory(
+BackpressurePairFactory AsyncDualPoolScheduler::MakeBackpressurePairFactory(
     const ScheduleContext& schedule_context) const {
   return [&](const TaskContext& task_context, const Task& task, TaskId task_id) {
     return MakeBackpressureAndResetPair(schedule_context, task_context, task, task_id);

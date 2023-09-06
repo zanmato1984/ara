@@ -30,7 +30,7 @@ class FooSource : public SourceOp {
 
 class FooPipe : public PipeOp {
  public:
-  FooPipe(std::optional<PipelineDrain> drain = std::nullopt,
+  FooPipe(PipelineDrain drain = nullptr,
           std::unique_ptr<SourceOp> implicit_source = nullptr)
       : PipeOp("FooPipe", "Do nothing"),
         drain_(std::move(drain)),
@@ -41,14 +41,14 @@ class FooPipe : public PipeOp {
               std::optional<Batch>) -> OpResult { return OpOutput::PipeEven({}); };
   }
 
-  std::optional<PipelineDrain> Drain() override { return drain_; }
+  PipelineDrain Drain() override { return drain_; }
 
   std::unique_ptr<SourceOp> ImplicitSource() override {
     return std::move(implicit_source_);
   }
 
  private:
-  std::optional<PipelineDrain> drain_;
+  PipelineDrain drain_;
   std::unique_ptr<SourceOp> implicit_source_;
 };
 
@@ -120,7 +120,7 @@ TEST(CompilePipelineTest, DoublePhysicalPipeline) {
   FooSource source;
   auto implicit_source_ptr = std::make_unique<FooSource>();
   auto implicit_source = implicit_source_ptr.get();
-  FooPipe pipe(std::nullopt, std::move(implicit_source_ptr));
+  FooPipe pipe(nullptr, std::move(implicit_source_ptr));
   FooSink sink;
   LogicalPipeline logical_pipeline("DoublePhysicalPipeline", {{&source, {&pipe}}}, &sink);
   auto physical_pipelines = CompilePipeline(context, logical_pipeline);
@@ -146,8 +146,8 @@ TEST(CompilePipelineTest, DoublePhysicalDoubleChannelPipeline) {
   auto implicit_source2_ptr = std::make_unique<FooSource>();
   auto implicit_source1 = implicit_source1_ptr.get();
   auto implicit_source2 = implicit_source2_ptr.get();
-  FooPipe pipe1(std::nullopt, std::move(implicit_source1_ptr)),
-      pipe2(std::nullopt, std::move(implicit_source2_ptr));
+  FooPipe pipe1(nullptr, std::move(implicit_source1_ptr)),
+      pipe2(nullptr, std::move(implicit_source2_ptr));
   FooSink sink;
   LogicalPipeline logical_pipeline("DoubleDoublePipeline",
                                    {{&source1, {&pipe1}}, {&source2, {&pipe2}}}, &sink);
@@ -183,9 +183,9 @@ TEST(CompilePipelineTest, TripplePhysicalPipeline) {
   auto implicit_source1 = implicit_source1_ptr.get();
   auto implicit_source2 = implicit_source2_ptr.get();
   auto implicit_source3 = implicit_source3_ptr.get();
-  FooPipe pipe1(std::nullopt, std::move(implicit_source1_ptr)),
-      pipe2(std::nullopt, std::move(implicit_source2_ptr)),
-      pipe3(std::nullopt, std::move(implicit_source3_ptr));
+  FooPipe pipe1(nullptr, std::move(implicit_source1_ptr)),
+      pipe2(nullptr, std::move(implicit_source2_ptr)),
+      pipe3(nullptr, std::move(implicit_source3_ptr));
   FooSink sink;
   LogicalPipeline logical_pipeline(
       "TripplePhysicalPipeline",
@@ -229,10 +229,10 @@ TEST(CompilePipelineTest, OddQuadroStagePipeline) {
   auto implicit_source2 = implicit_source2_ptr.get();
   auto implicit_source3 = implicit_source3_ptr.get();
   auto implicit_source4 = implicit_source4_ptr.get();
-  FooPipe pipe1(std::nullopt, std::move(implicit_source1_ptr)),
-      pipe2(std::nullopt, std::move(implicit_source2_ptr)),
-      pipe3(std::nullopt, std::move(implicit_source3_ptr)),
-      pipe4(std::nullopt, std::move(implicit_source4_ptr));
+  FooPipe pipe1(nullptr, std::move(implicit_source1_ptr)),
+      pipe2(nullptr, std::move(implicit_source2_ptr)),
+      pipe3(nullptr, std::move(implicit_source3_ptr)),
+      pipe4(nullptr, std::move(implicit_source4_ptr));
   FooSink sink;
   LogicalPipeline logical_pipeline("OddQuadroStagePipeline",
                                    {{&source1, {&pipe1, &pipe2, &pipe4}},

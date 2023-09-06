@@ -202,9 +202,9 @@ class ImperativePipe : public ImperativeOp, public PipeOp {
                std::optional<Batch>) -> OpResult { return Fetch(thread_id); };
   }
 
-  std::optional<PipelineDrain> Drain() override {
+  PipelineDrain Drain() override {
     if (!has_drain_) {
-      return std::nullopt;
+      return nullptr;
     }
     return [&](const PipelineContext&, const TaskContext&,
                ThreadId thread_id) -> OpResult { return Fetch(thread_id); };
@@ -240,9 +240,9 @@ class ImperativeSink : public ImperativeOp, public SinkOp {
                ThreadId thread_id, std::optional<Batch>) -> OpResult {
       auto result = Fetch(thread_id);
       if (result.ok() && result->IsSinkBackpressure()) {
-        ARA_CHECK(task_context.backpressure_pair_factory.has_value());
+        ARA_CHECK(task_context.backpressure_pair_factory != nullptr);
         ARA_ASSIGN_OR_RAISE(auto backpressure_pair,
-                            task_context.backpressure_pair_factory.value()(
+                            task_context.backpressure_pair_factory(
                                 task_context, Task("", "", {}), thread_id));
         {
           std::lock_guard<std::mutex> lock(mutex_);
@@ -466,7 +466,7 @@ class PipelineTaskTest : public testing::Test {
                   return pipeline_task(pipeline_context, task_context, task_id);
                 });
       TaskGroup task_group(pipeline_task.Name(), pipeline_task.Desc(), std::move(task),
-                           dop, std::nullopt, std::nullopt);
+                           dop, std::nullopt, nullptr);
 
       auto handle = scheduler.Schedule(schedule_context, task_group);
       ASSERT_OK(handle);

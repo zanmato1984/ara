@@ -53,7 +53,7 @@ class Scheduler : public internal::Meta {
 
   task::TaskContext MakeTaskContext(const ScheduleContext&) const;
 
-  virtual std::optional<task::BackpressurePairFactory> MakeBackpressurePairFactory(
+  virtual task::BackpressurePairFactory MakeBackpressurePairFactory(
       const ScheduleContext&) const = 0;
 
  private:

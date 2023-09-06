@@ -28,7 +28,7 @@ PipelineTask::Channel::Channel(const PipelineTask& task, size_t channel_id, size
   });
   std::vector<size_t> drains;
   for (size_t i = 0; i < pipes_.size(); ++i) {
-    if (pipes_[i].second.has_value()) {
+    if (pipes_[i].second != nullptr) {
       drains.push_back(i);
     }
   }
@@ -111,8 +111,7 @@ OpResult PipelineTask::Channel::operator()(const PipelineContext& pipeline_conte
     auto drain_id = thread_locals_[thread_id].drains[thread_locals_[thread_id].draining];
     OBSERVE(OnPipelineDrainBegin, task_, channel_id_, drain_id, pipeline_context,
             task_context, thread_id);
-    auto result =
-        pipes_[drain_id].second.value()(pipeline_context, task_context, thread_id);
+    auto result = pipes_[drain_id].second(pipeline_context, task_context, thread_id);
     OBSERVE(OnPipelineDrainEnd, task_, channel_id_, drain_id, pipeline_context,
             task_context, thread_id, result);
     if (!result.ok()) {

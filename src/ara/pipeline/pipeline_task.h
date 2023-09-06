@@ -39,7 +39,7 @@ class PipelineTask : public internal::Meta {
     const size_t dop_;
 
     PipelineSource source_;
-    std::vector<std::pair<PipelinePipe, std::optional<PipelineDrain>>> pipes_;
+    std::vector<std::pair<PipelinePipe, PipelineDrain>> pipes_;
     PipelineSink sink_;
 
     struct ThreadLocal {

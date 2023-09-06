@@ -15,7 +15,7 @@ class TaskObserver;
 
 struct TaskContext {
   const QueryContext* query_context;
-  std::optional<BackpressurePairFactory> backpressure_pair_factory;
+  BackpressurePairFactory backpressure_pair_factory;
   std::unique_ptr<ChainedObserver<TaskObserver>> task_observer;
 };
 

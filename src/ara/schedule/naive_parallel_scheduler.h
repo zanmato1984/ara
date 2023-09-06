@@ -39,7 +39,7 @@ class NaiveParallelScheduler : public Scheduler {
   Result<std::unique_ptr<TaskGroupHandle>> DoSchedule(const ScheduleContext&,
                                                       const task::TaskGroup&) override;
 
-  std::optional<task::BackpressurePairFactory> MakeBackpressurePairFactory(
+  task::BackpressurePairFactory MakeBackpressurePairFactory(
       const ScheduleContext&) const override;
 
  private:

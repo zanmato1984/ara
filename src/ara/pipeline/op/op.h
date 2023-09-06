@@ -32,7 +32,7 @@ class PipeOp : public internal::Meta {
   using Meta::Meta;
   virtual ~PipeOp() = default;
   virtual PipelinePipe Pipe() = 0;
-  virtual std::optional<PipelineDrain> Drain() = 0;
+  virtual PipelineDrain Drain() = 0;
   virtual std::unique_ptr<SourceOp> ImplicitSource() = 0;
 };
 

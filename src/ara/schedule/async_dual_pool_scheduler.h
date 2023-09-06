@@ -63,7 +63,7 @@ class AsyncDualPoolScheduler : public Scheduler {
   ConcreteTask MakeTask(const ScheduleContext&, const Task&, const TaskContext&, TaskId,
                         TaskResult&) const;
 
-  std::optional<BackpressurePairFactory> MakeBackpressurePairFactory(
+  BackpressurePairFactory MakeBackpressurePairFactory(
       const ScheduleContext&) const override;
 
   Result<BackpressureAndResetPair> MakeBackpressureAndResetPair(const ScheduleContext&,
