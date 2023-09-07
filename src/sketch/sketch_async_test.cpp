@@ -668,8 +668,8 @@ TEST(SyncAwaiterTest, SingleWaitFirst) {
     resumer->Resume();
   });
   awaiter->Wait();
-  ASSERT_TRUE(resumer->IsResumed());
   ASSERT_TRUE(finished);
+  ASSERT_TRUE(resumer->IsResumed());
   future.get();
 }
 
@@ -686,7 +686,7 @@ TEST(SyncAwaiterTest, SingleResumeFirst) {
   ASSERT_TRUE(future.get());
 }
 
-TEST(SyncAwaiterTest, SingleRace) {
+TEST(SyncAwaiterTest, Race) {
   size_t rounds = 100000;
   for (size_t i = 0; i < rounds; ++i) {
     ResumerPtr resumer = std::make_shared<SyncResumer>();
@@ -731,6 +731,7 @@ TEST(SyncAwaiterTest, AnyWaitFirst) {
     resumers[lucky]->Resume();
   });
   awaiter->Wait();
+  ASSERT_TRUE(finished);
   for (size_t i = 0; i < 1000; ++i) {
     if (i == lucky) {
       ASSERT_TRUE(resumers[i]->IsResumed());
@@ -738,7 +739,6 @@ TEST(SyncAwaiterTest, AnyWaitFirst) {
       ASSERT_FALSE(resumers[i]->IsResumed());
     }
   }
-  ASSERT_TRUE(finished);
   future.get();
 }
 
@@ -756,13 +756,13 @@ TEST(SyncAwaiterTest, AnyResumeFirst) {
     awaiter->Wait();
     return true;
   });
-  for (size_t i = 0; i < 1000; ++i) {
-    ASSERT_TRUE(resumers[i]->IsResumed());
+  for (auto& resumer : resumers) {
+    ASSERT_TRUE(resumer->IsResumed());
   }
   ASSERT_TRUE(future.get());
 }
 
-TEST(SyncAwaiterTest, AnyLifeSpan) {
+TEST(SyncAwaiterTest, LifeSpan) {
   size_t num_resumers = 1000;
   size_t lucky = 42;
   Resumers resumers(num_resumers);
@@ -779,6 +779,7 @@ TEST(SyncAwaiterTest, AnyLifeSpan) {
   });
   awaiter->Wait();
   awaiter.reset();
+  ASSERT_TRUE(finished);
   for (size_t i = 0; i < 1000; ++i) {
     if (i == lucky) {
       ASSERT_TRUE(resumers[i]->IsResumed());
@@ -787,8 +788,51 @@ TEST(SyncAwaiterTest, AnyLifeSpan) {
       resumers[i]->Resume();
     }
   }
-  ASSERT_TRUE(finished);
   future.get();
+}
+
+TEST(SyncAwaiterTest, AllWaitFirst) {
+  size_t num_resumers = 1000;
+  Resumers resumers(num_resumers);
+  for (auto& resumer : resumers) {
+    resumer = std::make_shared<SyncResumer>();
+  }
+  auto awaiter = SyncAwaiter::MakeSyncAllAwaiter(resumers);
+
+  std::atomic<size_t> counter = 0;
+  auto future = std::async(std::launch::async, [&]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    for (auto& resumer : resumers) {
+      counter++;
+      resumer->Resume();
+    }
+  });
+  awaiter->Wait();
+  ASSERT_EQ(counter.load(), num_resumers);
+  for (auto& resumer : resumers) {
+    ASSERT_TRUE(resumer->IsResumed());
+  }
+  future.get();
+}
+
+TEST(SyncAwaiterTest, AllResumeFirst) {
+  size_t num_resumers = 1000;
+  Resumers resumers(num_resumers);
+  for (auto& resumer : resumers) {
+    resumer = std::make_shared<SyncResumer>();
+    resumer->Resume();
+  }
+  auto awaiter = SyncAwaiter::MakeSyncAllAwaiter(resumers);
+
+  auto future = std::async(std::launch::async, [&]() -> bool {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    awaiter->Wait();
+    return true;
+  });
+  for (size_t i = 0; i < 1000; ++i) {
+    ASSERT_TRUE(resumers[i]->IsResumed());
+  }
+  ASSERT_TRUE(future.get());
 }
 
 class AsyncResumer : public Resumer {
