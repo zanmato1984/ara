@@ -552,7 +552,7 @@ class SyncResumer : public Resumer {
 };
 
 TEST(SyncResumerTest, Basic) {
-  std::shared_ptr<SyncResumer> resumer = std::make_shared<SyncResumer>();
+  auto resumer = std::make_shared<SyncResumer>();
   bool cb1_called = false, cb2_called = false, cb3_called = false;
   resumer->AddCallback([&]() { cb1_called = true; });
   resumer->AddCallback([&]() { cb2_called = cb1_called; });
@@ -568,7 +568,7 @@ TEST(SyncResumerTest, Basic) {
 }
 
 TEST(SyncResumerTest, Interleaving) {
-  std::shared_ptr<SyncResumer> resumer = std::make_shared<SyncResumer>();
+  auto resumer = std::make_shared<SyncResumer>();
   bool cb1_called = false, cb2_called = false, cb3_called = false;
   resumer->AddCallback([&]() { cb1_called = true; });
   resumer->AddCallback([&]() { cb2_called = cb1_called; });
@@ -589,7 +589,7 @@ TEST(SyncResumerTest, Interleaving) {
 }
 
 TEST(SyncResumerTest, Interleaving2) {
-  std::shared_ptr<SyncResumer> resumer = std::make_shared<SyncResumer>();
+  auto resumer = std::make_shared<SyncResumer>();
   bool cb1_called = false, cb2_called = false, cb3_called = false;
   resumer->AddCallback([&]() { cb1_called = true; });
   resumer->AddCallback([&]() { cb2_called = cb1_called; });
@@ -634,7 +634,7 @@ class GeneralSyncAwaiter : public SyncAwaiter {
   template <typename T = AwaiterTrait,
             typename std::enable_if<std::is_same<T, SyncSingleAwaiterTrait>::value,
                                     void*>::type = nullptr>
-  explicit GeneralSyncAwaiter(ResumerPtr& resumer)
+  explicit GeneralSyncAwaiter(ResumerPtr resumer)
       : total_readies_(1), current_readies_(0) {
     auto casted = std::dynamic_pointer_cast<SyncResumer>(resumer);
     ARA_CHECK(casted != nullptr);
@@ -693,16 +693,77 @@ TEST(SyncAwaiterTest, Compile) {
   SyncAllAwaiter all_awaiter(resumers);
 }
 
-TEST(SyncAwaiterTest, SingleBasic) {}
+TEST(SyncAwaiterTest, Single) {
+  {
+    auto resumer = std::make_shared<SyncResumer>();
+    auto awaiter =
+        std::make_shared<SyncSingleAwaiter>(std::static_pointer_cast<Resumer>(resumer));
+
+    bool finished = false;
+    auto future = std::async(std::launch::async, [&]() {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      finished = true;
+      resumer->Resume();
+    });
+    awaiter->Wait();
+    ASSERT_TRUE(resumer->IsResumed());
+    ASSERT_TRUE(finished);
+    future.get();
+  }
+
+  {
+    auto resumer = std::make_shared<SyncResumer>();
+    auto awaiter =
+        std::make_shared<SyncSingleAwaiter>(std::static_pointer_cast<Resumer>(resumer));
+
+    resumer->Resume();
+    auto future = std::async(std::launch::async, [&]() -> bool {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      awaiter->Wait();
+      return true;
+    });
+    ASSERT_TRUE(future.get());
+  }
+
+  {
+    size_t rounds = 100000;
+    for (size_t i = 0; i < rounds; ++i) {
+      auto resumer = std::make_shared<SyncResumer>();
+      auto awaiter =
+          std::make_shared<SyncSingleAwaiter>(std::static_pointer_cast<Resumer>(resumer));
+
+      std::atomic_bool resumer_ready = false, awaiter_ready = false, kickoff = false;
+      auto resume_future = std::async(std::launch::async, [&]() {
+        resumer_ready = true;
+        while (!kickoff) {
+        }
+        resumer->Resume();
+      });
+      auto await_future = std::async(std::launch::async, [&]() {
+        awaiter_ready = true;
+        while (!kickoff) {
+        }
+        awaiter->Wait();
+        return true;
+      });
+      while (!resumer_ready || !awaiter_ready) {
+      }
+      kickoff = true;
+      resume_future.get();
+      ASSERT_TRUE(resumer->IsResumed());
+      ASSERT_TRUE(await_future.get());
+    }
+  }
+}
 
 class AsyncResumer : public Resumer {
  private:
   using Promise = folly::Promise<folly::Unit>;
-  using Future = folly::Future<folly::Unit>;
+  using Future = folly::SemiFuture<folly::Unit>;
 
  public:
-  AsyncResumer(folly::Executor* executor) {
-    auto [p, f] = folly::makePromiseContract<folly::Unit>(executor);
+  AsyncResumer() {
+    auto [p, f] = folly::makePromiseContract<folly::Unit>();
     promise_ = std::move(p);
     future_ = std::move(f);
   }
@@ -718,71 +779,9 @@ class AsyncResumer : public Resumer {
   Future future_;
 };
 
-TEST(AsyncResumerTest, Basic) {
-  folly::CPUThreadPoolExecutor executor(1);
-  std::shared_ptr<AsyncResumer> resumer = std::make_shared<AsyncResumer>(&executor);
-  // bool cb1_called = false, cb2_called = false, cb3_called = false;
-  // resumer->AddCallback([&]() { cb1_called = true; });
-  // resumer->AddCallback([&]() { cb2_called = cb1_called; });
-  // ASSERT_FALSE(resumer->IsResumed());
-  // ASSERT_FALSE(cb1_called);
-  // ASSERT_FALSE(cb2_called);
-  // resumer->Resume();
-  // ASSERT_TRUE(resumer->IsResumed());
-  // resumer->Get();
-  // ASSERT_TRUE(cb1_called);
-  // ASSERT_TRUE(cb2_called);
-  // resumer->AddCallback([&]() { cb3_called = true; });
-  // ASSERT_TRUE(cb3_called);
-}
-
-TEST(AsyncResumerTest, Interleaving) {
-  folly::CPUThreadPoolExecutor executor(1);
-  std::shared_ptr<AsyncResumer> resumer = std::make_shared<AsyncResumer>(&executor);
-  // bool cb1_called = false, cb2_called = false, cb3_called = false;
-  // resumer->AddCallback([&]() { cb1_called = true; });
-  // resumer->AddCallback([&]() { cb2_called = cb1_called; });
-  // ASSERT_FALSE(resumer->IsResumed());
-  // ASSERT_FALSE(cb1_called);
-  // ASSERT_FALSE(cb2_called);
-  // auto resume_future = std::async(std::launch::async, [&]() {
-  //   std::this_thread::sleep_for(std::chrono::milliseconds(100));
-  //   resumer->Resume();
-  //   resumer->AddCallback([&]() { cb3_called = true; });
-  //   ASSERT_TRUE(cb3_called);
-  // });
-  // while (!resumer->IsResumed()) {
-  // }
-  // ASSERT_TRUE(cb1_called);
-  // ASSERT_TRUE(cb2_called);
-  // resume_future.get();
-}
-
-TEST(AsyncResumerTest, Interleaving2) {
-  folly::CPUThreadPoolExecutor executor(1);
-  std::shared_ptr<AsyncResumer> resumer = std::make_shared<AsyncResumer>(&executor);
-  // bool cb1_called = false, cb2_called = false, cb3_called = false;
-  // resumer->AddCallback([&]() { cb1_called = true; });
-  // resumer->AddCallback([&]() { cb2_called = cb1_called; });
-  // ASSERT_FALSE(resumer->IsResumed());
-  // ASSERT_FALSE(cb1_called);
-  // ASSERT_FALSE(cb2_called);
-  // auto resume_future = std::async(std::launch::async, [&]() {
-  //   std::this_thread::sleep_for(std::chrono::milliseconds(100));
-  //   resumer->Resume();
-  // });
-  // while (!resumer->IsResumed()) {
-  // }
-  // ASSERT_TRUE(cb1_called);
-  // ASSERT_TRUE(cb2_called);
-  // resumer->AddCallback([&]() { cb3_called = true; });
-  // ASSERT_TRUE(cb3_called);
-  // resume_future.get();
-}
-
 class AsyncAwaiter : public Awaiter {
  protected:
-  using Future = folly::Future<folly::Unit>;
+  using Future = folly::SemiFuture<folly::Unit>;
 
  public:
   virtual Future& GetFuture() = 0;
@@ -803,14 +802,14 @@ class AsyncSingleAwaiter : public AsyncAwaiter {
 
 class AsyncAnyAwaiter : public AsyncAwaiter {
  public:
-  explicit AsyncAnyAwaiter(Resumers& resumers, folly::Executor* executor) {
+  explicit AsyncAnyAwaiter(Resumers& resumers) {
     std::vector<Future> futures;
     for (auto& resumer : resumers) {
       auto casted = std::dynamic_pointer_cast<AsyncResumer>(resumer);
       ARA_CHECK(casted != nullptr);
       futures.push_back(std::move(casted->GetFuture()));
     }
-    future_ = folly::collectAny(futures).via(executor).then([](auto&&) {});
+    future_ = folly::collectAny(futures).defer([](auto&&) {});
   }
 
   Future& GetFuture() override { return future_; }
@@ -821,14 +820,14 @@ class AsyncAnyAwaiter : public AsyncAwaiter {
 
 class AsyncAllAwaiter : public AsyncAwaiter {
  public:
-  explicit AsyncAllAwaiter(Resumers& resumers, folly::Executor* executor) {
+  explicit AsyncAllAwaiter(Resumers& resumers) {
     std::vector<Future> futures;
     for (auto& resumer : resumers) {
       auto casted = std::dynamic_pointer_cast<AsyncResumer>(resumer);
       ARA_CHECK(casted != nullptr);
       futures.push_back(std::move(casted->GetFuture()));
     }
-    future_ = folly::collectAll(futures).via(executor).then([](auto&&) {});
+    future_ = folly::collectAll(futures).defer([](auto&&) {});
   }
 
   Future& GetFuture() override { return future_; }
