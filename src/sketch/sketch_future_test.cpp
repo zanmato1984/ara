@@ -286,3 +286,27 @@ TEST(FollyFutureTest, RacyCallback) {
     get_task.get();
   }
 }
+
+TEST(FollyFutureTest, CallbackTiming) {
+  size_t pred_run = 0, thunk_run = 0;
+  bool finished = false;
+  folly::CPUThreadPoolExecutor executor(4);
+  auto pair = folly::makePromiseContract<folly::Unit>(&executor);
+  auto promise = std::move(pair.first);
+  auto future = std::move(pair.second);
+  promise.setValue();
+  future = std::move(future).then([&](auto&&) { finished = true; });
+  ASSERT_FALSE(finished);
+  auto pred = [&]() {
+    pred_run++;
+    return !finished;
+  };
+  auto thunk = [&]() {
+    thunk_run++;
+    return std::move(future);
+  };
+  folly::whileDo(pred, thunk).wait().value();
+  ASSERT_TRUE(finished);
+  ASSERT_EQ(pred_run, 2);
+  ASSERT_EQ(thunk_run, 1);
+}
