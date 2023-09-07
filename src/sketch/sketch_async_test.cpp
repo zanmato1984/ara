@@ -609,151 +609,165 @@ TEST(SyncResumerTest, Interleaving2) {
   resume_future.get();
 }
 
-class SyncAwaiter : public Awaiter {
+class SyncAwaiter : public std::enable_shared_from_this<SyncAwaiter> {
  public:
-  virtual void Wait() = 0;
-};
+  explicit SyncAwaiter(size_t total_readies) : readies_(total_readies) {}
 
-namespace detail {
-
-struct SyncSingleAwaiterTrait {
-  static size_t TotalReadies(Resumers&) { return 1; }
-};
-
-struct SyncAnyAwaiterTrait {
-  static size_t TotalReadies(Resumers&) { return 1; }
-};
-
-struct SyncAllAwaiterTrait {
-  static size_t TotalReadies(Resumers& resumers) { return resumers.size(); }
-};
-
-template <typename AwaiterTrait>
-class GeneralSyncAwaiter : public SyncAwaiter {
- public:
-  template <typename T = AwaiterTrait,
-            typename std::enable_if<std::is_same<T, SyncSingleAwaiterTrait>::value,
-                                    void*>::type = nullptr>
-  explicit GeneralSyncAwaiter(ResumerPtr resumer)
-      : total_readies_(1), current_readies_(0) {
-    auto casted = std::dynamic_pointer_cast<SyncResumer>(resumer);
-    ARA_CHECK(casted != nullptr);
-    casted->AddCallback([this]() {
-      std::unique_lock<std::mutex> lock(mutex_);
-      ++current_readies_;
-      cv_.notify_one();
-    });
-  }
-
-  template <typename T = AwaiterTrait,
-            typename std::enable_if<std::is_same<T, SyncAnyAwaiterTrait>::value ||
-                                        std::is_same<T, SyncAllAwaiterTrait>::value,
-                                    void*>::type = nullptr>
-  explicit GeneralSyncAwaiter(Resumers& resumers)
-      : total_readies_(AwaiterTrait::TotalReadies(resumers)), current_readies_(0) {
-    for (auto& resumer : resumers) {
-      auto casted = std::dynamic_pointer_cast<SyncResumer>(resumer);
-      ARA_CHECK(casted != nullptr);
-      casted->AddCallback([this]() {
-        std::unique_lock<std::mutex> lock(mutex_);
-        ++current_readies_;
-        cv_.notify_one();
-      });
-    }
-  }
-
-  void Wait() override {
+  void Wait() {
     std::unique_lock<std::mutex> lock(mutex_);
-    while (current_readies_ < total_readies_) {
+    while (readies_ > 0) {
       cv_.wait(lock);
     }
   }
 
  private:
-  size_t total_readies_;
-  std::mutex mutex_;
-  std::condition_variable cv_;
-  size_t current_readies_;
-};
-
-}  // namespace detail
-
-using SyncSingleAwaiter = detail::GeneralSyncAwaiter<detail::SyncSingleAwaiterTrait>;
-using SyncAnyAwaiter = detail::GeneralSyncAwaiter<detail::SyncAnyAwaiterTrait>;
-using SyncAllAwaiter = detail::GeneralSyncAwaiter<detail::SyncAllAwaiterTrait>;
-
-TEST(SyncAwaiterTest, Compile) {
-  ResumerPtr resumer = std::make_shared<SyncResumer>();
-  Resumers resumers;
-  // SyncSingleAwaiter single_awaiter(resumers);
-  SyncSingleAwaiter single_awaiter(resumer);
-  // SyncAnyAwaiter any_awaiter(resumer);
-  SyncAnyAwaiter any_awaiter(resumers);
-  // SyncAllAwaiter all_awaiter(resumer);
-  SyncAllAwaiter all_awaiter(resumers);
-}
-
-TEST(SyncAwaiterTest, Single) {
-  {
-    auto resumer = std::make_shared<SyncResumer>();
-    auto awaiter =
-        std::make_shared<SyncSingleAwaiter>(std::static_pointer_cast<Resumer>(resumer));
-
-    bool finished = false;
-    auto future = std::async(std::launch::async, [&]() {
-      std::this_thread::sleep_for(std::chrono::milliseconds(100));
-      finished = true;
-      resumer->Resume();
-    });
-    awaiter->Wait();
-    ASSERT_TRUE(resumer->IsResumed());
-    ASSERT_TRUE(finished);
-    future.get();
+  static std::shared_ptr<SyncAwaiter> MakeSyncAwaiter(size_t total_readies,
+                                                      Resumers& resumers) {
+    auto awaiter = std::make_shared<SyncAwaiter>(total_readies);
+    for (auto& resumer : resumers) {
+      auto casted = std::dynamic_pointer_cast<SyncResumer>(resumer);
+      ARA_CHECK(casted != nullptr);
+      casted->AddCallback([awaiter = awaiter->shared_from_this()]() {
+        std::unique_lock<std::mutex> lock(awaiter->mutex_);
+        awaiter->readies_--;
+        awaiter->cv_.notify_one();
+      });
+    }
+    return awaiter;
   }
 
-  {
-    auto resumer = std::make_shared<SyncResumer>();
-    auto awaiter =
-        std::make_shared<SyncSingleAwaiter>(std::static_pointer_cast<Resumer>(resumer));
+ public:
+  static std::shared_ptr<SyncAwaiter> MakeSyncSingleAwaiter(ResumerPtr& resumer) {
+    Resumers resumers{resumer};
+    return MakeSyncAwaiter(1, resumers);
+  }
 
+  static std::shared_ptr<SyncAwaiter> MakeSyncAnyAwaiter(Resumers& resumers) {
+    return MakeSyncAwaiter(1, resumers);
+  }
+
+  static std::shared_ptr<SyncAwaiter> MakeSyncAllAwaiter(Resumers& resumers) {
+    return MakeSyncAwaiter(resumers.size(), resumers);
+  }
+
+ private:
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  size_t readies_;
+};
+
+TEST(SyncAwaiterTest, SingleWaitFirst) {
+  ResumerPtr resumer = std::make_shared<SyncResumer>();
+  auto awaiter = SyncAwaiter::MakeSyncSingleAwaiter(resumer);
+
+  bool finished = false;
+  auto future = std::async(std::launch::async, [&]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    finished = true;
     resumer->Resume();
-    auto future = std::async(std::launch::async, [&]() -> bool {
-      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  });
+  awaiter->Wait();
+  ASSERT_TRUE(resumer->IsResumed());
+  ASSERT_TRUE(finished);
+  future.get();
+}
+
+TEST(SyncAwaiterTest, SingleResumeFirst) {
+  ResumerPtr resumer = std::make_shared<SyncResumer>();
+  auto awaiter = SyncAwaiter::MakeSyncSingleAwaiter(resumer);
+
+  resumer->Resume();
+  auto future = std::async(std::launch::async, [&]() -> bool {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    awaiter->Wait();
+    return true;
+  });
+  ASSERT_TRUE(future.get());
+}
+
+TEST(SyncAwaiterTest, SingleRace) {
+  size_t rounds = 100000;
+  for (size_t i = 0; i < rounds; ++i) {
+    ResumerPtr resumer = std::make_shared<SyncResumer>();
+    auto awaiter = SyncAwaiter::MakeSyncSingleAwaiter(resumer);
+
+    std::atomic_bool resumer_ready = false, awaiter_ready = false, kickoff = false;
+    auto resume_future = std::async(std::launch::async, [&]() {
+      resumer_ready = true;
+      while (!kickoff) {
+      }
+      resumer->Resume();
+    });
+    auto await_future = std::async(std::launch::async, [&]() {
+      awaiter_ready = true;
+      while (!kickoff) {
+      }
       awaiter->Wait();
       return true;
     });
-    ASSERT_TRUE(future.get());
+    while (!resumer_ready || !awaiter_ready) {
+    }
+    kickoff = true;
+    resume_future.get();
+    ASSERT_TRUE(resumer->IsResumed());
+    ASSERT_TRUE(await_future.get());
   }
+}
 
-  {
-    size_t rounds = 100000;
-    for (size_t i = 0; i < rounds; ++i) {
-      auto resumer = std::make_shared<SyncResumer>();
-      auto awaiter =
-          std::make_shared<SyncSingleAwaiter>(std::static_pointer_cast<Resumer>(resumer));
+TEST(SyncAwaiterTest, AnyWaitFirst) {
+  size_t num_resumers = 1000;
+  size_t lucky = 42;
+  Resumers resumers(num_resumers);
+  for (auto& resumer : resumers) {
+    resumer = std::make_shared<SyncResumer>();
+  }
+  auto awaiter = SyncAwaiter::MakeSyncAnyAwaiter(resumers);
 
-      std::atomic_bool resumer_ready = false, awaiter_ready = false, kickoff = false;
-      auto resume_future = std::async(std::launch::async, [&]() {
-        resumer_ready = true;
-        while (!kickoff) {
-        }
-        resumer->Resume();
-      });
-      auto await_future = std::async(std::launch::async, [&]() {
-        awaiter_ready = true;
-        while (!kickoff) {
-        }
-        awaiter->Wait();
-        return true;
-      });
-      while (!resumer_ready || !awaiter_ready) {
-      }
-      kickoff = true;
-      resume_future.get();
-      ASSERT_TRUE(resumer->IsResumed());
-      ASSERT_TRUE(await_future.get());
+  bool finished = false;
+  auto future = std::async(std::launch::async, [&]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    finished = true;
+    resumers[lucky]->Resume();
+  });
+  awaiter->Wait();
+  for (size_t i = 0; i < 1000; ++i) {
+    if (i == lucky) {
+      ASSERT_TRUE(resumers[i]->IsResumed());
+    } else {
+      ASSERT_FALSE(resumers[i]->IsResumed());
     }
   }
+  ASSERT_TRUE(finished);
+  future.get();
+}
+
+TEST(SyncAwaiterTest, AnyLifeSpan) {
+  size_t num_resumers = 1000;
+  size_t lucky = 42;
+  Resumers resumers(num_resumers);
+  for (auto& resumer : resumers) {
+    resumer = std::make_shared<SyncResumer>();
+  }
+  auto awaiter = SyncAwaiter::MakeSyncAnyAwaiter(resumers);
+
+  bool finished = false;
+  auto future = std::async(std::launch::async, [&]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    finished = true;
+    resumers[lucky]->Resume();
+  });
+  awaiter->Wait();
+  awaiter.reset();
+  for (size_t i = 0; i < 1000; ++i) {
+    if (i == lucky) {
+      ASSERT_TRUE(resumers[i]->IsResumed());
+    } else {
+      ASSERT_FALSE(resumers[i]->IsResumed());
+      resumers[i]->Resume();
+    }
+  }
+  ASSERT_TRUE(finished);
+  future.get();
 }
 
 class AsyncResumer : public Resumer {
