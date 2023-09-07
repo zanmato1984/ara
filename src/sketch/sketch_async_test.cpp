@@ -611,25 +611,25 @@ TEST(SyncResumerTest, Interleaving2) {
 
 class SyncAwaiter : public std::enable_shared_from_this<SyncAwaiter> {
  public:
-  explicit SyncAwaiter(size_t total_readies) : readies_(total_readies) {}
+  explicit SyncAwaiter(size_t num_readies) : num_readies_(num_readies), readies_(0) {}
 
   void Wait() {
     std::unique_lock<std::mutex> lock(mutex_);
-    while (readies_ > 0) {
+    while (readies_ < num_readies_) {
       cv_.wait(lock);
     }
   }
 
  private:
-  static std::shared_ptr<SyncAwaiter> MakeSyncAwaiter(size_t total_readies,
+  static std::shared_ptr<SyncAwaiter> MakeSyncAwaiter(size_t num_readies,
                                                       Resumers& resumers) {
-    auto awaiter = std::make_shared<SyncAwaiter>(total_readies);
+    auto awaiter = std::make_shared<SyncAwaiter>(num_readies);
     for (auto& resumer : resumers) {
       auto casted = std::dynamic_pointer_cast<SyncResumer>(resumer);
       ARA_CHECK(casted != nullptr);
       casted->AddCallback([awaiter = awaiter->shared_from_this()]() {
         std::unique_lock<std::mutex> lock(awaiter->mutex_);
-        awaiter->readies_--;
+        awaiter->readies_++;
         awaiter->cv_.notify_one();
       });
     }
@@ -651,6 +651,7 @@ class SyncAwaiter : public std::enable_shared_from_this<SyncAwaiter> {
   }
 
  private:
+  size_t num_readies_;
   std::mutex mutex_;
   std::condition_variable cv_;
   size_t readies_;
@@ -739,6 +740,26 @@ TEST(SyncAwaiterTest, AnyWaitFirst) {
   }
   ASSERT_TRUE(finished);
   future.get();
+}
+
+TEST(SyncAwaiterTest, AnyResumeFirst) {
+  size_t num_resumers = 1000;
+  Resumers resumers(num_resumers);
+  for (auto& resumer : resumers) {
+    resumer = std::make_shared<SyncResumer>();
+    resumer->Resume();
+  }
+  auto awaiter = SyncAwaiter::MakeSyncAnyAwaiter(resumers);
+
+  auto future = std::async(std::launch::async, [&]() -> bool {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    awaiter->Wait();
+    return true;
+  });
+  for (size_t i = 0; i < 1000; ++i) {
+    ASSERT_TRUE(resumers[i]->IsResumed());
+  }
+  ASSERT_TRUE(future.get());
 }
 
 TEST(SyncAwaiterTest, AnyLifeSpan) {
