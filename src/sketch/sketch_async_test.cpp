@@ -4,6 +4,7 @@
 #include <folly/futures/Future.h>
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <future>
 
 #define ARA_CHECK ARROW_CHECK
@@ -28,6 +29,7 @@ class Resumer {
   virtual ~Resumer() = default;
   virtual void Resume() = 0;
   virtual void AddCallback(Callback) = 0;
+  virtual bool IsResumed() = 0;
 };
 using ResumerPtr = std::shared_ptr<Resumer>;
 using Resumers = std::vector<ResumerPtr>;
@@ -51,7 +53,7 @@ struct TaskStatus {
     FINISHED,
     CANCELLED,
   } code_;
-  ResumerPtr resumer_ = nullptr;
+  AwaiterPtr awaiter_ = nullptr;
 
   explicit TaskStatus(Code code) : code_(code) {}
 
@@ -62,14 +64,14 @@ struct TaskStatus {
   bool IsFinished() const { return code_ == Code::FINISHED; }
   bool IsCancelled() const { return code_ == Code::CANCELLED; }
 
-  ResumerPtr& GetResumer() {
+  AwaiterPtr& GetAwaiter() {
     ARA_CHECK(IsBlocking());
-    return resumer_;
+    return awaiter_;
   }
 
-  const ResumerPtr& GetResumer() const {
+  const AwaiterPtr& GetAwaiter() const {
     ARA_CHECK(IsBlocking());
-    return resumer_;
+    return awaiter_;
   }
 
   bool operator==(const TaskStatus& other) const { return code_ == other.code_; }
@@ -91,9 +93,9 @@ struct TaskStatus {
 
  public:
   static TaskStatus Continue() { return TaskStatus(Code::CONTINUE); }
-  static TaskStatus Blocking(ResumerPtr resumer) {
+  static TaskStatus Blocking(AwaiterPtr awaiter) {
     auto status = TaskStatus(Code::BLOCKING);
-    status.resumer_ = std::move(resumer);
+    status.awaiter_ = std::move(awaiter);
     return status;
   }
   static TaskStatus Yield() { return TaskStatus{Code::YIELD}; }
@@ -459,51 +461,47 @@ class PipelineTask {
   TaskResult operator()(const TaskContext& task_context, ThreadId thread_id) {
     bool all_finished = true;
     Resumers resumers;
+    OpResult op_result;
     for (size_t i = 0; i < channels_.size(); ++i) {
       if (thread_locals_[thread_id].finished[i]) {
         continue;
-      } else if (thread_locals_[thread_id].blocking[i]) {
-        continue;
+      }
+      if (auto& resumer = thread_locals_[thread_id].resumers[i]; resumer != nullptr) {
+        if (resumer->IsResumed()) {
+          resumer = nullptr;
+        } else {
+          resumers.push_back(resumer);
+          continue;
+        }
       }
       auto& channel = channels_[i];
-      ARA_ASSIGN_OR_RAISE(auto op_result, channel(task_context, thread_id));
-      if (op_result.IsFinished()) {
-        ARA_CHECK(!op_result.GetBatch().has_value());
+      ARA_ASSIGN_OR_RAISE(op_result, channel(task_context, thread_id));
+      if (op_result->IsFinished()) {
+        ARA_CHECK(!op_result->GetBatch().has_value());
         thread_locals_[thread_id].finished[i] = true;
       } else {
         all_finished = false;
       }
-      if (op_result.IsBlocking()) {
-        thread_locals_[thread_id].blocking[i] = true;
-        resumers.push_back(op_result.GetResumer());
+      if (op_result->IsBlocking()) {
+        thread_locals_[thread_id].resumers[i] = std::move(op_result->GetResumer());
+        resumers.push_back(op_result->GetResumer());
       }
-      if (!op_result.IsFinished() && !op_result.IsBlocking()) {
-        return OpResultToTaskResult(std::move(op_result));
+      if (!op_result->IsFinished() && !op_result->IsBlocking()) {
+        break;
       }
     }
-    // TODO: All blcoking?
     if (all_finished) {
       return TaskStatus::Finished();
-    } else {
-      return TaskStatus::Continue();
-    }
-  }
-
- private:
-  static TaskResult OpResultToTaskResult(OpResult op_result) {
-    if (!op_result.ok()) {
+    } else if (resumers.size() == channels_.size()) {
+      ARA_ASSIGN_OR_RAISE(auto awaiter, task_context.any_awaiter_factory(resumers));
+      return TaskStatus::Blocking(std::move(awaiter));
+    } else if (!op_result.ok()) {
       return op_result.status();
-    }
-    if (op_result->IsBlocking()) {
-      return TaskStatus::Blocking(std::move(op_result->GetResumer()));
-    }
-    if (op_result->IsPipeYield()) {
+    } else if (op_result->IsPipeYield()) {
       return TaskStatus::Yield();
-    }
-    if (op_result->IsFinished()) {
+    } else if (op_result->IsFinished()) {
       return TaskStatus::Finished();
-    }
-    if (op_result->IsCancelled()) {
+    } else if (op_result->IsCancelled()) {
       return TaskStatus::Cancelled();
     }
     return TaskStatus::Continue();
@@ -514,11 +512,10 @@ class PipelineTask {
   std::vector<Channel> channels_;
 
   struct ThreadLocal {
-    ThreadLocal(size_t size) : finished(size, false), blocking(size, false) {}
+    ThreadLocal(size_t size) : finished(size, false), resumers(size, nullptr) {}
 
     std::vector<bool> finished;
-    // TODO: Writing to blocking needs some barrier.
-    std::vector<bool> blocking;
+    Resumers resumers;
   };
   std::vector<ThreadLocal> thread_locals_;
 };
@@ -616,6 +613,11 @@ class SyncResumer : public Resumer {
     }
   }
 
+  bool IsResumed() override {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return ready_;
+  }
+
  private:
   std::mutex mutex_;
   std::condition_variable cv_;
@@ -706,11 +708,11 @@ TEST(SyncAwaiterTest, Compile) {
 class AsyncResumer : public Resumer {
  private:
   using Promise = folly::Promise<folly::Unit>;
-  using Future = folly::SemiFuture<folly::Unit>;
+  using Future = folly::Future<folly::Unit>;
 
  public:
-  AsyncResumer() {
-    auto [p, f] = folly::makePromiseContract<folly::Unit>();
+  AsyncResumer(folly::Executor* executor) {
+    auto [p, f] = folly::makePromiseContract<folly::Unit>(executor);
     promise_ = std::move(p);
     future_ = std::move(f);
   }
@@ -718,8 +720,10 @@ class AsyncResumer : public Resumer {
   void Resume() override { promise_.setValue(); }
 
   void AddCallback(Callback cb) override {
-    future_ = std::move(future_).deferValue([cb = std::move(cb)](auto&&) { cb(); });
+    future_ = std::move(future_).then([cb = std::move(cb)](auto&&) { cb(); });
   }
+
+  bool IsResumed() override { return promise_.isFulfilled(); }
 
  private:
   Promise promise_;
@@ -732,7 +736,7 @@ class AsyncResumer : public Resumer {
 
 class AsyncAwaiter : public Awaiter {
  protected:
-  using Future = folly::SemiFuture<folly::Unit>;
+  using Future = folly::Future<folly::Unit>;
 
  public:
   virtual Future& GetFuture() = 0;
@@ -753,14 +757,14 @@ class AsyncSingleAwaiter : public AsyncAwaiter {
 
 class AsyncAnyAwaiter : public AsyncAwaiter {
  public:
-  explicit AsyncAnyAwaiter(Resumers& resumers) {
+  explicit AsyncAnyAwaiter(Resumers& resumers, folly::Executor* executor) {
     std::vector<Future> futures;
     for (auto& resumer : resumers) {
       auto casted = std::dynamic_pointer_cast<AsyncResumer>(resumer);
       ARA_CHECK(casted != nullptr);
       futures.push_back(std::move(casted->future_));
     }
-    future_ = folly::collectAny(futures).deferValue([](auto&&) {});
+    future_ = folly::collectAny(futures).via(executor).then([](auto&&) {});
   }
 
   Future& GetFuture() override { return future_; }
@@ -771,14 +775,14 @@ class AsyncAnyAwaiter : public AsyncAwaiter {
 
 class AsyncAllAwaiter : public AsyncAwaiter {
  public:
-  explicit AsyncAllAwaiter(Resumers& resumers) {
+  explicit AsyncAllAwaiter(Resumers& resumers, folly::Executor* executor) {
     std::vector<Future> futures;
     for (auto& resumer : resumers) {
       auto casted = std::dynamic_pointer_cast<AsyncResumer>(resumer);
       ARA_CHECK(casted != nullptr);
       futures.push_back(std::move(casted->future_));
     }
-    future_ = folly::collectAll(futures).deferValue([](auto&&) {});
+    future_ = folly::collectAll(futures).via(executor).then([](auto&&) {});
   }
 
   Future& GetFuture() override { return future_; }
