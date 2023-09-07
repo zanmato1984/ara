@@ -858,6 +858,13 @@ class AsyncResumer : public Resumer {
   Future future_;
 };
 
+TEST(AsyncResumerTest, Basic) {
+  auto resumer = std::make_shared<AsyncResumer>();
+  ASSERT_FALSE(resumer->IsResumed());
+  resumer->Resume();
+  ASSERT_TRUE(resumer->IsResumed());
+}
+
 class AsyncAwaiter : public Awaiter {
  protected:
   using Future = folly::SemiFuture<folly::Unit>;
