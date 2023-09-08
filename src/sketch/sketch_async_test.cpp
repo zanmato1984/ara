@@ -922,6 +922,37 @@ class AsyncAllAwaiter : public AsyncAwaiter {
   Future future_;
 };
 
+TEST(AsyncAwaiterTest, SingleWaitFirst) {
+  ResumerPtr resumer = std::make_shared<AsyncResumer>();
+  auto awaiter = std::make_shared<AsyncSingleAwaiter>(resumer);
+
+  bool finished = false;
+  auto future = std::async(std::launch::async, [&]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    finished = true;
+    resumer->Resume();
+  });
+  folly::CPUThreadPoolExecutor executor(4);
+  std::move(awaiter->GetFuture()).via(&executor).wait();
+  ASSERT_TRUE(finished);
+  ASSERT_TRUE(resumer->IsResumed());
+  future.get();
+}
+
+TEST(AsyncAwaiterTest, SingleResumeFirst) {
+  ResumerPtr resumer = std::make_shared<AsyncResumer>();
+  auto awaiter = std::make_shared<AsyncSingleAwaiter>(resumer);
+
+  resumer->Resume();
+  auto future = std::async(std::launch::async, [&]() -> bool {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    folly::CPUThreadPoolExecutor executor(4);
+    std::move(awaiter->GetFuture()).via(&executor).wait();
+    return true;
+  });
+  ASSERT_TRUE(future.get());
+}
+
 class MockAsyncSource : public SourceOp {
  public:
   MockAsyncSource(size_t q_size, size_t dop)
