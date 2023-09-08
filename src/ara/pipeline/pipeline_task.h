@@ -5,6 +5,7 @@
 #include <ara/pipeline/op/op.h>
 #include <ara/pipeline/op/op_output.h>
 #include <ara/task/defines.h>
+#include <ara/task/resumer.h>
 
 #include <stack>
 
@@ -33,6 +34,9 @@ class PipelineTask : public internal::Meta {
     OpResult Pipe(const PipelineContext&, const task::TaskContext&, ThreadId, size_t,
                   std::optional<Batch>);
 
+    OpResult Sink(const PipelineContext&, const task::TaskContext&, ThreadId,
+                  std::optional<Batch>);
+
    private:
     const PipelineTask& task_;
     const size_t channel_id_;
@@ -43,6 +47,7 @@ class PipelineTask : public internal::Meta {
     PipelineSink sink_;
 
     struct ThreadLocal {
+      bool sinking = false;
       std::stack<size_t> pipe_stack;
       bool source_done = false;
       std::vector<size_t> drains;
@@ -66,9 +71,10 @@ class PipelineTask : public internal::Meta {
   std::vector<Channel> channels_;
 
   struct ThreadLocal {
-    ThreadLocal(size_t size) : finished(size, false) {}
+    ThreadLocal(size_t size) : finished(size, false), resumers(size, nullptr) {}
 
     std::vector<bool> finished;
+    task::Resumers resumers;
   };
   std::vector<ThreadLocal> thread_locals_;
 };

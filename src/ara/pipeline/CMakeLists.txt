@@ -12,6 +12,7 @@ add_ara_library(ara-pipeline "${ARA_PIPELINE_SRC}")
 set(ARA_PIPELINE_DEPS
         "ara-common"
         "ara-task"
+        "ara-schedule"
         "ara-util")
 add_ara_internal_dependencies(ara-pipeline "${ARA_PIPELINE_DEPS}")
 
