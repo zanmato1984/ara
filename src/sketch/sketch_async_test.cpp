@@ -1330,20 +1330,81 @@ TYPED_TEST(MockAsyncSourceTest, ProduceAndConsume) {
   }
 }
 
-TYPED_TEST(MockAsyncSourceTest, FinishWhenOneOutstandingWaiting) {
+TYPED_TEST(MockAsyncSourceTest, FinishNoOutstanding) {
   size_t q_size = 10, dop = 4;
   this->Init(q_size, dop);
 
+  this->Produce(std::nullopt);
+
+  for (size_t i = 0; i < dop; ++i) {
+    auto result = this->Consume(this->context, i);
+    ASSERT_TRUE(result->IsFinished());
+    ASSERT_FALSE(result->GetBatch().has_value());
+  }
+}
+
+TYPED_TEST(MockAsyncSourceTest, FinishOneOutstanding) {
+  size_t q_size = 10, dop = 4;
+  this->Init(q_size, dop);
+
+  AwaiterPtr awaiter;
   {
     auto result = this->Consume(this->context, 0);
     ASSERT_TRUE(result->IsBlocking());
-    ASSERT_FALSE(result->GetResumer()->IsResumed());
-    this->Produce(std::nullopt);
-    ASSERT_TRUE(result->GetResumer()->IsResumed());
+    auto resumer = std::move(result->GetResumer());
+    ASSERT_FALSE(resumer->IsResumed());
+    awaiter = *(this->context.single_awaiter_factory(resumer));
+  }
+
+  auto future = std::async(std::launch::async, [&]() {
+    return this->runner.WaitThenDo(awaiter,
+                                   [&]() { return this->Consume(this->context, 0); });
+  });
+  this->Produce(std::nullopt);
+
+  for (size_t i = 1; i < dop; ++i) {
+    auto result = this->Consume(this->context, 0);
+    ASSERT_TRUE(result->IsFinished());
+    ASSERT_FALSE(result->GetBatch().has_value());
   }
 
   {
-    auto result = this->Consume(this->context, 0);
+    auto result = future.get();
+    ASSERT_TRUE(result->IsFinished());
+    ASSERT_FALSE(result->GetBatch().has_value());
+  }
+}
+
+TYPED_TEST(MockAsyncSourceTest, FinishAllOutstanding) {
+  size_t q_size = 10, num_batches = 2, dop = 4;
+  this->Init(q_size, dop);
+
+  std::vector<std::future<OpResult>> futures;
+  std::vector<AwaiterPtr> awaiters;
+  for (size_t i = dop; i > 0; --i) {
+    auto result = this->Consume(this->context, i - 1);
+    ASSERT_TRUE(result->IsBlocking());
+    ASSERT_FALSE(result->GetResumer()->IsResumed());
+    auto awaiter = this->context.single_awaiter_factory(result->GetResumer());
+    awaiters.push_back(std::move(*awaiter));
+  }
+  for (size_t i = 0; i < dop; ++i) {
+    futures.emplace_back(std::async(std::launch::async, [&, i]() {
+      return this->runner.WaitThenDo(awaiters[i],
+                                     [&]() { return this->Consume(this->context, i); });
+    }));
+  }
+  for (size_t i = 0; i < num_batches; ++i) {
+    this->Produce(Batch{i});
+    auto result = futures[i].get();
+    ASSERT_TRUE(result->IsSourcePipeHasMore());
+    ASSERT_EQ(result->GetBatch(), i);
+  }
+
+  this->Produce(std::nullopt);
+
+  for (size_t i = num_batches; i < dop; ++i) {
+    auto result = futures[i].get();
     ASSERT_TRUE(result->IsFinished());
     ASSERT_FALSE(result->GetBatch().has_value());
   }
