@@ -423,7 +423,7 @@ class SyncPipelinePlexTask {
         return OperatorResult::PipeYield();
       }
       ARA_DCHECK(result->IsPipeSinkNeedsMore() || result->IsPipeEven() ||
-                  result->IsSourcePipeHasMore());
+                 result->IsSourcePipeHasMore());
       if (result->IsPipeEven() || result->IsSourcePipeHasMore()) {
         if (result->IsSourcePipeHasMore()) {
           local_states_[thread_id].pipe_stack.push(i);
@@ -752,7 +752,7 @@ class Driver {
     auto pipeline_task = factory_(dop, stage.pipeline);
     TaskGroup pipeline_task_group{[&](ThreadId thread_id) -> TaskResult {
                                     ARA_ASSIGN_OR_RAISE(auto result,
-                                                         pipeline_task.Run(thread_id));
+                                                        pipeline_task.Run(thread_id));
                                     if (result.IsSinkBackpressure()) {
                                       return TaskStatus::Backpressure();
                                     }
@@ -770,7 +770,7 @@ class Driver {
                                   dop, std::nullopt};
     auto pipeline_task_group_handle = scheduler_->ScheduleTaskGroup(pipeline_task_group);
     ARA_ASSIGN_OR_RAISE(auto result,
-                         scheduler_->WaitTaskGroup(pipeline_task_group_handle));
+                        scheduler_->WaitTaskGroup(pipeline_task_group_handle));
     ARA_DCHECK(result.IsFinished());
 
     for (auto& source_be_handle : source_be_handles) {
@@ -1677,7 +1677,7 @@ class SpillDelegatePipe : public PipeOp {
         return result;
       }
       ARA_ASSIGN_OR_RAISE(thread_locals_[thread_id].result,
-                           pipe_->Pipe()(thread_id, std::move(input)));
+                          pipe_->Pipe()(thread_id, std::move(input)));
       thread_locals_[thread_id].spilling = true;
       return OperatorResult::PipeYield();
     };

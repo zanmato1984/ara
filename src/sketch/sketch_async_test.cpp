@@ -1,4 +1,5 @@
 #include <arrow/api.h>
+#include <arrow/testing/gtest_util.h>
 #include <arrow/util/logging.h>
 #include <folly/MPMCQueue.h>
 #include <folly/executors/CPUThreadPoolExecutor.h>
@@ -22,7 +23,7 @@ using Status = arrow::Status;
 template <typename T>
 using Result = arrow::Result<T>;
 
-using Batch = std::vector<int>;
+using Batch = size_t;
 
 class Resumer {
  public:
@@ -609,7 +610,7 @@ TEST(SyncResumerTest, Interleaving2) {
   resume_future.get();
 }
 
-class SyncAwaiter : public std::enable_shared_from_this<SyncAwaiter> {
+class SyncAwaiter : public Awaiter, public std::enable_shared_from_this<SyncAwaiter> {
  public:
   explicit SyncAwaiter(size_t num_readies) : num_readies_(num_readies), readies_(0) {}
 
@@ -1179,35 +1180,173 @@ class MockAsyncSource : public SourceOp {
   folly::MPMCQueue<Batch> data_queue_;
   folly::MPMCQueue<ResumerPtr> resumer_queue_;
   bool finished_;
+
+  template <typename RunnerType>
+  friend class MockAsyncSourceTest;
 };
 
-// class MockAsyncSourceTest : public ::testing::Test {
-//  protected:
-//   void SetUp() override {
-//     ARA_ASSIGN_OR_RAISE(auto resumer, MakeResumer());
-//     resumers_.push_back(std::move(resumer));
-//     ARA_ASSIGN_OR_RAISE(auto awaiter, MakeSingleAwaiter(resumers_.back()));
-//     awaiters_.push_back(std::move(awaiter));
-//     ARA_ASSIGN_OR_RAISE(auto source, MakeAsyncSource(1, 1));
-//     source_ = std::move(source);
-//   }
+class SyncRunner {
+ public:
+  TaskContext MakeContext() {
+    TaskContext context;
+    context.resumer_factory = [&]() -> Result<ResumerPtr> {
+      return std::make_shared<SyncResumer>();
+    };
+    context.single_awaiter_factory = [&](ResumerPtr& resumer) -> Result<AwaiterPtr> {
+      return SyncAwaiter::MakeSyncSingleAwaiter(resumer);
+    };
+    context.any_awaiter_factory = [&](Resumers& resumers) -> Result<AwaiterPtr> {
+      return SyncAwaiter::MakeSyncAnyAwaiter(resumers);
+    };
+    context.all_awaiter_factory = [&](Resumers& resumers) -> Result<AwaiterPtr> {
+      return SyncAwaiter::MakeSyncAllAwaiter(resumers);
+    };
+    return context;
+  }
 
-//   Result<ResumerPtr> MakeResumer() {
-//     return std::make_shared<AsyncResumer>(&executor_);
-//   }
+  OpResult WaitThenDo(AwaiterPtr& awaiter, std::function<OpResult()> f) {
+    auto sync_awaiter = std::dynamic_pointer_cast<SyncAwaiter>(awaiter);
+    ARA_CHECK(sync_awaiter != nullptr);
+    sync_awaiter->Wait();
+    return f();
+  }
+};
 
-//   Result<AwaiterPtr> MakeSingleAwaiter(ResumerPtr& resumer) {
-//     return std::make_shared<AsyncSingleAwaiter>(resumer);
-//   }
+class AsyncRunner {
+ public:
+  TaskContext MakeContext() {
+    TaskContext context;
+    context.resumer_factory = [&]() -> Result<ResumerPtr> {
+      return std::make_shared<AsyncResumer>();
+    };
+    context.single_awaiter_factory = [&](ResumerPtr& resumer) -> Result<AwaiterPtr> {
+      return std::make_shared<AsyncSingleAwaiter>(resumer);
+    };
+    context.any_awaiter_factory = [&](Resumers& resumers) -> Result<AwaiterPtr> {
+      return std::make_shared<AsyncAnyAwaiter>(resumers);
+    };
+    context.all_awaiter_factory = [&](Resumers& resumers) -> Result<AwaiterPtr> {
+      return std::make_shared<AsyncAllAwaiter>(resumers);
+    };
+    return context;
+  }
 
-//   Result<SourceOp*> MakeAsyncSource(size_t q_size, size_t dop) {
-//     return new MockAsyncSource(q_size, dop);
-//   }
+  OpResult WaitThenDo(AwaiterPtr& awaiter, std::function<OpResult()> f) {
+    auto async_awaiter = std::dynamic_pointer_cast<AsyncAwaiter>(awaiter);
+    ARA_CHECK(async_awaiter != nullptr);
+    return std::move(async_awaiter->GetFuture())
+        .via(&executor)
+        .thenValue([&](auto&&) { return f(); })
+        .wait()
+        .value();
+  }
 
-//   folly::CPUThreadPoolExecutor executor_;
-//   Resumers resumers_;
-//   Awaiters awaiters_;
-//   SourceOp* source_;
-// };
+ private:
+  folly::CPUThreadPoolExecutor executor{4};
+};
+
+template <typename RunnerType>
+class MockAsyncSourceTest : public ::testing::Test {
+ protected:
+  void Init(size_t q_size, size_t dop) {
+    context = runner.MakeContext();
+    source = std::make_unique<MockAsyncSource>(q_size, dop);
+  }
+
+  void Produce(std::optional<Batch> batch) {
+    ASSERT_OK(source->Produce(std::move(batch)));
+  }
+
+  OpResult Consume(const TaskContext& context, size_t thread_id) {
+    return source->Source()(context, thread_id);
+  }
+
+ protected:
+  RunnerType runner;
+  TaskContext context;
+  std::unique_ptr<MockAsyncSource> source;
+};
+
+using RunnerTypes = ::testing::Types<SyncRunner, AsyncRunner>;
+TYPED_TEST_SUITE(MockAsyncSourceTest, RunnerTypes);
+
+TYPED_TEST(MockAsyncSourceTest, ProduceAndConsume) {
+  size_t q_size = 10, dop = 4;
+  this->Init(q_size, dop);
+
+  {
+    auto result = this->Consume(this->context, 0);
+    ASSERT_TRUE(result->IsBlocking());
+    ASSERT_FALSE(result->GetResumer()->IsResumed());
+    this->Produce(Batch{0});
+    ASSERT_TRUE(result->GetResumer()->IsResumed());
+  }
+
+  {
+    for (size_t i = 0; i < q_size - 1; ++i) {
+      this->Produce(Batch{i + 1});
+    }
+    std::atomic_bool produced = false;
+    auto future = std::async(std::launch::async, [&]() {
+      this->Produce(Batch{q_size});
+      produced = true;
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    ASSERT_FALSE(produced);
+    auto result = this->Consume(this->context, 0);
+    ASSERT_TRUE(result->IsSourcePipeHasMore());
+    ASSERT_EQ(result->GetBatch(), 0);
+    future.get();
+    ASSERT_TRUE(produced);
+    for (size_t i = 0; i < q_size; ++i) {
+      auto result = this->Consume(this->context, i % dop);
+      ASSERT_TRUE(result->IsSourcePipeHasMore());
+      ASSERT_EQ(result->GetBatch(), i + 1);
+    }
+  }
+
+  {
+    std::vector<AwaiterPtr> awaiters;
+    for (size_t i = 0; i < dop; ++i) {
+      auto result = this->Consume(this->context, i);
+      ASSERT_TRUE(result->IsBlocking());
+      ASSERT_FALSE(result->GetResumer()->IsResumed());
+      auto awaiter = this->context.single_awaiter_factory(result->GetResumer());
+      awaiters.push_back(std::move(*awaiter));
+    }
+    std::vector<std::future<OpResult>> futures;
+    for (size_t i = 0; i < dop; ++i) {
+      futures.emplace_back(std::async(std::launch::async, [&, i]() {
+        return this->runner.WaitThenDo(awaiters[i],
+                                       [&]() { return this->Consume(this->context, i); });
+      }));
+    }
+    for (size_t i = 0; i < dop; ++i) {
+      this->Produce(Batch{i});
+      auto result = futures[i].get();
+      ASSERT_TRUE(result->IsSourcePipeHasMore());
+      ASSERT_EQ(result->GetBatch(), i);
+    }
+  }
+}
+
+TYPED_TEST(MockAsyncSourceTest, FinishWhenOneOutstandingWaiting) {
+  size_t q_size = 10, dop = 4;
+  this->Init(q_size, dop);
+
+  {
+    auto result = this->Consume(this->context, 0);
+    ASSERT_TRUE(result->IsBlocking());
+    ASSERT_FALSE(result->GetResumer()->IsResumed());
+    this->Produce(std::nullopt);
+    ASSERT_TRUE(result->GetResumer()->IsResumed());
+  }
+
+  {
+    auto result = this->Consume(this->context, 0);
+    ASSERT_TRUE(result->IsFinished());
+    ASSERT_FALSE(result->GetBatch().has_value());
+  }
+}
 
 }  // namespace ara::sketch
