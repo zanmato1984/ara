@@ -9,6 +9,7 @@ namespace ara::pipeline {
 
 class PipelineContext;
 
+// TODO: Differentiate SourceResult, PipeResult, SinkResult?
 using PipelineSource =
     std::function<OpResult(const PipelineContext&, const task::TaskContext&, ThreadId)>;
 using PipelinePipe = std::function<OpResult(

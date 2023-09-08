@@ -9,7 +9,10 @@
 
 namespace ara::schedule {
 
-using task::BackpressureAndResetPair;
+using task::AllAwaiterFactory;
+using task::AnyAwaiterFactory;
+using task::ResumerFactory;
+using task::SingleAwaiterFactory;
 using task::Task;
 using task::TaskContext;
 using task::TaskGroup;
@@ -52,9 +55,13 @@ Result<std::unique_ptr<TaskGroupHandle>> Scheduler::Schedule(
 
 TaskContext Scheduler::MakeTaskContext(const ScheduleContext& schedule_context) const {
   auto task_observer = TaskObserver::Make(*schedule_context.query_context);
-  auto backpressure_factory = MakeBackpressurePairFactory(schedule_context);
-  return {schedule_context.query_context, std::move(backpressure_factory),
-          std::move(task_observer)};
+  auto resumer_factory = MakeResumerFactory(schedule_context);
+  auto single_awaiter_factory = MakeSingleAwaiterFactgory(schedule_context);
+  auto any_awaiter_factory = MakeAnyAwaiterFactgory(schedule_context);
+  auto all_awaiter_factory = MakeAllAwaiterFactgory(schedule_context);
+  return {schedule_context.query_context,    std::move(resumer_factory),
+          std::move(single_awaiter_factory), std::move(any_awaiter_factory),
+          std::move(all_awaiter_factory),    std::move(task_observer)};
 }
 
 std::unique_ptr<Scheduler> Scheduler::Make(const QueryContext&) { return nullptr; }

@@ -39,8 +39,11 @@ class NaiveParallelScheduler : public Scheduler {
   Result<std::unique_ptr<TaskGroupHandle>> DoSchedule(const ScheduleContext&,
                                                       const task::TaskGroup&) override;
 
-  task::BackpressurePairFactory MakeBackpressurePairFactory(
+  task::ResumerFactory MakeResumerFactory(const ScheduleContext&) const override;
+  task::SingleAwaiterFactory MakeSingleAwaiterFactgory(
       const ScheduleContext&) const override;
+  task::AnyAwaiterFactory MakeAnyAwaiterFactgory(const ScheduleContext&) const override;
+  task::AllAwaiterFactory MakeAllAwaiterFactgory(const ScheduleContext&) const override;
 
  private:
   using ConcreteTask = std::future<task::TaskResult>;

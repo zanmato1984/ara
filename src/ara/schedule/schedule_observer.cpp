@@ -37,14 +37,14 @@ class ScheduleLogger : public ScheduleObserver {
     return Status::OK();
   }
 
-  Status OnTaskBackpressure(const ScheduleContext&, const Task& task,
-                            TaskId task_id) override {
-    ARA_LOG(INFO) << "Task " << task.Name() << task_id << " backpressure";
+  Status OnTaskBlocked(const ScheduleContext&, const Task& task,
+                       TaskId task_id) override {
+    ARA_LOG(INFO) << "Task " << task.Name() << task_id << " blocked";
     return Status::OK();
   }
-  Status OnTaskBackpressureReset(const ScheduleContext&, const Task& task,
-                                 TaskId task_id) override {
-    ARA_LOG(INFO) << "Task " << task.Name() << task_id << " backpressure reset";
+  Status OnTaskResumed(const ScheduleContext&, const Task& task,
+                       TaskId task_id) override {
+    ARA_LOG(INFO) << "Task " << task.Name() << task_id << " resumed";
     return Status::OK();
   }
 
