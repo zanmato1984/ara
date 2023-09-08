@@ -15,4 +15,4 @@ add_ara_internal_dependencies(ara-task "${ARA_TASK_DEPS}")
 
 set(ARA_TASK_TEST_SRC
         "task_test.cpp")
-add_ara_test(ara-task-test "${ARA_TASK_TEST_SRC}")
+add_ara_test(ara-task-test ara-task "${ARA_TASK_TEST_SRC}")
