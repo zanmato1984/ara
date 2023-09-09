@@ -1112,15 +1112,18 @@ TEST(AsyncAwaiterTest, AllResumeFirst) {
 class MockAsyncSource : public SourceOp {
  public:
   MockAsyncSource(size_t q_size, size_t dop)
-      : data_queue_(q_size), resumer_queue_(dop), finished_(false) {}
+      : data_queue_(q_size),
+        resumer_queue_(dop),
+        finished_(false),
+        error_(Status::OK()) {}
 
   std::future<Status> AsyncEventLoop(size_t num_data, std::chrono::milliseconds delay) {
     return std::async(std::launch::async, [this, num_data, delay]() {
       for (size_t i = 0; i < num_data; ++i) {
         std::this_thread::sleep_for(delay);
-        ARA_RETURN_NOT_OK(Produce(Batch{}));
+        ARA_RETURN_NOT_OK(Produce(Batch{}, Status::OK()));
       }
-      ARA_RETURN_NOT_OK(Produce(std::nullopt));
+      ARA_RETURN_NOT_OK(Produce(std::nullopt, Status::OK()));
       return Status::OK();
     });
   }
@@ -1136,9 +1139,20 @@ class MockAsyncSource : public SourceOp {
   std::optional<TaskGroup> Backend() override { return {}; }
 
  private:
-  Status Produce(std::optional<Batch> batch) {
+  Status Produce(std::optional<Batch> batch, Status status) {
+    // In case that the source subscribes some slot in a background async service, e.g., a
+    // process-wide async grpc connection, this method should first unsubscribe this slot.
+    // Also make sure if the async service will issue multiple failed Produce() call, in
+    // such case, use some lock and flag to avoid re-entrancing the release work.
     std::vector<ResumerPtr> to_resume;
-    if (!batch.has_value()) {
+    if (!status.ok()) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      error_ = std::move(status);
+      ResumerPtr resumer;
+      while (resumer_queue_.read(resumer)) {
+        to_resume.push_back(std::move(resumer));
+      }
+    } else if (!batch.has_value()) {
       std::lock_guard<std::mutex> lock(mutex_);
       finished_ = true;
       ResumerPtr resumer;
@@ -1164,7 +1178,9 @@ class MockAsyncSource : public SourceOp {
   OpResult Consume(const TaskContext& context) {
     Batch batch;
     std::lock_guard<std::mutex> lock(mutex_);
-    if (finished_) {
+    if (!error_.ok()) {
+      return error_;
+    } else if (finished_) {
       return OpOutput::Finished();
     } else if (data_queue_.read(batch)) {
       return OpOutput::SourcePipeHasMore(std::move(batch));
@@ -1179,11 +1195,14 @@ class MockAsyncSource : public SourceOp {
   std::mutex mutex_;
   folly::MPMCQueue<Batch> data_queue_;
   folly::MPMCQueue<ResumerPtr> resumer_queue_;
+  Status error_;
   bool finished_;
 
   template <typename RunnerType>
   friend class MockAsyncSourceTest;
 };
+
+// TODO: Use folly future to implement the async source.
 
 class SyncRunner {
  public:
@@ -1253,8 +1272,8 @@ class MockAsyncSourceTest : public ::testing::Test {
     source = std::make_unique<MockAsyncSource>(q_size, dop);
   }
 
-  void Produce(std::optional<Batch> batch) {
-    ASSERT_OK(source->Produce(std::move(batch)));
+  void Produce(std::optional<Batch> batch, Status status = Status::OK()) {
+    ASSERT_OK(source->Produce(std::move(batch), std::move(status)));
   }
 
   OpResult Consume(const TaskContext& context, size_t thread_id) {
@@ -1407,6 +1426,90 @@ TYPED_TEST(MockAsyncSourceTest, FinishAllOutstanding) {
     auto result = futures[i].get();
     ASSERT_TRUE(result->IsFinished());
     ASSERT_FALSE(result->GetBatch().has_value());
+  }
+}
+
+TYPED_TEST(MockAsyncSourceTest, ErrorNoOutstanding) {
+  size_t q_size = 10, dop = 4;
+  this->Init(q_size, dop);
+
+  this->Produce(std::nullopt, Status::UnknownError("42"));
+
+  for (size_t i = 0; i < dop; ++i) {
+    auto result = this->Consume(this->context, i);
+    ASSERT_FALSE(result.ok());
+    ASSERT_TRUE(result.status().IsUnknownError());
+    ASSERT_EQ(result.status().message(), "42");
+  }
+}
+
+TYPED_TEST(MockAsyncSourceTest, ErrorOneOutstanding) {
+  size_t q_size = 10, dop = 4;
+  this->Init(q_size, dop);
+
+  AwaiterPtr awaiter;
+  {
+    auto result = this->Consume(this->context, 0);
+    ASSERT_TRUE(result->IsBlocking());
+    auto resumer = std::move(result->GetResumer());
+    ASSERT_FALSE(resumer->IsResumed());
+    awaiter = *(this->context.single_awaiter_factory(resumer));
+  }
+
+  auto future = std::async(std::launch::async, [&]() {
+    return this->runner.WaitThenDo(awaiter,
+                                   [&]() { return this->Consume(this->context, 0); });
+  });
+  this->Produce(std::nullopt, Status::UnknownError("42"));
+
+  for (size_t i = 1; i < dop; ++i) {
+    auto result = this->Consume(this->context, 0);
+    ASSERT_FALSE(result.ok());
+    ASSERT_TRUE(result.status().IsUnknownError());
+    ASSERT_EQ(result.status().message(), "42");
+  }
+
+  {
+    auto result = future.get();
+    ASSERT_FALSE(result.ok());
+    ASSERT_TRUE(result.status().IsUnknownError());
+    ASSERT_EQ(result.status().message(), "42");
+  }
+}
+
+TYPED_TEST(MockAsyncSourceTest, ErrorAllOutstanding) {
+  size_t q_size = 10, num_batches = 2, dop = 4;
+  this->Init(q_size, dop);
+
+  std::vector<std::future<OpResult>> futures;
+  std::vector<AwaiterPtr> awaiters;
+  for (size_t i = dop; i > 0; --i) {
+    auto result = this->Consume(this->context, i - 1);
+    ASSERT_TRUE(result->IsBlocking());
+    ASSERT_FALSE(result->GetResumer()->IsResumed());
+    auto awaiter = this->context.single_awaiter_factory(result->GetResumer());
+    awaiters.push_back(std::move(*awaiter));
+  }
+  for (size_t i = 0; i < dop; ++i) {
+    futures.emplace_back(std::async(std::launch::async, [&, i]() {
+      return this->runner.WaitThenDo(awaiters[i],
+                                     [&]() { return this->Consume(this->context, i); });
+    }));
+  }
+  for (size_t i = 0; i < num_batches; ++i) {
+    this->Produce(Batch{i});
+    auto result = futures[i].get();
+    ASSERT_TRUE(result->IsSourcePipeHasMore());
+    ASSERT_EQ(result->GetBatch(), i);
+  }
+
+  this->Produce(std::nullopt, Status::UnknownError("42"));
+
+  for (size_t i = num_batches; i < dop; ++i) {
+    auto result = futures[i].get();
+    ASSERT_FALSE(result.ok());
+    ASSERT_TRUE(result.status().IsUnknownError());
+    ASSERT_EQ(result.status().message(), "42");
   }
 }
 
