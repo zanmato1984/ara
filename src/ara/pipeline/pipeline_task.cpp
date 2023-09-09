@@ -239,6 +239,11 @@ PipelineTask::PipelineTask(const PhysicalPipeline& pipeline, size_t dop)
   }
 }
 
+// TODO: Consider policy for pipeline task channel multiplexing.
+// For example, an eager policy will aggresively multiplex different channels (sources)
+// for sake of performance, whereas a conservative policy will run channels one by one for
+// reducing resource (memory/IO) consumption.
+
 // TODO: Currently the task multiplexes channels whenever a channel gets blocked.
 // This is an aggressive way to make sure that at least some reasonable amount of work is
 // done. However this "amount" could be too much, e.g., a batch makes its way to sink and

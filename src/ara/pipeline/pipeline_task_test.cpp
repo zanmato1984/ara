@@ -66,7 +66,7 @@ struct ImperativeContext {
     bool work = false;
     {
       std::unique_lock<std::mutex> lock(mutex);
-      work = resumers.size() == dop;
+      work = resumers.size() >= dop;
     }
     if (work) {
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -1320,15 +1320,12 @@ TYPED_TEST(PipelineTaskTest, MultiChannel) {
   pipe2->PipeEven();
   sink->NeedsMore();
 
+  // TODO: More.
+
   source1->Finished();
   pipeline->ChannelFinished();
   source2->Finished();
   pipeline->ChannelFinished();
-
-  // TODO: Source 2 HAS_MORE in some pipe, and source 1 also HAS_MORE? Shall it proceed
-  // with channel 2 instead of channel 1, i.e., for reduce the memory pressure of channel
-  // 2?
-  // TODO: More.
 
   this->TestTracePipeline(context, *pipeline);
 }
