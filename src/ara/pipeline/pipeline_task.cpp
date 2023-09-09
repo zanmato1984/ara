@@ -236,9 +236,16 @@ PipelineTask::PipelineTask(const PhysicalPipeline& pipeline, size_t dop)
   }
 }
 
+// TODO: Currently the task multiplexes channels whenever a channel gets blocked.
+// This is an aggressive way to make sure that at least some reasonable amount of work is
+// done. However this "amount" could be too much, e.g., a batch makes its way to sink and
+// only gets blocked there (i.e., sink is busy), but the next channel will be ran anyhow
+// only because it sees its predecessor gets blocked. This can be improved with more
+// information about how much work has been done in the current task run.
 TaskResult PipelineTask::operator()(const PipelineContext& pipeline_context,
                                     const TaskContext& task_context, ThreadId thread_id) {
   bool all_finished = true;
+  bool all_unfinished_blocked = true;
   Resumers resumers;
   OpResult op_result;
   for (size_t i = 0; i < channels_.size(); ++i) {
@@ -250,6 +257,7 @@ TaskResult PipelineTask::operator()(const PipelineContext& pipeline_context,
         resumer = nullptr;
       } else {
         resumers.push_back(resumer);
+        all_finished = false;
         continue;
       }
     }
@@ -264,6 +272,8 @@ TaskResult PipelineTask::operator()(const PipelineContext& pipeline_context,
     if (op_result->IsBlocked()) {
       thread_locals_[thread_id].resumers[i] = op_result->GetResumer();
       resumers.push_back(std::move(op_result->GetResumer()));
+    } else {
+      all_unfinished_blocked = false;
     }
     if (!op_result->IsFinished() && !op_result->IsBlocked()) {
       break;
@@ -271,15 +281,13 @@ TaskResult PipelineTask::operator()(const PipelineContext& pipeline_context,
   }
   if (all_finished) {
     return TaskStatus::Finished();
-  } else if (resumers.size() == channels_.size()) {
+  } else if (all_unfinished_blocked && !resumers.empty()) {
     ARA_ASSIGN_OR_RAISE(auto awaiter, task_context.any_awaiter_factory(resumers));
     return TaskStatus::Blocked(std::move(awaiter));
   } else if (!op_result.ok()) {
     return op_result.status();
   } else if (op_result->IsPipeYield()) {
     return TaskStatus::Yield();
-  } else if (op_result->IsFinished()) {
-    return TaskStatus::Finished();
   } else if (op_result->IsCancelled()) {
     return TaskStatus::Cancelled();
   }
