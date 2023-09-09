@@ -1137,6 +1137,8 @@ void MakeBackpressurePipeline(pipelang::ImperativeContext* context,
   source->HasMore();
   pipe->PipeEven();
   sink->Blocked();
+  sink->Blocked();
+  sink->NeedsMore();
   source->Finished(Batch{});
   pipe->PipeEven();
   sink->NeedsMore();
@@ -1149,7 +1151,7 @@ void MakeBackpressurePipeline(pipelang::ImperativeContext* context,
   ASSERT_EQ(logical.Channels()[0].pipe_ops.size(), 1);
   ASSERT_EQ(logical.SinkOp(), sink);
 
-  ASSERT_EQ(pipeline->Traces().size(), 9);
+  ASSERT_EQ(pipeline->Traces().size(), 13);
   ASSERT_EQ(pipeline->Traces()[0],
             (pipelang::ImperativeTrace{"Source", "Source",
                                        OpOutput::SourcePipeHasMore({}).ToString()}));
@@ -1164,17 +1166,29 @@ void MakeBackpressurePipeline(pipelang::ImperativeContext* context,
                                        OpOutput::Blocked(nullptr).ToString()}));
   ASSERT_EQ(
       pipeline->Traces()[4],
-      (pipelang::ImperativeTrace{"Source", "Source", OpOutput::Finished({}).ToString()}));
-  ASSERT_EQ(
-      pipeline->Traces()[5],
-      (pipelang::ImperativeTrace{"Pipe", "Pipe", OpOutput::PipeEven({}).ToString()}));
+      (pipelang::ImperativeTrace{"Sink", "Sink", OpOutput::Blocked(nullptr).ToString()}));
+  ASSERT_EQ(pipeline->Traces()[5],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::Blocked(nullptr).ToString()}));
   ASSERT_EQ(pipeline->Traces()[6],
             (pipelang::ImperativeTrace{"Sink", "Sink",
                                        OpOutput::PipeSinkNeedsMore().ToString()}));
   ASSERT_EQ(pipeline->Traces()[7],
             (pipelang::ImperativeTrace{TaskName(name), "Run",
                                        OpOutput::PipeSinkNeedsMore().ToString()}));
-  ASSERT_EQ(pipeline->Traces()[8],
+  ASSERT_EQ(
+      pipeline->Traces()[8],
+      (pipelang::ImperativeTrace{"Source", "Source", OpOutput::Finished({}).ToString()}));
+  ASSERT_EQ(
+      pipeline->Traces()[9],
+      (pipelang::ImperativeTrace{"Pipe", "Pipe", OpOutput::PipeEven({}).ToString()}));
+  ASSERT_EQ(pipeline->Traces()[10],
+            (pipelang::ImperativeTrace{"Sink", "Sink",
+                                       OpOutput::PipeSinkNeedsMore().ToString()}));
+  ASSERT_EQ(pipeline->Traces()[11],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::PipeSinkNeedsMore().ToString()}));
+  ASSERT_EQ(pipeline->Traces()[12],
             (pipelang::ImperativeTrace{TaskName(name), "Run",
                                        OpOutput::Finished().ToString()}));
 }

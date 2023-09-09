@@ -59,6 +59,9 @@ OpResult PipelineTask::Channel::operator()(const PipelineContext& pipeline_conte
   if (thread_locals_[thread_id].sinking) {
     thread_locals_[thread_id].sinking = false;
     auto result = Sink(pipeline_context, task_context, thread_id, std::nullopt);
+    OBSERVE(OnPipelineTaskEnd, task_, channel_id_, pipeline_context, task_context,
+            thread_id, result);
+    return result;
   }
 
   if (!thread_locals_[thread_id].pipe_stack.empty()) {
