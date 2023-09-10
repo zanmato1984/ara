@@ -1,8 +1,8 @@
 #pragma once
 
 #include <ara/common/defines.h>
-#include <ara/common/query_context.h>
 #include <ara/common/observer.h>
+#include <ara/common/query_context.h>
 #include <ara/task/defines.h>
 
 namespace ara {
@@ -39,12 +39,10 @@ class ScheduleObserver : public Observer {
     return Status::OK();
   }
 
-  virtual Status OnTaskBackpressure(const ScheduleContext&, const task::Task&,
-                                    task::TaskId) {
+  virtual Status OnTaskBlocked(const ScheduleContext&, const task::Task&, task::TaskId) {
     return Status::OK();
   }
-  virtual Status OnTaskBackpressureReset(const ScheduleContext&, const task::Task&,
-                                         task::TaskId) {
+  virtual Status OnTaskResumed(const ScheduleContext&, const task::Task&, task::TaskId) {
     return Status::OK();
   }
 

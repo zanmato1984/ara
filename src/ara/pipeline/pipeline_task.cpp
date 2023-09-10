@@ -9,6 +9,7 @@
 
 namespace ara::pipeline {
 
+using task::Resumers;
 using task::TaskContext;
 using task::TaskResult;
 using task::TaskStatus;
@@ -28,7 +29,7 @@ PipelineTask::Channel::Channel(const PipelineTask& task, size_t channel_id, size
   });
   std::vector<size_t> drains;
   for (size_t i = 0; i < pipes_.size(); ++i) {
-    if (pipes_[i].second.has_value()) {
+    if (pipes_[i].second != nullptr) {
       drains.push_back(i);
     }
   }
@@ -55,6 +56,14 @@ OpResult PipelineTask::Channel::operator()(const PipelineContext& pipeline_conte
     return OpOutput::Cancelled();
   }
 
+  if (thread_locals_[thread_id].sinking) {
+    thread_locals_[thread_id].sinking = false;
+    auto result = Sink(pipeline_context, task_context, thread_id, std::nullopt);
+    OBSERVE(OnPipelineTaskEnd, task_, channel_id_, pipeline_context, task_context,
+            thread_id, result);
+    return result;
+  }
+
   if (!thread_locals_[thread_id].pipe_stack.empty()) {
     auto pipe_id = thread_locals_[thread_id].pipe_stack.top();
     thread_locals_[thread_id].pipe_stack.pop();
@@ -76,10 +85,10 @@ OpResult PipelineTask::Channel::operator()(const PipelineContext& pipeline_conte
               thread_id, result);
       return result.status();
     }
-    if (result->IsSourceNotReady()) {
+    if (result->IsBlocked()) {
       OBSERVE(OnPipelineTaskEnd, task_, channel_id_, pipeline_context, task_context,
-              thread_id, OpOutput::SourceNotReady());
-      return OpOutput::SourceNotReady();
+              thread_id, result);
+      return result;
     } else if (result->IsFinished()) {
       thread_locals_[thread_id].source_done = true;
       if (result->GetBatch().has_value()) {
@@ -111,8 +120,7 @@ OpResult PipelineTask::Channel::operator()(const PipelineContext& pipeline_conte
     auto drain_id = thread_locals_[thread_id].drains[thread_locals_[thread_id].draining];
     OBSERVE(OnPipelineDrainBegin, task_, channel_id_, drain_id, pipeline_context,
             task_context, thread_id);
-    auto result =
-        pipes_[drain_id].second.value()(pipeline_context, task_context, thread_id);
+    auto result = pipes_[drain_id].second(pipeline_context, task_context, thread_id);
     OBSERVE(OnPipelineDrainEnd, task_, channel_id_, drain_id, pipeline_context,
             task_context, thread_id, result);
     if (!result.ok()) {
@@ -134,6 +142,9 @@ OpResult PipelineTask::Channel::operator()(const PipelineContext& pipeline_conte
       OBSERVE(OnPipelineTaskEnd, task_, channel_id_, pipeline_context, task_context,
               thread_id, OpOutput::PipeYield());
       return OpOutput::PipeYield();
+    }
+    if (result->IsBlocked()) {
+      return result;
     }
     ARA_CHECK(result->IsSourcePipeHasMore() || result->IsFinished());
     if (result->GetBatch().has_value()) {
@@ -179,6 +190,10 @@ OpResult PipelineTask::Channel::Pipe(const PipelineContext& pipeline_context,
       thread_locals_[thread_id].yield = true;
       return OpOutput::PipeYield();
     }
+    if (result->IsBlocked()) {
+      thread_locals_[thread_id].pipe_stack.push(i);
+      return result;
+    }
     ARA_CHECK(result->IsPipeSinkNeedsMore() || result->IsPipeEven() ||
               result->IsSourcePipeHasMore());
     if (result->IsPipeEven() || result->IsSourcePipeHasMore()) {
@@ -192,6 +207,12 @@ OpResult PipelineTask::Channel::Pipe(const PipelineContext& pipeline_context,
     }
   }
 
+  return Sink(pipeline_context, task_context, thread_id, std::move(input));
+}
+
+OpResult PipelineTask::Channel::Sink(const PipelineContext& pipeline_context,
+                                     const TaskContext& task_context, ThreadId thread_id,
+                                     std::optional<Batch> input) {
   OBSERVE(OnPipelineSinkBegin, task_, channel_id_, pipeline_context, task_context,
           thread_id, input);
   auto result = sink_(pipeline_context, task_context, thread_id, std::move(input));
@@ -201,7 +222,10 @@ OpResult PipelineTask::Channel::Pipe(const PipelineContext& pipeline_context,
     cancelled_ = true;
     return result.status();
   }
-  ARA_CHECK(result->IsPipeSinkNeedsMore() || result->IsSinkBackpressure());
+  ARA_CHECK(result->IsPipeSinkNeedsMore() || result->IsBlocked());
+  if (result->IsBlocked()) {
+    thread_locals_[thread_id].sinking = true;
+  }
   return result;
 }
 
@@ -215,54 +239,67 @@ PipelineTask::PipelineTask(const PhysicalPipeline& pipeline, size_t dop)
   }
 }
 
-namespace {
+// TODO: Consider policy for pipeline task channel multiplexing.
+// For example, an eager policy will aggresively multiplex different channels (sources)
+// for sake of performance, whereas a conservative policy will run channels one by one for
+// reducing resource (memory/IO) consumption.
 
-TaskResult OpResultToTaskResult(OpResult op_result) {
-  if (!op_result.ok()) {
-    return op_result.status();
-  }
-  if (op_result->IsSinkBackpressure()) {
-    return TaskStatus::Backpressure(std::move(op_result->GetBackpressure()));
-  }
-  if (op_result->IsPipeYield()) {
-    return TaskStatus::Yield();
-  }
-  if (op_result->IsFinished()) {
-    return TaskStatus::Finished();
-  }
-  if (op_result->IsCancelled()) {
-    return TaskStatus::Cancelled();
-  }
-  return TaskStatus::Continue();
-}
-
-}  // namespace
-
+// TODO: Currently the task multiplexes channels whenever a channel gets blocked.
+// This is an aggressive way to make sure that at least some reasonable amount of work is
+// done. However this "amount" could be too much, e.g., a batch makes its way to sink and
+// only gets blocked there (i.e., sink is busy), but the next channel will be ran anyhow
+// only because it sees its predecessor gets blocked. This can be improved with more
+// information about how much work has been done in the current task run.
 TaskResult PipelineTask::operator()(const PipelineContext& pipeline_context,
                                     const TaskContext& task_context, ThreadId thread_id) {
   bool all_finished = true;
+  bool all_unfinished_blocked = true;
+  Resumers resumers;
+  OpResult op_result;
   for (size_t i = 0; i < channels_.size(); ++i) {
     if (thread_locals_[thread_id].finished[i]) {
       continue;
     }
+    if (auto& resumer = thread_locals_[thread_id].resumers[i]; resumer != nullptr) {
+      if (resumer->IsResumed()) {
+        resumer = nullptr;
+      } else {
+        resumers.push_back(resumer);
+        all_finished = false;
+        continue;
+      }
+    }
     auto& channel = channels_[i];
-    ARA_ASSIGN_OR_RAISE(auto op_result,
-                        channel(pipeline_context, task_context, thread_id));
-    if (op_result.IsFinished()) {
-      ARA_CHECK(!op_result.GetBatch().has_value());
+    ARA_ASSIGN_OR_RAISE(op_result, channel(pipeline_context, task_context, thread_id));
+    if (op_result->IsFinished()) {
+      ARA_CHECK(!op_result->GetBatch().has_value());
       thread_locals_[thread_id].finished[i] = true;
     } else {
       all_finished = false;
     }
-    if (!op_result.IsFinished() && !op_result.IsSourceNotReady()) {
-      return OpResultToTaskResult(std::move(op_result));
+    if (op_result->IsBlocked()) {
+      thread_locals_[thread_id].resumers[i] = op_result->GetResumer();
+      resumers.push_back(std::move(op_result->GetResumer()));
+    } else {
+      all_unfinished_blocked = false;
+    }
+    if (!op_result->IsFinished() && !op_result->IsBlocked()) {
+      break;
     }
   }
   if (all_finished) {
     return TaskStatus::Finished();
-  } else {
-    return TaskStatus::Continue();
+  } else if (all_unfinished_blocked && !resumers.empty()) {
+    ARA_ASSIGN_OR_RAISE(auto awaiter, task_context.any_awaiter_factory(resumers));
+    return TaskStatus::Blocked(std::move(awaiter));
+  } else if (!op_result.ok()) {
+    return op_result.status();
+  } else if (op_result->IsPipeYield()) {
+    return TaskStatus::Yield();
+  } else if (op_result->IsCancelled()) {
+    return TaskStatus::Cancelled();
   }
+  return TaskStatus::Continue();
 }
 
 }  // namespace ara::pipeline

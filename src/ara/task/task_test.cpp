@@ -69,14 +69,13 @@ TEST(TaskTest, TaskObserver) {
             end ? std::optional<TaskStatus>(TaskStatus::Continue()) : std::nullopt};
   };
 
-  auto task_backpressure_impl = [](const TaskContext&, TaskId) -> TaskResult {
-    return TaskStatus::Backpressure(42);
+  auto task_blocked_impl = [](const TaskContext&, TaskId) -> TaskResult {
+    return TaskStatus::Blocked(nullptr);
   };
-  Task task_backpressure("TaskBackpressure", "Always backpressure",
-                         task_backpressure_impl);
-  auto task_backpressure_trace = [](TaskId task_id, bool end) -> TaskTrace {
-    return {"TaskBackpressure", "Always backpressure", task_id,
-            end ? std::optional<TaskStatus>(TaskStatus::Backpressure(42)) : std::nullopt};
+  Task task_blocked("TaskBlocked", "Always blocked", task_blocked_impl);
+  auto task_blocked_trace = [](TaskId task_id, bool end) -> TaskTrace {
+    return {"TaskBlocked", "Always blocked", task_id,
+            end ? std::optional<TaskStatus>(TaskStatus::Blocked(nullptr)) : std::nullopt};
   };
 
   auto task_finished_impl = [](const TaskContext&, TaskId) -> TaskResult {
@@ -143,8 +142,8 @@ TEST(TaskTest, TaskObserver) {
   std::ignore = task_continue(context, 0);
   std::ignore = task_continue(context, 1);
   std::ignore = task_finished(context, 0);
-  std::ignore = task_backpressure(context, 1);
-  std::ignore = task_backpressure(context, 0);
+  std::ignore = task_blocked(context, 1);
+  std::ignore = task_blocked(context, 0);
   std::ignore = task_finished(context, 1);
   std::ignore = cont_cancelled(context);
   std::ignore = cont_yield(context);
@@ -156,10 +155,10 @@ TEST(TaskTest, TaskObserver) {
   ASSERT_EQ(task_observer.traces[3], task_continue_trace(1, true));
   ASSERT_EQ(task_observer.traces[4], task_finished_trace(0, false));
   ASSERT_EQ(task_observer.traces[5], task_finished_trace(0, true));
-  ASSERT_EQ(task_observer.traces[6], task_backpressure_trace(1, false));
-  ASSERT_EQ(task_observer.traces[7], task_backpressure_trace(1, true));
-  ASSERT_EQ(task_observer.traces[8], task_backpressure_trace(0, false));
-  ASSERT_EQ(task_observer.traces[9], task_backpressure_trace(0, true));
+  ASSERT_EQ(task_observer.traces[6], task_blocked_trace(1, false));
+  ASSERT_EQ(task_observer.traces[7], task_blocked_trace(1, true));
+  ASSERT_EQ(task_observer.traces[8], task_blocked_trace(0, false));
+  ASSERT_EQ(task_observer.traces[9], task_blocked_trace(0, true));
   ASSERT_EQ(task_observer.traces[10], task_finished_trace(1, false));
   ASSERT_EQ(task_observer.traces[11], task_finished_trace(1, true));
   ASSERT_EQ(task_observer.traces[12], cont_cancelled_trace(false));

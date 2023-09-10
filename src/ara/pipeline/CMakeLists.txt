@@ -12,13 +12,14 @@ add_ara_library(ara-pipeline "${ARA_PIPELINE_SRC}")
 set(ARA_PIPELINE_DEPS
         "ara-common"
         "ara-task"
+        "ara-schedule"
         "ara-util")
 add_ara_internal_dependencies(ara-pipeline "${ARA_PIPELINE_DEPS}")
 
 set(ARA_PIPELINE_COMPILE_TEST_SRC
         "pipeline_compile_test.cpp")
-add_ara_test(ara-pipeline-compile-test "${ARA_PIPELINE_COMPILE_TEST_SRC}")
+add_ara_test(ara-pipeline-compile-test ara-pipeline "${ARA_PIPELINE_COMPILE_TEST_SRC}")
 
 set(ARA_PIPELINE_TASK_TEST_SRC
         "pipeline_task_test.cpp")
-add_ara_test(ara-pipeline-task-test "${ARA_PIPELINE_TASK_TEST_SRC}")
+add_ara_test(ara-pipeline-task-test ara-pipeline "${ARA_PIPELINE_TASK_TEST_SRC}")

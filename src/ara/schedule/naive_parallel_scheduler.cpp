@@ -1,6 +1,8 @@
 #include "naive_parallel_scheduler.h"
 #include "schedule_context.h"
 #include "schedule_observer.h"
+#include "sync_awaiter.h"
+#include "sync_resumer.h"
 
 #include <ara/task/task.h>
 #include <ara/task/task_group.h>
@@ -8,7 +10,11 @@
 
 namespace ara::schedule {
 
-using task::BackpressureAndResetPair;
+using task::AllAwaiterFactory;
+using task::AnyAwaiterFactory;
+using task::ResumerFactory;
+using task::ResumerPtr;
+using task::SingleAwaiterFactory;
 using task::Task;
 using task::TaskContext;
 using task::TaskGroup;
@@ -60,27 +66,23 @@ Result<std::unique_ptr<TaskGroupHandle>> NaiveParallelScheduler::DoSchedule(
                                                std::move(make_future));
 }
 
-namespace detail {
-struct BackpressureImpl {
-  std::mutex mutex;
-  std::condition_variable cv;
-  bool ready = false;
-};
-}  // namespace detail
+ResumerFactory NaiveParallelScheduler::MakeResumerFactory(const ScheduleContext&) const {
+  return []() -> Result<ResumerPtr> { return std::make_shared<SyncResumer>(); };
+}
 
-std::optional<task::BackpressurePairFactory>
-NaiveParallelScheduler::MakeBackpressurePairFactory(const ScheduleContext&) const {
-  return
-      [&](const TaskContext&, const Task&, TaskId) -> Result<BackpressureAndResetPair> {
-        auto impl = std::make_shared<detail::BackpressureImpl>();
-        auto callback = [impl]() {
-          std::unique_lock<std::mutex> lock(impl->mutex);
-          impl->ready = true;
-          impl->cv.notify_one();
-          return Status::OK();
-        };
-        return std::make_pair(std::any{std::move(impl)}, std::move(callback));
-      };
+SingleAwaiterFactory NaiveParallelScheduler::MakeSingleAwaiterFactgory(
+    const ScheduleContext&) const {
+  return SyncAwaiter::MakeSingle;
+}
+
+AnyAwaiterFactory NaiveParallelScheduler::MakeAnyAwaiterFactgory(
+    const ScheduleContext&) const {
+  return SyncAwaiter::MakeAny;
+}
+
+AllAwaiterFactory NaiveParallelScheduler::MakeAllAwaiterFactgory(
+    const ScheduleContext&) const {
+  return SyncAwaiter::MakeAll;
 }
 
 NaiveParallelScheduler::ConcreteTask NaiveParallelScheduler::MakeTask(
@@ -98,22 +100,17 @@ NaiveParallelScheduler::ConcreteTask NaiveParallelScheduler::MakeTask(
               ARA_RETURN_NOT_OK(schedule_context.schedule_observer->Observe(
                   &ScheduleObserver::OnTaskYield, schedule_context, task, task_id));
             }
-          } else if (result->IsBackpressure()) {
+          } else if (result->IsBlocked()) {
             if (schedule_context.schedule_observer != nullptr) {
               ARA_RETURN_NOT_OK(schedule_context.schedule_observer->Observe(
-                  &ScheduleObserver::OnTaskBackpressure, schedule_context, task,
-                  task_id));
+                  &ScheduleObserver::OnTaskBlocked, schedule_context, task, task_id));
             }
-            auto backpressure = std::any_cast<std::shared_ptr<detail::BackpressureImpl>>(
-                std::move(result->GetBackpressure()));
-            std::unique_lock<std::mutex> lock(backpressure->mutex);
-            while (!backpressure->ready) {
-              backpressure->cv.wait(lock);
-            }
+            auto awaiter = std::dynamic_pointer_cast<SyncAwaiter>(result->GetAwaiter());
+            ARA_CHECK(awaiter != nullptr);
+            awaiter->Wait();
             if (schedule_context.schedule_observer != nullptr) {
               ARA_RETURN_NOT_OK(schedule_context.schedule_observer->Observe(
-                  &ScheduleObserver::OnTaskBackpressureReset, schedule_context, task,
-                  task_id));
+                  &ScheduleObserver::OnTaskResumed, schedule_context, task, task_id));
             }
           }
           result = task(task_context, task_id);

@@ -3,7 +3,6 @@
 #include <ara/common/defines.h>
 #include <ara/common/meta.h>
 #include <ara/common/query_context.h>
-#include <ara/task/backpressure.h>
 #include <ara/task/defines.h>
 #include <ara/task/task_context.h>
 
@@ -53,7 +52,12 @@ class Scheduler : public internal::Meta {
 
   task::TaskContext MakeTaskContext(const ScheduleContext&) const;
 
-  virtual std::optional<task::BackpressurePairFactory> MakeBackpressurePairFactory(
+  virtual task::ResumerFactory MakeResumerFactory(const ScheduleContext&) const = 0;
+  virtual task::SingleAwaiterFactory MakeSingleAwaiterFactgory(
+      const ScheduleContext&) const = 0;
+  virtual task::AnyAwaiterFactory MakeAnyAwaiterFactgory(
+      const ScheduleContext&) const = 0;
+  virtual task::AllAwaiterFactory MakeAllAwaiterFactgory(
       const ScheduleContext&) const = 0;
 
  private:

@@ -30,7 +30,7 @@ class ScheduleTest : public testing::Test {
  protected:
   TaskResult ScheduleTask(const ScheduleContext& schedule_context, Task task,
                           size_t num_tasks, std::optional<Continuation> cont,
-                          std::optional<TaskGroup::NotifyFinishFunc> notify_finish) {
+                          TaskGroup::NotifyFinishFunc notify_finish) {
     TaskGroup task_group("", "", std::move(task), num_tasks, std::move(cont),
                          std::move(notify_finish));
     SchedulerType holder;
@@ -49,8 +49,8 @@ TYPED_TEST(ScheduleTest, EmptyTask) {
   Task task("Task", "Do nothing", [](const TaskContext&, TaskId) -> TaskResult {
     return TaskStatus::Finished();
   });
-  auto result = this->ScheduleTask(schedule_context, std::move(task), 4, std::nullopt,
-                                   std::nullopt);
+  auto result =
+      this->ScheduleTask(schedule_context, std::move(task), 4, std::nullopt, nullptr);
   ASSERT_OK(result);
   ASSERT_TRUE(result->IsFinished());
 }
@@ -63,8 +63,8 @@ TYPED_TEST(ScheduleTest, EmptyTaskWithEmptyCont) {
   Continuation cont("Cont", "Do nothing", [](const TaskContext&) -> TaskResult {
     return TaskStatus::Finished();
   });
-  auto result = this->ScheduleTask(schedule_context, std::move(task), 4, std::move(cont),
-                                   std::nullopt);
+  auto result =
+      this->ScheduleTask(schedule_context, std::move(task), 4, std::move(cont), nullptr);
   ASSERT_OK(result);
   ASSERT_TRUE(result->IsFinished());
 }

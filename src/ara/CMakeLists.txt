@@ -20,8 +20,8 @@ macro(add_ara_library ARA_LIB_NAME ARA_LIB_SRC)
 
   if(ARA_CHECK_INTERNAL_DEPENDENCIES)
     add_library(${ARA_LIB_NAME}-dependency-check SHARED $<TARGET_OBJECTS:${ARA_LIB_NAME}>)
-    target_include_directories(${ARA_LIB_NAME}-dependency-check PRIVATE "${CMAKE_SOURCE_DIR}/src")
-    target_link_libraries(${ARA_LIB_NAME}-dependency-check PRIVATE ${ARA_DEPENDENCIES})
+    target_include_directories(${ARA_LIB_NAME}-dependency-check PUBLIC "${CMAKE_SOURCE_DIR}/src")
+    target_link_libraries(${ARA_LIB_NAME}-dependency-check PUBLIC ${ARA_DEPENDENCIES})
 
     add_dependencies(check-internal-dependencies ${ARA_LIB_NAME}-dependency-check)
   endif(ARA_CHECK_INTERNAL_DEPENDENCIES)

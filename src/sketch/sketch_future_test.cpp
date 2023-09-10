@@ -259,3 +259,54 @@ TEST(FollyFutureTest, WhileDoSwitchExecutor) {
   iter++;
   ASSERT_EQ(iter->second, 21);
 }
+
+TEST(FollyFutureTest, RacyCallback) {
+  folly::CPUThreadPoolExecutor executor(4);
+  size_t rounds = 100000;
+  for (size_t i = 0; i < rounds; ++i) {
+    std::atomic_bool start = false;
+    auto pair = folly::makePromiseContract<int>();
+    auto& promise = pair.first;
+    auto& future = pair.second;
+    auto fulfill_task = std::async(std::launch::async, [&]() {
+      while (!start) {
+      }
+      promise.setValue(i);
+    });
+    auto get_task = std::async(std::launch::async, [&]() {
+      while (!start) {
+      }
+      std::move(future)
+          .via(&executor)
+          .thenValue([&](int value) { EXPECT_EQ(value, i); })
+          .wait();
+    });
+    start = true;
+    fulfill_task.get();
+    get_task.get();
+  }
+}
+
+TEST(FollyFutureTest, CallbackTiming) {
+  size_t pred_run = 0, thunk_run = 0;
+  bool finished = false;
+  folly::CPUThreadPoolExecutor executor(4);
+  auto pair = folly::makePromiseContract<folly::Unit>(&executor);
+  auto promise = std::move(pair.first);
+  auto future = std::move(pair.second);
+  promise.setValue();
+  future = std::move(future).then([&](auto&&) { finished = true; });
+  ASSERT_FALSE(finished);
+  auto pred = [&]() {
+    pred_run++;
+    return !finished;
+  };
+  auto thunk = [&]() {
+    thunk_run++;
+    return std::move(future);
+  };
+  folly::whileDo(pred, thunk).wait().value();
+  ASSERT_TRUE(finished);
+  ASSERT_EQ(pred_run, 2);
+  ASSERT_EQ(thunk_run, 1);
+}

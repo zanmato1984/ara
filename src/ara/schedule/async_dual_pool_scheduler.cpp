@@ -1,4 +1,6 @@
 #include "async_dual_pool_scheduler.h"
+#include "async_awaiter.h"
+#include "async_resumer.h"
 #include "schedule_context.h"
 #include "schedule_observer.h"
 
@@ -6,7 +8,21 @@
 #include <ara/task/task_group.h>
 #include <ara/util/util.h>
 
-namespace ara::schedule::detail {
+namespace ara::schedule {
+
+using detail::Future;
+using detail::Promise;
+using task::AllAwaiterFactory;
+using task::AnyAwaiterFactory;
+using task::ResumerFactory;
+using task::ResumerPtr;
+using task::SingleAwaiterFactory;
+using task::Task;
+using task::TaskContext;
+using task::TaskGroup;
+using task::TaskId;
+using task::TaskResult;
+using task::TaskStatus;
 
 const std::string AsyncHandle::kName = "AsyncHandle";
 
@@ -76,6 +92,25 @@ Result<std::unique_ptr<TaskGroupHandle>> AsyncDualPoolScheduler::DoSchedule(
                                        std::move(results), std::move(make_future));
 }
 
+ResumerFactory AsyncDualPoolScheduler::MakeResumerFactory(const ScheduleContext&) const {
+  return []() -> Result<ResumerPtr> { return std::make_shared<AsyncResumer>(); };
+}
+
+SingleAwaiterFactory AsyncDualPoolScheduler::MakeSingleAwaiterFactgory(
+    const ScheduleContext&) const {
+  return AsyncAwaiter::MakeSingle;
+}
+
+AnyAwaiterFactory AsyncDualPoolScheduler::MakeAnyAwaiterFactgory(
+    const ScheduleContext&) const {
+  return AsyncAwaiter::MakeAny;
+}
+
+AllAwaiterFactory AsyncDualPoolScheduler::MakeAllAwaiterFactgory(
+    const ScheduleContext&) const {
+  return AsyncAwaiter::MakeAll;
+}
+
 AsyncDualPoolScheduler::ConcreteTask AsyncDualPoolScheduler::MakeTask(
     const ScheduleContext& schedule_context, const Task& task, const TaskContext& context,
     TaskId task_id, TaskResult& result) const {
@@ -84,29 +119,29 @@ AsyncDualPoolScheduler::ConcreteTask AsyncDualPoolScheduler::MakeTask(
     return result.ok() && !result->IsFinished() && !result->IsCancelled();
   };
   auto thunk = [&, task_id]() {
-    if (result->IsBackpressure()) {
+    if (result->IsBlocked()) {
       if (schedule_context.schedule_observer != nullptr) {
         auto status = schedule_context.schedule_observer->Observe(
-            &ScheduleObserver::OnTaskBackpressure, schedule_context, task, task_id);
+            &ScheduleObserver::OnTaskBlocked, schedule_context, task, task_id);
         if (!status.ok()) {
           result = std::move(status);
           return folly::makeFuture();
         }
       }
-      auto backpressure = std::any_cast<std::shared_ptr<folly::Future<folly::Unit>>>(
-          std::move(result->GetBackpressure()));
-      return std::move(*backpressure).thenValue([&, task_id](auto&&) {
-        if (schedule_context.schedule_observer != nullptr) {
-          auto status = schedule_context.schedule_observer->Observe(
-              &ScheduleObserver::OnTaskBackpressureReset, schedule_context, task,
-              task_id);
-          if (!status.ok()) {
-            result = std::move(status);
-            return;
-          }
-        }
-        result = TaskStatus::Continue();
-      });
+      auto awaiter = std::dynamic_pointer_cast<AsyncAwaiter>(result->GetAwaiter());
+      return std::move(awaiter->GetFuture())
+          .via(cpu_executor_)
+          .thenValue([&, task_id](auto&&) {
+            if (schedule_context.schedule_observer != nullptr) {
+              auto status = schedule_context.schedule_observer->Observe(
+                  &ScheduleObserver::OnTaskResumed, schedule_context, task, task_id);
+              if (!status.ok()) {
+                result = std::move(status);
+                return;
+              }
+            }
+            result = TaskStatus::Continue();
+          });
     }
 
     if (result->IsYield()) {
@@ -149,26 +184,4 @@ AsyncDualPoolScheduler::ConcreteTask AsyncDualPoolScheduler::MakeTask(
   return {std::move(p), std::move(task_f)};
 }
 
-std::optional<BackpressurePairFactory>
-AsyncDualPoolScheduler::MakeBackpressurePairFactory(
-    const ScheduleContext& schedule_context) const {
-  return [&](const TaskContext& task_context, const Task& task, TaskId task_id) {
-    return MakeBackpressureAndResetPair(schedule_context, task_context, task, task_id);
-  };
-}
-
-Result<BackpressureAndResetPair> AsyncDualPoolScheduler::MakeBackpressureAndResetPair(
-    const ScheduleContext& schedule_context, const TaskContext& task_context,
-    const Task& task, TaskId task_id) const {
-  auto [p, f] = folly::makePromiseContract<folly::Unit>(cpu_executor_);
-  // Workaround that std::function must be copy-constructible.
-  auto p_ptr = std::make_shared<folly::Promise<folly::Unit>>(std::move(p));
-  auto f_ptr = std::make_shared<folly::Future<folly::Unit>>(std::move(f));
-  auto callback = [&, p_ptr = std::move(p_ptr), task, task_id]() mutable {
-    p_ptr->setValue();
-    return Status::OK();
-  };
-  return std::make_pair(std::any{std::move(f_ptr)}, std::move(callback));
-}
-
-}  // namespace ara::schedule::detail
+}  // namespace ara::schedule
