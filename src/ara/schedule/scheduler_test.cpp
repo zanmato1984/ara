@@ -85,4 +85,4 @@ TYPED_TEST(ScheduleTest, EndlessTaskWithNotifyFinish) {
   ASSERT_TRUE(result->IsFinished());
 }
 
-// TODO: More schedule test.
+// TODO: More schedule test: blocked/yield/error/cancel.

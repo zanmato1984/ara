@@ -1473,3 +1473,5 @@ TYPED_TEST(PipelineTaskTest, MultiChannel) {
 
   this->TestTracePipeline(context, *pipeline);
 }
+
+// TODO: Error/cancel tests.
