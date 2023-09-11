@@ -66,7 +66,7 @@ This status indicates the task has finished its execution.
 
 This status indicates the task has been cancelled, possibly because some other instance of the same task has encountered an error.
 
-# Handle Blocking
+## Handle Blocking
 
 The handling of blocking is designed to interoperate with async I/O in a purely asynchronous manner.
 The principle is that the task shouldn't engage in any busy-wait during its execution.
