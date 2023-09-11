@@ -1289,18 +1289,28 @@ TYPED_TEST(PipelineTaskTest, MultiPipe) {
   pipe1->PipeYield(context);
   pipe1->PipeYieldBack(context);
   pipe1->PipeHasMore(context);
+  pipe2->PipeBlocked(context);
+  pipeline->Resume(context, "Pipe2");
   pipe2->PipeNeedsMore(context);
 
+  pipe1->PipeBlocked(context);
+  pipeline->Resume(context, "Pipe1");
   pipe1->PipeEven(context);
   pipe2->PipeEven(context);
   sink->NeedsMore(context);
 
   source->HasMore(context);
+  pipe1->PipeBlocked(context);
+  pipeline->Resume(context, "Pipe1");
   pipe1->PipeHasMore(context);
+  pipe2->PipeBlocked(context);
+  pipeline->Resume(context, "Pipe2");
   pipe2->PipeHasMore(context);
   sink->NeedsMore(context);
 
   pipe2->PipeHasMore(context);
+  sink->Blocked(context);
+  pipeline->Resume(context, "Sink");
   sink->NeedsMore(context);
 
   pipe2->PipeEven(context);
@@ -1334,17 +1344,27 @@ TYPED_TEST(PipelineTaskTest, MultiDrain) {
   auto sink = pipeline->DeclSink("Sink", {pipe2});
   source->Finished(context);
 
+  pipe1->DrainBlocked(context);
+  pipeline->Resume(context, "Pipe1");
   pipe1->DrainHasMore(context);
   pipe2->PipeYield(context);
   pipe2->PipeYieldBack(context);
+  pipe2->PipeBlocked(context);
+  pipeline->Resume(context, "Pipe2");
   pipe2->PipeNeedsMore(context);
 
   pipe1->DrainHasMore(context);
   pipe2->PipeEven(context);
+  sink->Blocked(context);
+  pipeline->Resume(context, "Sink");
   sink->NeedsMore(context);
 
   pipe1->DrainFinished(context);
+  pipe2->DrainBlocked(context);
+  pipeline->Resume(context, "Pipe2");
   pipe2->DrainHasMore(context);
+  sink->Blocked(context);
+  pipeline->Resume(context, "Sink");
   sink->NeedsMore(context);
 
   pipe2->DrainYield(context);
