@@ -144,6 +144,8 @@ OpResult PipelineTask::Channel::operator()(const PipelineContext& pipeline_conte
       return OpOutput::PipeYield();
     }
     if (result->IsBlocked()) {
+      OBSERVE(OnPipelineTaskEnd, task_, channel_id_, pipeline_context, task_context,
+              thread_id, result);
       return result;
     }
     ARA_CHECK(result->IsSourcePipeHasMore() || result->IsFinished());

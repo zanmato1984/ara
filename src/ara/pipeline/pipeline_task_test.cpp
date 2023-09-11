@@ -955,6 +955,60 @@ TYPED_TEST(PipelineTaskTest, PipeYield) {
   this->TestTracePipeline(context, *pipeline);
 }
 
+void MakePipeAsyncSpillPipeline(pipelang::ImperativeContext& context, size_t dop,
+                                std::unique_ptr<pipelang::ImperativePipeline>& result) {
+  auto name = "PipeAsyncSpill";
+  result = std::make_unique<pipelang::ImperativePipeline>(name, dop);
+  auto pipeline = result.get();
+  auto source = pipeline->DeclSource("Source");
+  auto pipe = pipeline->DeclPipe("Pipe", {source});
+  auto sink = pipeline->DeclSink("Sink", {pipe});
+  source->HasMore(context);
+  pipe->PipeBlocked(context);
+  pipeline->Resume(context, "Pipe");
+  pipe->PipeNeedsMore(context);
+  source->Finished(context);
+  pipeline->ChannelFinished(context);
+
+  auto logical = pipeline->ToLogicalPipeline();
+  ASSERT_EQ(logical.Name(), name);
+  ASSERT_EQ(logical.Channels().size(), 1);
+  ASSERT_EQ(logical.Channels()[0].source_op, source);
+  ASSERT_EQ(logical.Channels()[0].pipe_ops.size(), 1);
+  ASSERT_EQ(logical.Channels()[0].pipe_ops[0], pipe);
+  ASSERT_EQ(logical.SinkOp(), sink);
+
+  ASSERT_EQ(context.Traces().size(), 7);
+  ASSERT_EQ(context.Traces()[0],
+            (pipelang::ImperativeTrace{"Source", "Source",
+                                       OpOutput::SourcePipeHasMore({}).ToString()}));
+  ASSERT_EQ(
+      context.Traces()[1],
+      (pipelang::ImperativeTrace{"Pipe", "Pipe", OpOutput::Blocked(nullptr).ToString()}));
+  ASSERT_EQ(context.Traces()[2],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::Blocked(nullptr).ToString()}));
+  ASSERT_EQ(context.Traces()[3],
+            (pipelang::ImperativeTrace{"Pipe", "Pipe",
+                                       OpOutput::PipeSinkNeedsMore().ToString()}));
+  ASSERT_EQ(context.Traces()[4],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::PipeSinkNeedsMore().ToString()}));
+  ASSERT_EQ(
+      context.Traces()[5],
+      (pipelang::ImperativeTrace{"Source", "Source", OpOutput::Finished({}).ToString()}));
+  ASSERT_EQ(context.Traces()[6],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::Finished().ToString()}));
+}
+
+TYPED_TEST(PipelineTaskTest, PipeAsyncSpill) {
+  pipelang::ImperativeContext context;
+  std::unique_ptr<pipelang::ImperativePipeline> pipeline;
+  MakePipeAsyncSpillPipeline(context, 4, pipeline);
+  this->TestTracePipeline(context, *pipeline);
+}
+
 void MakeDrainPipeline(pipelang::ImperativeContext& context, size_t dop,
                        std::unique_ptr<pipelang::ImperativePipeline>& result) {
   auto name = "Drain";
@@ -975,6 +1029,8 @@ void MakeDrainPipeline(pipelang::ImperativeContext& context, size_t dop,
   pipe->DrainYieldBack(context);
   pipe->DrainHasMore(context);
   sink->NeedsMore(context);
+  pipe->DrainBlocked(context);
+  pipeline->Resume(context, "Pipe");
   pipe->DrainFinished(context, Batch{});
   sink->NeedsMore(context);
   pipeline->ChannelFinished(context);
@@ -987,7 +1043,7 @@ void MakeDrainPipeline(pipelang::ImperativeContext& context, size_t dop,
   ASSERT_EQ(logical.Channels()[0].pipe_ops[0], pipe);
   ASSERT_EQ(logical.SinkOp(), sink);
 
-  ASSERT_EQ(context.Traces().size(), 22);
+  ASSERT_EQ(context.Traces().size(), 24);
   ASSERT_EQ(context.Traces()[0],
             (pipelang::ImperativeTrace{"Source", "Source",
                                        OpOutput::SourcePipeHasMore({}).ToString()}));
@@ -1040,16 +1096,22 @@ void MakeDrainPipeline(pipelang::ImperativeContext& context, size_t dop,
   ASSERT_EQ(context.Traces()[17],
             (pipelang::ImperativeTrace{TaskName(name), "Run",
                                        OpOutput::PipeSinkNeedsMore().ToString()}));
-  ASSERT_EQ(
-      context.Traces()[18],
-      (pipelang::ImperativeTrace{"Pipe", "Drain", OpOutput::Finished({}).ToString()}));
+  ASSERT_EQ(context.Traces()[18],
+            (pipelang::ImperativeTrace{"Pipe", "Drain",
+                                       OpOutput::Blocked(nullptr).ToString()}));
   ASSERT_EQ(context.Traces()[19],
+            (pipelang::ImperativeTrace{TaskName(name), "Run",
+                                       OpOutput::Blocked(nullptr).ToString()}));
+  ASSERT_EQ(
+      context.Traces()[20],
+      (pipelang::ImperativeTrace{"Pipe", "Drain", OpOutput::Finished({}).ToString()}));
+  ASSERT_EQ(context.Traces()[21],
             (pipelang::ImperativeTrace{"Sink", "Sink",
                                        OpOutput::PipeSinkNeedsMore().ToString()}));
-  ASSERT_EQ(context.Traces()[20],
+  ASSERT_EQ(context.Traces()[22],
             (pipelang::ImperativeTrace{TaskName(name), "Run",
                                        OpOutput::PipeSinkNeedsMore().ToString()}));
-  ASSERT_EQ(context.Traces()[21],
+  ASSERT_EQ(context.Traces()[23],
             (pipelang::ImperativeTrace{TaskName(name), "Run",
                                        OpOutput::Finished().ToString()}));
 }
