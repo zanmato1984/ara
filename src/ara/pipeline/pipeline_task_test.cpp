@@ -153,6 +153,13 @@ class ImperativeOp : public internal::Meta {
     context.Trace(std::move(trace));
   }
 
+  void Sync(ImperativeContext& context, std::string method, TaskId task_id = 0) {
+    OpInstructAndTrace(context, OpOutput::Blocked(nullptr), std::move(method));
+    // instructions_.emplace_back(OpOutput::Blocked(nullptr));
+    PipelineTrace(context, OpOutput::Blocked(nullptr), task_id);
+    sync_instructions_.emplace(instructions_.size());
+  }
+
   void PipelineTrace(ImperativeContext& context, ImperativeInstruction instruction,
                      size_t pipeline_id = 0) {
     context.Trace(ImperativeTrace{TaskName(pipeline_->Name(), pipeline_id), "Run",
@@ -165,6 +172,24 @@ class ImperativeOp : public internal::Meta {
 
   ImperativeInstruction Execute(const TaskContext& task_context, ThreadId thread_id,
                                 ImperativeInstruction instruction) {
+    if (sync_instructions_.count(thread_locals_[thread_id].pc) != 0) {
+      ARA_CHECK(task_context.resumer_factory != nullptr);
+      ARA_ASSIGN_OR_RAISE(auto resumer, task_context.resumer_factory());
+      {
+        std::lock_guard<std::mutex> lock(sync_mutex_);
+        resumers_.push_back(resumer);
+        if (resumers_.size() == pipeline_->Dop()) {
+          for (auto& resumer : resumers_) {
+            resumer->Resume();
+          }
+          resumers_.clear();
+        }
+      }
+      // TODO: Dummy, just increase pc.
+      std::ignore =
+          pipeline_->Execute(Meta::Name(), task_context, thread_id, OpOutput::Finished());
+      return OpOutput::Blocked(std::move(resumer));
+    }
     return pipeline_->Execute(Meta::Name(), task_context, thread_id,
                               std::move(instruction));
   }
@@ -174,11 +199,14 @@ class ImperativeOp : public internal::Meta {
   std::shared_ptr<ImperativeOp> child_;
 
   std::vector<ImperativeInstruction> instructions_;
+  std::unordered_set<size_t> sync_instructions_;
 
   struct ThreadLocal {
     size_t pc = 0;
   };
   std::vector<ThreadLocal> thread_locals_;
+  std::mutex sync_mutex_;
+  Resumers resumers_;
 };
 
 class ImperativeSource : public ImperativeOp, public SourceOp {
@@ -187,6 +215,7 @@ class ImperativeSource : public ImperativeOp, public SourceOp {
       : ImperativeOp(std::move(name), "ImperativeSource", pipeline),
         SourceOp(ImperativeOp::Name(), ImperativeOp::Desc()) {}
 
+  void Sync(ImperativeContext& context) { ImperativeOp::Sync(context, "Source"); }
   void HasMore(ImperativeContext& context) {
     OpInstructAndTrace(context, OpOutput::SourcePipeHasMore(Batch{}), "Source");
   }
@@ -225,6 +254,7 @@ class ImperativePipe : public ImperativeOp, public PipeOp {
     implicit_source_ = std::move(implicit_source);
   }
 
+  void PipeSync(ImperativeContext& context) { Sync(context, "Pipe"); }
   void PipeEven(ImperativeContext& context) {
     OpInstructAndTrace(context, OpOutput::PipeEven(Batch{}), "Pipe");
   }
@@ -248,6 +278,7 @@ class ImperativePipe : public ImperativeOp, public PipeOp {
     PipelineTrace(context, OpOutput::Blocked(nullptr), task_id);
   }
 
+  void DrainSync(ImperativeContext& context) { Sync(context, "Drain"); }
   void DrainHasMore(ImperativeContext& context) {
     has_drain_ = true;
     OpInstructAndTrace(context, OpOutput::SourcePipeHasMore(Batch{}), "Drain");
@@ -307,6 +338,7 @@ class ImperativeSink : public ImperativeOp, public SinkOp {
       : ImperativeOp(std::move(name), "ImperativeSink", pipeline),
         SinkOp(ImperativeOp::Name(), ImperativeOp::Desc()) {}
 
+  void Sync(ImperativeContext& context) { ImperativeOp::Sync(context, "Sink"); }
   void NeedsMore(ImperativeContext& context, size_t task_id = 0) {
     OpInstructAndTrace(context, OpOutput::PipeSinkNeedsMore(), "Sink");
     PipelineTrace(context, OpOutput::PipeSinkNeedsMore(), task_id);
@@ -1346,6 +1378,7 @@ TYPED_TEST(PipelineTaskTest, MultiDrain) {
   pipe1->DrainBlocked(context);
   pipeline->Resume(context, "Pipe1");
   pipe1->DrainHasMore(context);
+  // pipe2->PipeSync(context);
   pipe2->PipeYield(context);
   pipe2->PipeYieldBack(context);
   pipe2->PipeBlocked(context);
@@ -1435,6 +1468,7 @@ TYPED_TEST(PipelineTaskTest, MultiChannel) {
   sink->Blocked(context);
   pipeline->Resume(context, "Pipe1");
 
+  // pipe1->PipeSync(context);
   pipe1->PipeEven(context);
   sink->Blocked(context);
   pipeline->Resume(context, "Sink");
