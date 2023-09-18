@@ -1378,7 +1378,6 @@ TYPED_TEST(PipelineTaskTest, MultiDrain) {
   pipe1->DrainBlocked(context);
   pipeline->Resume(context, "Pipe1");
   pipe1->DrainHasMore(context);
-  // pipe2->PipeSync(context);
   pipe2->PipeYield(context);
   pipe2->PipeYieldBack(context);
   pipe2->PipeBlocked(context);
@@ -1412,7 +1411,7 @@ TYPED_TEST(PipelineTaskTest, MultiDrain) {
 
 TYPED_TEST(PipelineTaskTest, MultiChannel) {
   pipelang::ImperativeContext context;
-  size_t dop = 1;
+  size_t dop = 4;
   auto name = "MultiChannel";
   auto pipeline = std::make_unique<pipelang::ImperativePipeline>(name, dop);
   auto source1 = pipeline->DeclSource("Source1");
@@ -1425,6 +1424,13 @@ TYPED_TEST(PipelineTaskTest, MultiChannel) {
   source2->Blocked(context);
   pipeline->Resume(context, "Source1");
 
+  source1->HasMore(context);
+  pipe1->PipeEven(context);
+  sink->NeedsMore(context);
+
+  // Reentrant wait.
+  source1->Blocked(context);
+  pipeline->Resume(context, "Source1");
   source1->HasMore(context);
   pipe1->PipeEven(context);
   sink->NeedsMore(context);
@@ -1468,7 +1474,6 @@ TYPED_TEST(PipelineTaskTest, MultiChannel) {
   sink->Blocked(context);
   pipeline->Resume(context, "Pipe1");
 
-  // pipe1->PipeSync(context);
   pipe1->PipeEven(context);
   sink->Blocked(context);
   pipeline->Resume(context, "Sink");
