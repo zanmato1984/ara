@@ -98,8 +98,6 @@ class ImperativePipeline {
       ARA_CHECK(task_context.resumer_factory != nullptr);
       ARA_ASSIGN_OR_RAISE(auto resumer, task_context.resumer_factory());
       thread_locals_[thread_id].resumers[op_name].emplace_back(resumer);
-      // ARA_CHECK(thread_locals_[thread_id].resumers.count(op_name) == 0);
-      // thread_locals_[thread_id].resumers.emplace(std::move(op_name), resumer);
       result = OpOutput::Blocked(std::move(resumer));
     } else {
       result = std::move(instruction);
