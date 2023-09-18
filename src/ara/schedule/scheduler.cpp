@@ -20,6 +20,12 @@ using task::TaskId;
 using task::TaskObserver;
 using task::TaskResult;
 
+#define OBSERVE(Method, ...)                                                         \
+  if (context.schedule_observer != nullptr) {                                        \
+    ARA_RETURN_NOT_OK(                                                               \
+        context.schedule_observer->Observe(&ScheduleObserver::Method, __VA_ARGS__)); \
+  }
+
 TaskGroupHandle::TaskGroupHandle(const std::string& name, const TaskGroup& task_group,
                                  TaskContext task_context)
     : Meta(name + "(" + task_group.Name() + ")", name + "(" + task_group.Desc() + ")"),
@@ -27,29 +33,18 @@ TaskGroupHandle::TaskGroupHandle(const std::string& name, const TaskGroup& task_
       task_context_(std::move(task_context)) {}
 
 TaskResult TaskGroupHandle::Wait(const ScheduleContext& context) {
-  if (context.schedule_observer != nullptr) {
-    ARA_RETURN_NOT_OK(context.schedule_observer->OnWaitTaskGroupBegin(*this, context));
-  }
+  OBSERVE(OnWaitTaskGroupBegin, *this, context);
   ARA_RETURN_NOT_OK(task_group_.NotifyFinish(task_context_));
   auto status = DoWait(context);
-  if (context.schedule_observer != nullptr) {
-    ARA_RETURN_NOT_OK(
-        context.schedule_observer->OnWaitTaskGroupEnd(*this, context, status));
-  }
+  OBSERVE(OnWaitTaskGroupEnd, *this, context, status);
   return status;
 }
 
 Result<std::unique_ptr<TaskGroupHandle>> Scheduler::Schedule(
     const ScheduleContext& context, const TaskGroup& tg) {
-  if (context.schedule_observer != nullptr) {
-    ARA_RETURN_NOT_OK(
-        context.schedule_observer->OnScheduleTaskGroupBegin(*this, context, tg));
-  }
+  OBSERVE(OnScheduleTaskGroupBegin, *this, context, tg);
   auto result = DoSchedule(context, tg);
-  if (context.schedule_observer != nullptr) {
-    ARA_RETURN_NOT_OK(
-        context.schedule_observer->OnScheduleTaskGroupEnd(*this, context, tg, result));
-  }
+  OBSERVE(OnScheduleTaskGroupEnd, *this, context, tg, result);
   return result;
 }
 
