@@ -151,6 +151,36 @@ TEST(SyncAwaiterTest, AnyWaitFirst) {
   future.get();
 }
 
+TEST(SyncAwaiterTest, AnyReentrantWait) {
+  size_t num_resumers = 1000;
+  size_t lucky = 42;
+  Resumers resumers(num_resumers);
+  for (auto& resumer : resumers) {
+    resumer = std::make_shared<SyncResumer>();
+  }
+  auto awaiter1 = SyncAwaiter::MakeAny(resumers);
+  resumers[lucky]->Resume();
+  awaiter1->Wait();
+  for (size_t i = 0; i < 1000; ++i) {
+    if (i == lucky) {
+      ASSERT_TRUE(resumers[i]->IsResumed());
+    } else {
+      ASSERT_FALSE(resumers[i]->IsResumed());
+    }
+  }
+  resumers[lucky] = std::make_shared<SyncResumer>();
+  auto awaiter2 = SyncAwaiter::MakeAny(resumers);
+  resumers[lucky]->Resume();
+  awaiter2->Wait();
+  for (size_t i = 0; i < 1000; ++i) {
+    if (i == lucky) {
+      ASSERT_TRUE(resumers[i]->IsResumed());
+    } else {
+      ASSERT_FALSE(resumers[i]->IsResumed());
+    }
+  }
+}
+
 TEST(SyncAwaiterTest, AnyResumeFirst) {
   size_t num_resumers = 1000;
   Resumers resumers(num_resumers);
