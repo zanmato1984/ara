@@ -168,8 +168,8 @@ class ImperativeOp : public internal::Meta {
   }
 
   void ChannelResult(ImperativeContext& context, ImperativeInstruction instruction,
-                     size_t pipeline_id = 0) {
-    context.Trace(ImperativeTrace{ChannelName(pipeline_->Name(), pipeline_id), "Run",
+                     size_t channel_id = 0) {
+    context.Trace(ImperativeTrace{ChannelName(pipeline_->Name(), channel_id), "Run",
                                   instruction->ToString()});
   }
 
@@ -301,7 +301,10 @@ class ImperativePipe : public ImperativeOp, public PipeOp {
     ChannelResult(context, OpOutput::Blocked(nullptr), channel_id);
   }
 
-  void DrainSync(ImperativeContext& context) { Sync(context, "Drain"); }
+  void DrainSync(ImperativeContext& context) {
+    has_drain_ = true;
+    Sync(context, "Drain");
+  }
   void DrainHasMore(ImperativeContext& context) {
     has_drain_ = true;
     OpInstructAndTrace(context, OpOutput::SourcePipeHasMore(Batch{}), "Drain");
@@ -523,33 +526,27 @@ class PipelineTaskTest : public testing::Test {
  protected:
   void TestTracePipeline(const pipelang::ImperativeContext& context,
                          const pipelang::ImperativePipeline& pipeline) {
-    TestTracePipelineWithCheck(context, pipeline, [](const TaskResult& result) {
-      ASSERT_OK(result);
-      ASSERT_TRUE(result->IsFinished());
-    });
+    size_t dop = pipeline.Dop();
+    const auto& [result, act] = RunPipeline(context, pipeline);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsFinished());
+    auto& exp = context.Traces();
+    CompareTraces(act, exp);
   }
 
   void TestTracePipelineWithUnknownError(const pipelang::ImperativeContext& context,
                                          const pipelang::ImperativePipeline& pipeline,
                                          const std::string& exp_msg) {
-    TestTracePipelineWithCheck(context, pipeline, [&exp_msg](const TaskResult& result) {
-      ASSERT_FALSE(result.ok());
-      ASSERT_TRUE(result.status().IsUnknownError());
-      ASSERT_EQ(result.status().message(), exp_msg);
-    });
+    size_t dop = pipeline.Dop();
+    const auto& [result, act] = RunPipeline(context, pipeline);
+    ASSERT_FALSE(result.ok());
+    ASSERT_TRUE(result.status().IsUnknownError());
+    ASSERT_EQ(result.status().message(), exp_msg);
+    auto& exp = context.Traces();
+    CompareTracesForError(act, exp);
   }
 
  private:
-  void TestTracePipelineWithCheck(const pipelang::ImperativeContext& context,
-                                  const pipelang::ImperativePipeline& pipeline,
-                                  std::function<void(const TaskResult&)> check) {
-    size_t dop = pipeline.Dop();
-    const auto& [result, act] = RunPipeline(context, pipeline);
-    check(result);
-    auto& exp = context.Traces();
-    CompareTraces(act, exp);
-  }
-
   std::tuple<TaskResult, std::vector<std::vector<pipelang::ImperativeTrace>>> RunPipeline(
       const pipelang::ImperativeContext& context,
       const pipelang::ImperativePipeline& pipeline) {
@@ -606,9 +603,24 @@ class PipelineTaskTest : public testing::Test {
   void CompareTraces(const std::vector<std::vector<pipelang::ImperativeTrace>>& act,
                      const std::vector<pipelang::ImperativeTrace>& exp) {
     for (size_t i = 0; i < act.size(); ++i) {
-      ASSERT_EQ(act[i].size(), exp.size());
+      ASSERT_EQ(act[i].size(), exp.size()) << "thread_id=" << i;
       for (size_t j = 0; j < exp.size(); ++j) {
         ASSERT_EQ(act[i][j], exp[j]) << "thread_id=" << i << ", trace_id=" << j;
+      }
+    }
+  }
+
+  void CompareTracesForError(
+      const std::vector<std::vector<pipelang::ImperativeTrace>>& act,
+      const std::vector<pipelang::ImperativeTrace>& exp) {
+    for (size_t i = 0; i < act.size(); ++i) {
+      ASSERT_GE(act[i].size(), exp.size()) << "thread_id=" << i;
+      for (size_t j = 0; j < exp.size(); ++j) {
+        ASSERT_EQ(act[i][j], exp[j]) << "thread_id=" << i << ", trace_id=" << j;
+      }
+      for (size_t j = exp.size(); j < act[i].size(); ++j) {
+        ASSERT_EQ(act[i][j].payload, "BLOCKED")
+            << "thread_id=" << i << ", trace_id=" << j;
       }
     }
   }
@@ -1579,6 +1591,38 @@ TYPED_TEST(PipelineTaskTest, MultiChannel) {
   this->TestTracePipeline(context, *pipeline);
 }
 
+TYPED_TEST(PipelineTaskTest, DirectSourceError) {
+  pipelang::ImperativeContext context;
+  size_t dop = 4;
+  auto name = "DirectSourceError";
+  auto pipeline = std::make_unique<pipelang::ImperativePipeline>(name, dop);
+  auto source = pipeline->DeclSource("Source");
+  auto pipe = pipeline->DeclPipe("Pipe", {source});
+  auto sink = pipeline->DeclSink("Sink", {pipe});
+
+  source->Sync(context);
+  source->Error(context, "42");
+
+  this->TestTracePipelineWithUnknownError(context, *pipeline, "42");
+}
+
+TYPED_TEST(PipelineTaskTest, SourceErrorAfterBlocked) {
+  pipelang::ImperativeContext context;
+  size_t dop = 4;
+  auto name = "SourceErrorAfterBlocked";
+  auto pipeline = std::make_unique<pipelang::ImperativePipeline>(name, dop);
+  auto source = pipeline->DeclSource("Source");
+  auto pipe = pipeline->DeclPipe("Pipe", {source});
+  auto sink = pipeline->DeclSink("Sink", {pipe});
+
+  source->Blocked(context);
+  pipeline->Resume(context, "Source");
+  source->Sync(context);
+  source->Error(context, "42");
+
+  this->TestTracePipelineWithUnknownError(context, *pipeline, "42");
+}
+
 TYPED_TEST(PipelineTaskTest, SourceError) {
   pipelang::ImperativeContext context;
   size_t dop = 4;
@@ -1588,8 +1632,282 @@ TYPED_TEST(PipelineTaskTest, SourceError) {
   auto pipe = pipeline->DeclPipe("Pipe", {source});
   auto sink = pipeline->DeclSink("Sink", {pipe});
 
+  source->HasMore(context);
+  pipe->PipeEven(context);
+  sink->NeedsMore(context);
   source->Sync(context);
   source->Error(context, "42");
+
+  this->TestTracePipelineWithUnknownError(context, *pipeline, "42");
+}
+
+TYPED_TEST(PipelineTaskTest, PipeError) {
+  pipelang::ImperativeContext context;
+  size_t dop = 4;
+  auto name = "PipeError";
+  auto pipeline = std::make_unique<pipelang::ImperativePipeline>(name, dop);
+  auto source = pipeline->DeclSource("Source");
+  auto pipe = pipeline->DeclPipe("Pipe", {source});
+  auto sink = pipeline->DeclSink("Sink", {pipe});
+
+  source->HasMore(context);
+  pipe->PipeSync(context);
+  pipe->Error(context, "42");
+
+  this->TestTracePipelineWithUnknownError(context, *pipeline, "42");
+}
+
+TYPED_TEST(PipelineTaskTest, PipeErrorAfterEven) {
+  pipelang::ImperativeContext context;
+  size_t dop = 4;
+  auto name = "PipeErrorAfterEven";
+  auto pipeline = std::make_unique<pipelang::ImperativePipeline>(name, dop);
+  auto source = pipeline->DeclSource("Source");
+  auto pipe = pipeline->DeclPipe("Pipe", {source});
+  auto sink = pipeline->DeclSink("Sink", {pipe});
+
+  source->HasMore(context);
+  pipe->PipeEven(context);
+  sink->NeedsMore(context);
+  source->HasMore(context);
+  pipe->PipeSync(context);
+  pipe->Error(context, "42");
+
+  this->TestTracePipelineWithUnknownError(context, *pipeline, "42");
+}
+
+TYPED_TEST(PipelineTaskTest, PipeErrorAfterNeedsMore) {
+  pipelang::ImperativeContext context;
+  size_t dop = 4;
+  auto name = "PipeErrorAfterNeedsMore";
+  auto pipeline = std::make_unique<pipelang::ImperativePipeline>(name, dop);
+  auto source = pipeline->DeclSource("Source");
+  auto pipe = pipeline->DeclPipe("Pipe", {source});
+  auto sink = pipeline->DeclSink("Sink", {pipe});
+
+  source->HasMore(context);
+  pipe->PipeNeedsMore(context);
+  source->HasMore(context);
+  pipe->PipeSync(context);
+  pipe->Error(context, "42");
+
+  this->TestTracePipelineWithUnknownError(context, *pipeline, "42");
+}
+
+TYPED_TEST(PipelineTaskTest, PipeErrorAfterHasMore) {
+  pipelang::ImperativeContext context;
+  size_t dop = 4;
+  auto name = "PipeErrorAfterHasMore";
+  auto pipeline = std::make_unique<pipelang::ImperativePipeline>(name, dop);
+  auto source = pipeline->DeclSource("Source");
+  auto pipe = pipeline->DeclPipe("Pipe", {source});
+  auto sink = pipeline->DeclSink("Sink", {pipe});
+
+  source->HasMore(context);
+  pipe->PipeHasMore(context);
+  sink->NeedsMore(context);
+  pipe->PipeSync(context);
+  pipe->Error(context, "42");
+
+  this->TestTracePipelineWithUnknownError(context, *pipeline, "42");
+}
+
+// TODO: This case is probably unstable as if the error thread is fast enough then other
+// threads won't emit yield.
+TYPED_TEST(PipelineTaskTest, PipeErrorAfterYield) {
+  pipelang::ImperativeContext context;
+  size_t dop = 4;
+  auto name = "PipeErrorAfterYield";
+  auto pipeline = std::make_unique<pipelang::ImperativePipeline>(name, dop);
+  auto source = pipeline->DeclSource("Source");
+  auto pipe = pipeline->DeclPipe("Pipe", {source});
+  auto sink = pipeline->DeclSink("Sink", {pipe});
+
+  source->HasMore(context);
+  pipe->PipeSync(context);
+  pipe->PipeYield(context);
+  pipe->Error(context, "42");
+
+  this->TestTracePipelineWithUnknownError(context, *pipeline, "42");
+}
+
+TYPED_TEST(PipelineTaskTest, PipeErrorAfterYieldBack) {
+  pipelang::ImperativeContext context;
+  size_t dop = 4;
+  auto name = "PipeErrorAfterYield";
+  auto pipeline = std::make_unique<pipelang::ImperativePipeline>(name, dop);
+  auto source = pipeline->DeclSource("Source");
+  auto pipe = pipeline->DeclPipe("Pipe", {source});
+  auto sink = pipeline->DeclSink("Sink", {pipe});
+
+  source->HasMore(context);
+  pipe->PipeYield(context);
+  pipe->PipeYieldBack(context);
+  pipe->PipeSync(context);
+  pipe->Error(context, "42");
+
+  this->TestTracePipelineWithUnknownError(context, *pipeline, "42");
+}
+
+TYPED_TEST(PipelineTaskTest, PipeErrorAfterBlocked) {
+  pipelang::ImperativeContext context;
+  size_t dop = 4;
+  auto name = "PipeErrorAfterBlocked";
+  auto pipeline = std::make_unique<pipelang::ImperativePipeline>(name, dop);
+  auto source = pipeline->DeclSource("Source");
+  auto pipe = pipeline->DeclPipe("Pipe", {source});
+  auto sink = pipeline->DeclSink("Sink", {pipe});
+
+  source->HasMore(context);
+  pipe->PipeBlocked(context);
+  pipeline->Resume(context, "Pipe");
+  pipe->PipeSync(context);
+  pipe->Error(context, "42");
+
+  this->TestTracePipelineWithUnknownError(context, *pipeline, "42");
+}
+
+TYPED_TEST(PipelineTaskTest, DrainError) {
+  pipelang::ImperativeContext context;
+  size_t dop = 4;
+  auto name = "DrainError";
+  auto pipeline = std::make_unique<pipelang::ImperativePipeline>(name, dop);
+  auto source = pipeline->DeclSource("Source");
+  auto pipe = pipeline->DeclPipe("Pipe", {source});
+  auto sink = pipeline->DeclSink("Sink", {pipe});
+
+  source->Finished(context);
+  pipe->DrainSync(context);
+  pipe->Error(context, "42");
+
+  this->TestTracePipelineWithUnknownError(context, *pipeline, "42");
+}
+
+TYPED_TEST(PipelineTaskTest, DrainErrorAfterHasMore) {
+  pipelang::ImperativeContext context;
+  size_t dop = 4;
+  auto name = "DrainErrorAfterHasMore";
+  auto pipeline = std::make_unique<pipelang::ImperativePipeline>(name, dop);
+  auto source = pipeline->DeclSource("Source");
+  auto pipe = pipeline->DeclPipe("Pipe", {source});
+  auto sink = pipeline->DeclSink("Sink", {pipe});
+
+  source->Finished(context);
+  pipe->DrainHasMore(context);
+  sink->NeedsMore(context);
+  pipe->DrainSync(context);
+  pipe->Error(context, "42");
+
+  this->TestTracePipelineWithUnknownError(context, *pipeline, "42");
+}
+
+// TODO: This case is probably unstable as if the error thread is fast enough then other
+// threads won't emit yield.
+TYPED_TEST(PipelineTaskTest, DrainErrorAfterYield) {
+  pipelang::ImperativeContext context;
+  size_t dop = 4;
+  auto name = "DrainErrorAfterYield";
+  auto pipeline = std::make_unique<pipelang::ImperativePipeline>(name, dop);
+  auto source = pipeline->DeclSource("Source");
+  auto pipe = pipeline->DeclPipe("Pipe", {source});
+  auto sink = pipeline->DeclSink("Sink", {pipe});
+
+  source->Finished(context);
+  pipe->DrainSync(context);
+  pipe->DrainYield(context);
+  pipe->Error(context, "42");
+
+  this->TestTracePipelineWithUnknownError(context, *pipeline, "42");
+}
+
+TYPED_TEST(PipelineTaskTest, DrainErrorAfterYieldBack) {
+  pipelang::ImperativeContext context;
+  size_t dop = 4;
+  auto name = "DrainErrorAfterYield";
+  auto pipeline = std::make_unique<pipelang::ImperativePipeline>(name, dop);
+  auto source = pipeline->DeclSource("Source");
+  auto pipe = pipeline->DeclPipe("Pipe", {source});
+  auto sink = pipeline->DeclSink("Sink", {pipe});
+
+  source->Finished(context);
+  pipe->DrainYield(context);
+  pipe->DrainYieldBack(context);
+  pipe->DrainSync(context);
+  pipe->Error(context, "42");
+
+  this->TestTracePipelineWithUnknownError(context, *pipeline, "42");
+}
+
+TYPED_TEST(PipelineTaskTest, DrainErrorAfterBlocked) {
+  pipelang::ImperativeContext context;
+  size_t dop = 4;
+  auto name = "DrainErrorAfterBlocked";
+  auto pipeline = std::make_unique<pipelang::ImperativePipeline>(name, dop);
+  auto source = pipeline->DeclSource("Source");
+  auto pipe = pipeline->DeclPipe("Pipe", {source});
+  auto sink = pipeline->DeclSink("Sink", {pipe});
+
+  source->Finished(context);
+  pipe->DrainBlocked(context);
+  pipeline->Resume(context, "Pipe");
+  pipe->DrainSync(context);
+  pipe->Error(context, "42");
+
+  this->TestTracePipelineWithUnknownError(context, *pipeline, "42");
+}
+
+TYPED_TEST(PipelineTaskTest, SinkError) {
+  pipelang::ImperativeContext context;
+  size_t dop = 4;
+  auto name = "SinkError";
+  auto pipeline = std::make_unique<pipelang::ImperativePipeline>(name, dop);
+  auto source = pipeline->DeclSource("Source");
+  auto pipe = pipeline->DeclPipe("Pipe", {source});
+  auto sink = pipeline->DeclSink("Sink", {pipe});
+
+  source->HasMore(context);
+  pipe->PipeEven(context);
+  sink->Sync(context);
+  sink->Error(context, "42");
+
+  this->TestTracePipelineWithUnknownError(context, *pipeline, "42");
+}
+
+TYPED_TEST(PipelineTaskTest, SinkErrorAfterNeedsMore) {
+  pipelang::ImperativeContext context;
+  size_t dop = 4;
+  auto name = "SinkErrorAfterNeedsMore";
+  auto pipeline = std::make_unique<pipelang::ImperativePipeline>(name, dop);
+  auto source = pipeline->DeclSource("Source");
+  auto pipe = pipeline->DeclPipe("Pipe", {source});
+  auto sink = pipeline->DeclSink("Sink", {pipe});
+
+  source->HasMore(context);
+  pipe->PipeEven(context);
+  sink->NeedsMore(context);
+  source->HasMore(context);
+  pipe->PipeEven(context);
+  sink->Sync(context);
+  sink->Error(context, "42");
+
+  this->TestTracePipelineWithUnknownError(context, *pipeline, "42");
+}
+
+TYPED_TEST(PipelineTaskTest, SinkErrorAfterBlocked) {
+  pipelang::ImperativeContext context;
+  size_t dop = 4;
+  auto name = "SinkErrorAfterBlocked";
+  auto pipeline = std::make_unique<pipelang::ImperativePipeline>(name, dop);
+  auto source = pipeline->DeclSource("Source");
+  auto pipe = pipeline->DeclPipe("Pipe", {source});
+  auto sink = pipeline->DeclSink("Sink", {pipe});
+
+  source->HasMore(context);
+  pipe->PipeEven(context);
+  sink->Blocked(context);
+  pipeline->Resume(context, "Sink");
+  sink->Sync(context);
+  sink->Error(context, "42");
 
   this->TestTracePipelineWithUnknownError(context, *pipeline, "42");
 }
