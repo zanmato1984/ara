@@ -1511,4 +1511,18 @@ TYPED_TEST(PipelineTaskTest, MultiChannel) {
   this->TestTracePipeline(context, *pipeline);
 }
 
-// TODO: Error/cancel tests.
+TYPED_TEST(PipelineTaskTest, SourceError) {
+  pipelang::ImperativeContext context;
+  size_t dop = 4;
+  auto name = "SourceError";
+  auto pipeline = std::make_unique<pipelang::ImperativePipeline>(name, dop);
+  auto source = pipeline->DeclSource("Source");
+  auto pipe = pipeline->DeclPipe("Pipe", {source});
+  auto sink = pipeline->DeclSink("Sink", {pipe});
+
+  source->Sync(context);
+  source->Error(context, "42", 0);
+  pipeline->ChannelFinished(context);
+
+  this->TestTracePipeline(context, *pipeline);
+}
