@@ -242,7 +242,7 @@ PipelineTask::PipelineTask(const PhysicalPipeline& pipeline, size_t dop)
 }
 
 // TODO: Consider policy for pipeline task channel multiplexing.
-// For example, an eager policy will aggresively multiplex different channels (sources)
+// For example, an eager policy will aggressively multiplex different channels (sources)
 // for sake of performance, whereas a conservative policy will run channels one by one for
 // reducing resource (memory/IO) consumption.
 
@@ -292,7 +292,8 @@ TaskResult PipelineTask::operator()(const PipelineContext& pipeline_context,
   if (all_finished) {
     return TaskStatus::Finished();
   } else if (all_unfinished_blocked && !resumers.empty()) {
-    ARA_ASSIGN_OR_RAISE(auto awaiter, task_context.any_awaiter_factory(resumers));
+    ARA_ASSIGN_OR_RAISE(auto awaiter,
+                        task_context.any_awaiter_factory(std::move(resumers)));
     return TaskStatus::Blocked(std::move(awaiter));
   } else if (!op_result.ok()) {
     return op_result.status();

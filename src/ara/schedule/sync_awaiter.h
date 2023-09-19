@@ -18,14 +18,14 @@ class SyncAwaiter : public task::Awaiter,
 
  private:
   static std::shared_ptr<SyncAwaiter> MakeSyncAwaiter(size_t num_readies,
-                                                      task::Resumers& resumers);
+                                                      task::Resumers resumers);
 
  public:
-  static std::shared_ptr<SyncAwaiter> MakeSingle(task::ResumerPtr&);
+  static std::shared_ptr<SyncAwaiter> MakeSingle(task::ResumerPtr);
 
-  static std::shared_ptr<SyncAwaiter> MakeAny(task::Resumers&);
+  static std::shared_ptr<SyncAwaiter> MakeAny(task::Resumers);
 
-  static std::shared_ptr<SyncAwaiter> MakeAll(task::Resumers&);
+  static std::shared_ptr<SyncAwaiter> MakeAll(task::Resumers);
 
  private:
   size_t num_readies_;

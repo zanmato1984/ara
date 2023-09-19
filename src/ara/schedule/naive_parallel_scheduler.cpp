@@ -22,6 +22,12 @@ using task::TaskId;
 using task::TaskResult;
 using task::TaskStatus;
 
+#define OBSERVE(Method, ...)                                       \
+  if (schedule_context.schedule_observer != nullptr) {             \
+    ARA_RETURN_NOT_OK(schedule_context.schedule_observer->Observe( \
+        &ScheduleObserver::Method, __VA_ARGS__));                  \
+  }
+
 const std::string NaiveParallelHandle::kName = "NaiveParallelHandle";
 
 TaskResult NaiveParallelHandle::DoWait(const ScheduleContext&) { return future_.get(); }
@@ -41,25 +47,21 @@ Result<std::unique_ptr<TaskGroupHandle>> NaiveParallelScheduler::DoSchedule(
     for (size_t i = 0; i < num_tasks; ++i) {
       tasks.push_back(MakeTask(schedule_context, task, task_context, i));
     }
-    return std::async(std::launch::async,
-                      [&, tasks = std::move(tasks)]() mutable -> TaskResult {
-                        std::vector<TaskResult> results;
-                        for (auto& task : tasks) {
-                          results.push_back(task.get());
-                        }
-                        for (auto& result : results) {
-                          ARA_RETURN_NOT_OK(result);
-                        }
-                        if (schedule_context.schedule_observer != nullptr) {
-                          ARA_RETURN_NOT_OK(schedule_context.schedule_observer->Observe(
-                              &ScheduleObserver::OnAllTasksFinished, schedule_context,
-                              task_group, results));
-                        }
-                        if (cont.has_value()) {
-                          return cont.value()(task_context);
-                        }
-                        return TaskStatus::Finished();
-                      });
+    return std::async(
+        std::launch::async, [&, tasks = std::move(tasks)]() mutable -> TaskResult {
+          std::vector<TaskResult> results;
+          for (auto& task : tasks) {
+            results.push_back(task.get());
+          }
+          for (auto& result : results) {
+            ARA_RETURN_NOT_OK(result);
+          }
+          OBSERVE(OnAllTasksFinished, schedule_context, task_group, results);
+          if (cont.has_value()) {
+            return cont.value()(task_context);
+          }
+          return TaskStatus::Finished();
+        });
   };
   auto task_context = MakeTaskContext(schedule_context);
   return std::make_unique<NaiveParallelHandle>(task_group, std::move(task_context),
@@ -96,29 +98,17 @@ NaiveParallelScheduler::ConcreteTask NaiveParallelScheduler::MakeTask(
           bool is_yield = false;
           if (result->IsYield()) {
             is_yield = true;
-            if (schedule_context.schedule_observer != nullptr) {
-              ARA_RETURN_NOT_OK(schedule_context.schedule_observer->Observe(
-                  &ScheduleObserver::OnTaskYield, schedule_context, task, task_id));
-            }
+            OBSERVE(OnTaskYield, schedule_context, task, task_id);
           } else if (result->IsBlocked()) {
-            if (schedule_context.schedule_observer != nullptr) {
-              ARA_RETURN_NOT_OK(schedule_context.schedule_observer->Observe(
-                  &ScheduleObserver::OnTaskBlocked, schedule_context, task, task_id));
-            }
+            OBSERVE(OnTaskBlocked, schedule_context, task, task_id);
             auto awaiter = std::dynamic_pointer_cast<SyncAwaiter>(result->GetAwaiter());
             ARA_CHECK(awaiter != nullptr);
             awaiter->Wait();
-            if (schedule_context.schedule_observer != nullptr) {
-              ARA_RETURN_NOT_OK(schedule_context.schedule_observer->Observe(
-                  &ScheduleObserver::OnTaskResumed, schedule_context, task, task_id));
-            }
+            OBSERVE(OnTaskResumed, schedule_context, task, task_id);
           }
           result = task(task_context, task_id);
           if (is_yield && result.ok() && !result->IsYield()) {
-            if (schedule_context.schedule_observer != nullptr) {
-              ARA_RETURN_NOT_OK(schedule_context.schedule_observer->Observe(
-                  &ScheduleObserver::OnTaskYieldBack, schedule_context, task, task_id));
-            }
+            OBSERVE(OnTaskYieldBack, schedule_context, task, task_id);
           }
         }
         return result;

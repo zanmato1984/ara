@@ -105,6 +105,37 @@ TEST(AsyncAwaiterTest, AnyWaitFirst) {
   future.get();
 }
 
+TEST(AsyncAwaiterTest, AnyReentrantWait) {
+  size_t num_resumers = 1000;
+  folly::CPUThreadPoolExecutor executor(4);
+  size_t lucky = 42;
+  Resumers resumers(num_resumers);
+  for (auto& resumer : resumers) {
+    resumer = std::make_shared<AsyncResumer>();
+  }
+  auto awaiter1 = AsyncAwaiter::MakeAny(resumers);
+  resumers[lucky]->Resume();
+  std::move(awaiter1->GetFuture()).via(&executor).wait();
+  for (size_t i = 0; i < 1000; ++i) {
+    if (i == lucky) {
+      ASSERT_TRUE(resumers[i]->IsResumed());
+    } else {
+      ASSERT_FALSE(resumers[i]->IsResumed());
+    }
+  }
+  resumers[lucky] = std::make_shared<AsyncResumer>();
+  auto awaiter2 = AsyncAwaiter::MakeAny(resumers);
+  resumers[lucky]->Resume();
+  std::move(awaiter2->GetFuture()).via(&executor).wait();
+  for (size_t i = 0; i < 1000; ++i) {
+    if (i == lucky) {
+      ASSERT_TRUE(resumers[i]->IsResumed());
+    } else {
+      ASSERT_FALSE(resumers[i]->IsResumed());
+    }
+  }
+}
+
 TEST(AsyncAwaiterTest, AnyResumeFirst) {
   size_t num_resumers = 1000;
   folly::CPUThreadPoolExecutor executor(4);
