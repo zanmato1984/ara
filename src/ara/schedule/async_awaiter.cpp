@@ -11,7 +11,7 @@ using task::Resumers;
 
 class AsyncSingleAwaiter : public AsyncAwaiter {
  public:
-  explicit AsyncSingleAwaiter(ResumerPtr& resumer)
+  explicit AsyncSingleAwaiter(ResumerPtr resumer)
       : resumer_(std::dynamic_pointer_cast<AsyncResumer>(resumer)) {
     ARA_CHECK(resumer_ != nullptr);
   }
@@ -24,14 +24,20 @@ class AsyncSingleAwaiter : public AsyncAwaiter {
 
 class AsyncAnyAwaiter : public AsyncAwaiter {
  public:
-  explicit AsyncAnyAwaiter(Resumers& resumers) {
+  explicit AsyncAnyAwaiter(Resumers resumers) {
     std::vector<Future> futures;
     for (auto& resumer : resumers) {
       auto casted = std::dynamic_pointer_cast<AsyncResumer>(resumer);
       ARA_CHECK(casted != nullptr);
       futures.push_back(std::move(casted->GetFuture()));
     }
-    future_ = folly::collectAny(futures).defer([](auto&&) {});
+    future_ = folly::collectAny(futures).defer([resumers = std::move(resumers)](auto&&) {
+      for (auto& resumer : resumers) {
+        auto casted = std::dynamic_pointer_cast<AsyncResumer>(resumer);
+        ARA_CHECK(casted != nullptr);
+        casted->Reset();
+      }
+    });
   }
 
   Future& GetFuture() override { return future_; }
@@ -42,7 +48,7 @@ class AsyncAnyAwaiter : public AsyncAwaiter {
 
 class AsyncAllAwaiter : public AsyncAwaiter {
  public:
-  explicit AsyncAllAwaiter(Resumers& resumers) {
+  explicit AsyncAllAwaiter(Resumers resumers) {
     std::vector<Future> futures;
     for (auto& resumer : resumers) {
       auto casted = std::dynamic_pointer_cast<AsyncResumer>(resumer);
@@ -58,16 +64,16 @@ class AsyncAllAwaiter : public AsyncAwaiter {
   Future future_;
 };
 
-std::shared_ptr<AsyncAwaiter> AsyncAwaiter::MakeSingle(ResumerPtr& resumer) {
-  return std::make_shared<AsyncSingleAwaiter>(resumer);
+std::shared_ptr<AsyncAwaiter> AsyncAwaiter::MakeSingle(ResumerPtr resumer) {
+  return std::make_shared<AsyncSingleAwaiter>(std::move(resumer));
 }
 
-std::shared_ptr<AsyncAwaiter> AsyncAwaiter::MakeAny(Resumers& resumers) {
-  return std::make_shared<AsyncAnyAwaiter>(resumers);
+std::shared_ptr<AsyncAwaiter> AsyncAwaiter::MakeAny(Resumers resumers) {
+  return std::make_shared<AsyncAnyAwaiter>(std::move(resumers));
 }
 
-std::shared_ptr<AsyncAwaiter> AsyncAwaiter::MakeAll(Resumers& resumers) {
-  return std::make_shared<AsyncAllAwaiter>(resumers);
+std::shared_ptr<AsyncAwaiter> AsyncAwaiter::MakeAll(Resumers resumers) {
+  return std::make_shared<AsyncAllAwaiter>(std::move(resumers));
 }
 
 }  // namespace ara::schedule

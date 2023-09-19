@@ -292,7 +292,8 @@ TaskResult PipelineTask::operator()(const PipelineContext& pipeline_context,
   if (all_finished) {
     return TaskStatus::Finished();
   } else if (all_unfinished_blocked && !resumers.empty()) {
-    ARA_ASSIGN_OR_RAISE(auto awaiter, task_context.any_awaiter_factory(resumers));
+    ARA_ASSIGN_OR_RAISE(auto awaiter,
+                        task_context.any_awaiter_factory(std::move(resumers)));
     return TaskStatus::Blocked(std::move(awaiter));
   } else if (!op_result.ok()) {
     return op_result.status();

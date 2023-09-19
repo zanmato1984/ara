@@ -10,7 +10,7 @@ using task::ResumerPtr;
 using task::Resumers;
 
 std::shared_ptr<SyncAwaiter> SyncAwaiter::MakeSyncAwaiter(size_t num_readies,
-                                                          Resumers& resumers) {
+                                                          Resumers resumers) {
   auto awaiter = std::make_shared<SyncAwaiter>(num_readies);
   for (auto& resumer : resumers) {
     auto casted = std::dynamic_pointer_cast<SyncResumer>(resumer);
@@ -24,17 +24,17 @@ std::shared_ptr<SyncAwaiter> SyncAwaiter::MakeSyncAwaiter(size_t num_readies,
   return awaiter;
 }
 
-std::shared_ptr<SyncAwaiter> SyncAwaiter::MakeSingle(ResumerPtr& resumer) {
-  Resumers resumers{resumer};
-  return MakeSyncAwaiter(1, resumers);
+std::shared_ptr<SyncAwaiter> SyncAwaiter::MakeSingle(ResumerPtr resumer) {
+  Resumers resumers{std::move(resumer)};
+  return MakeSyncAwaiter(1, std::move(resumers));
 }
 
-std::shared_ptr<SyncAwaiter> SyncAwaiter::MakeAny(Resumers& resumers) {
-  return MakeSyncAwaiter(1, resumers);
+std::shared_ptr<SyncAwaiter> SyncAwaiter::MakeAny(Resumers resumers) {
+  return MakeSyncAwaiter(1, std::move(resumers));
 }
 
-std::shared_ptr<SyncAwaiter> SyncAwaiter::MakeAll(Resumers& resumers) {
-  return MakeSyncAwaiter(resumers.size(), resumers);
+std::shared_ptr<SyncAwaiter> SyncAwaiter::MakeAll(Resumers resumers) {
+  return MakeSyncAwaiter(resumers.size(), std::move(resumers));
 }
 
 }  // namespace ara::schedule

@@ -13,9 +13,9 @@ class AsyncAwaiter : public task::Awaiter {
  public:
   virtual Future& GetFuture() = 0;
 
-  static std::shared_ptr<AsyncAwaiter> MakeSingle(task::ResumerPtr&);
-  static std::shared_ptr<AsyncAwaiter> MakeAny(task::Resumers&);
-  static std::shared_ptr<AsyncAwaiter> MakeAll(task::Resumers&);
+  static std::shared_ptr<AsyncAwaiter> MakeSingle(task::ResumerPtr);
+  static std::shared_ptr<AsyncAwaiter> MakeAny(task::Resumers);
+  static std::shared_ptr<AsyncAwaiter> MakeAll(task::Resumers);
 };
 
 }  // namespace ara::schedule

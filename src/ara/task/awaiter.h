@@ -10,8 +10,8 @@ class Awaiter {
   virtual ~Awaiter() = default;
 };
 using AwaiterPtr = std::shared_ptr<Awaiter>;
-using SingleAwaiterFactory = std::function<Result<AwaiterPtr>(ResumerPtr&)>;
-using AnyAwaiterFactory = std::function<Result<AwaiterPtr>(Resumers&)>;
-using AllAwaiterFactory = std::function<Result<AwaiterPtr>(Resumers&)>;
+using SingleAwaiterFactory = std::function<Result<AwaiterPtr>(ResumerPtr)>;
+using AnyAwaiterFactory = std::function<Result<AwaiterPtr>(Resumers)>;
+using AllAwaiterFactory = std::function<Result<AwaiterPtr>(Resumers)>;
 
 }  // namespace ara::task
