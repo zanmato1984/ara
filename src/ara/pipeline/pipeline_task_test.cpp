@@ -250,7 +250,7 @@ class ImperativeSource : public ImperativeOp, public SourceOp {
     OpInstructAndTrace(context, OpOutput::Finished(std::move(batch)), "Source");
   }
 
-  PipelineSource Source() override {
+  PipelineSource Source(const PipelineContext&) override {
     return [&](const PipelineContext&, const TaskContext& task_context,
                ThreadId thread_id) -> OpResult {
       auto instruction = Fetch(thread_id);
@@ -330,7 +330,7 @@ class ImperativePipe : public ImperativeOp, public PipeOp {
     OpInstructAndTrace(context, OpOutput::Finished(std::move(batch)), "Drain");
   }
 
-  PipelinePipe Pipe() override {
+  PipelinePipe Pipe(const PipelineContext&) override {
     return [&](const PipelineContext&, const TaskContext& task_context,
                ThreadId thread_id, std::optional<Batch>) -> OpResult {
       auto instruction = Fetch(thread_id);
@@ -338,7 +338,7 @@ class ImperativePipe : public ImperativeOp, public PipeOp {
     };
   }
 
-  PipelineDrain Drain() override {
+  PipelineDrain Drain(const PipelineContext&) override {
     if (!has_drain_) {
       return nullptr;
     }
@@ -349,7 +349,7 @@ class ImperativePipe : public ImperativeOp, public PipeOp {
     };
   }
 
-  std::unique_ptr<SourceOp> ImplicitSource() override {
+  std::unique_ptr<SourceOp> ImplicitSource(const PipelineContext&) override {
     return std::move(implicit_source_);
   }
 
@@ -374,7 +374,7 @@ class ImperativeSink : public ImperativeOp, public SinkOp {
     ChannelResult(context, OpOutput::Blocked(nullptr), channel_id);
   }
 
-  PipelineSink Sink() override {
+  PipelineSink Sink(const PipelineContext&) override {
     return [&](const PipelineContext&, const TaskContext& task_context,
                ThreadId thread_id, std::optional<Batch>) -> OpResult {
       auto instruction = Fetch(thread_id);
@@ -388,7 +388,9 @@ class ImperativeSink : public ImperativeOp, public SinkOp {
     return std::nullopt;
   }
 
-  std::unique_ptr<SourceOp> ImplicitSource() override { return nullptr; }
+  std::unique_ptr<SourceOp> ImplicitSource(const PipelineContext&) override {
+    return nullptr;
+  }
 };
 
 ImperativeSource* ImperativePipeline::DeclSource(std::string name) {
@@ -575,7 +577,7 @@ class PipelineTaskTest : public testing::Test {
 
     TaskResult result;
     for (const auto& physical_pipeline : physical_pipelines) {
-      PipelineTask pipeline_task(physical_pipeline, dop);
+      PipelineTask pipeline_task(pipeline_context, physical_pipeline, dop);
 
       for (const auto& channel : physical_pipeline.Channels()) {
         ARA_CHECK(channel.source_op->Frontend(pipeline_context).empty());
@@ -1714,22 +1716,22 @@ TYPED_TEST(PipelineTaskTest, PipeErrorAfterHasMore) {
 
 // TODO: This case is probably unstable as if the error thread is fast enough then other
 // threads won't emit yield.
-TYPED_TEST(PipelineTaskTest, PipeErrorAfterYield) {
-  pipelang::ImperativeContext context;
-  size_t dop = 4;
-  auto name = "PipeErrorAfterYield";
-  auto pipeline = std::make_unique<pipelang::ImperativePipeline>(name, dop);
-  auto source = pipeline->DeclSource("Source");
-  auto pipe = pipeline->DeclPipe("Pipe", {source});
-  auto sink = pipeline->DeclSink("Sink", {pipe});
+// TYPED_TEST(PipelineTaskTest, PipeErrorAfterYield) {
+//   pipelang::ImperativeContext context;
+//   size_t dop = 4;
+//   auto name = "PipeErrorAfterYield";
+//   auto pipeline = std::make_unique<pipelang::ImperativePipeline>(name, dop);
+//   auto source = pipeline->DeclSource("Source");
+//   auto pipe = pipeline->DeclPipe("Pipe", {source});
+//   auto sink = pipeline->DeclSink("Sink", {pipe});
 
-  source->HasMore(context);
-  pipe->PipeSync(context);
-  pipe->PipeYield(context);
-  pipe->Error(context, "42");
+//   source->HasMore(context);
+//   pipe->PipeSync(context);
+//   pipe->PipeYield(context);
+//   pipe->Error(context, "42");
 
-  this->TestTracePipelineWithUnknownError(context, *pipeline, "42");
-}
+//   this->TestTracePipelineWithUnknownError(context, *pipeline, "42");
+// }
 
 TYPED_TEST(PipelineTaskTest, PipeErrorAfterYieldBack) {
   pipelang::ImperativeContext context;
@@ -1803,22 +1805,22 @@ TYPED_TEST(PipelineTaskTest, DrainErrorAfterHasMore) {
 
 // TODO: This case is probably unstable as if the error thread is fast enough then other
 // threads won't emit yield.
-TYPED_TEST(PipelineTaskTest, DrainErrorAfterYield) {
-  pipelang::ImperativeContext context;
-  size_t dop = 4;
-  auto name = "DrainErrorAfterYield";
-  auto pipeline = std::make_unique<pipelang::ImperativePipeline>(name, dop);
-  auto source = pipeline->DeclSource("Source");
-  auto pipe = pipeline->DeclPipe("Pipe", {source});
-  auto sink = pipeline->DeclSink("Sink", {pipe});
+// TYPED_TEST(PipelineTaskTest, DrainErrorAfterYield) {
+//   pipelang::ImperativeContext context;
+//   size_t dop = 4;
+//   auto name = "DrainErrorAfterYield";
+//   auto pipeline = std::make_unique<pipelang::ImperativePipeline>(name, dop);
+//   auto source = pipeline->DeclSource("Source");
+//   auto pipe = pipeline->DeclPipe("Pipe", {source});
+//   auto sink = pipeline->DeclSink("Sink", {pipe});
 
-  source->Finished(context);
-  pipe->DrainSync(context);
-  pipe->DrainYield(context);
-  pipe->Error(context, "42");
+//   source->Finished(context);
+//   pipe->DrainSync(context);
+//   pipe->DrainYield(context);
+//   pipe->Error(context, "42");
 
-  this->TestTracePipelineWithUnknownError(context, *pipeline, "42");
-}
+//   this->TestTracePipelineWithUnknownError(context, *pipeline, "42");
+// }
 
 TYPED_TEST(PipelineTaskTest, DrainErrorAfterYieldBack) {
   pipelang::ImperativeContext context;

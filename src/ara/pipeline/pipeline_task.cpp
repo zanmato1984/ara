@@ -14,18 +14,21 @@ using task::TaskContext;
 using task::TaskResult;
 using task::TaskStatus;
 
-PipelineTask::Channel::Channel(const PipelineTask& task, size_t channel_id, size_t dop)
-    : task_(task),
+PipelineTask::Channel::Channel(const PipelineContext& pipeline_context,
+                               const PipelineTask& task, size_t channel_id, size_t dop)
+    : pipeline_context_(pipeline_context),
+      task_(task),
       channel_id_(channel_id),
       dop_(dop),
-      source_(task_.pipeline_.Channels()[channel_id].source_op->Source()),
+      source_(task_.pipeline_.Channels()[channel_id].source_op->Source(pipeline_context)),
       pipes_(task_.pipeline_.Channels()[channel_id].pipe_ops.size()),
-      sink_(task_.pipeline_.Channels()[channel_id].sink_op->Sink()),
+      sink_(task_.pipeline_.Channels()[channel_id].sink_op->Sink(pipeline_context)),
       thread_locals_(dop),
       cancelled_(false) {
   const auto& pipe_ops = task_.pipeline_.Channels()[channel_id].pipe_ops;
   std::transform(pipe_ops.begin(), pipe_ops.end(), pipes_.begin(), [&](auto* pipe_op) {
-    return std::make_pair(pipe_op->Pipe(), pipe_op->Drain());
+    return std::make_pair(pipe_op->Pipe(pipeline_context),
+                          pipe_op->Drain(pipeline_context));
   });
   std::vector<size_t> drains;
   for (size_t i = 0; i < pipes_.size(); ++i) {
@@ -231,10 +234,11 @@ OpResult PipelineTask::Channel::Sink(const PipelineContext& pipeline_context,
   return result;
 }
 
-PipelineTask::PipelineTask(const PhysicalPipeline& pipeline, size_t dop)
+PipelineTask::PipelineTask(const PipelineContext& pipeline_context,
+                           const PhysicalPipeline& pipeline, size_t dop)
     : Meta("Task of " + pipeline.Name(), pipeline.Desc()), pipeline_(pipeline) {
   for (size_t i = 0; i < pipeline_.Channels().size(); ++i) {
-    channels_.emplace_back(*this, i, dop);
+    channels_.emplace_back(pipeline_context, *this, i, dop);
   }
   for (size_t i = 0; i < dop; ++i) {
     thread_locals_.emplace_back(channels_.size());

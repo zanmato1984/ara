@@ -4,7 +4,9 @@ set(CMAKE_CXX_STANDARD 20)
 
 set(ARA_PIPELINE_SRC
         "logical_pipeline.cpp"
+        "op/hash_join.cpp"
         "op/hash_join_build.cpp"
+        "op/hash_join_probe.cpp"
         "pipeline_observer.cpp"
         "pipeline_task.cpp"
         "physical_pipeline.cpp")

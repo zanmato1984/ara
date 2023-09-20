@@ -37,7 +37,7 @@ class PipelineCompiler {
   }
 
  private:
-  void ExtractTopology(const PipelineContext&) {
+  void ExtractTopology(const PipelineContext& pipeline_context) {
     std::unordered_map<PipeOp*, SourceOp*> pipe_source_map;
     auto sink = logical_pipeline_.SinkOp();
     for (auto& channel : logical_pipeline_.Channels()) {
@@ -48,7 +48,7 @@ class PipelineCompiler {
       for (size_t i = 0; i < channel.pipe_ops.size(); ++i) {
         auto pipe = channel.pipe_ops[i];
         if (pipe_source_map.count(pipe) == 0) {
-          if (auto implicit_source_up = pipe->ImplicitSource();
+          if (auto implicit_source_up = pipe->ImplicitSource(pipeline_context);
               implicit_source_up != nullptr) {
             auto implicit_source = implicit_source_up.get();
             pipe_source_map.emplace(pipe, implicit_source);

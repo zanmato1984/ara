@@ -15,7 +15,7 @@ class FooSource : public SourceOp {
  public:
   FooSource() : SourceOp("FooSource", "Do nothing") {}
 
-  PipelineSource Source() override {
+  PipelineSource Source(const PipelineContext&) override {
     return [](const PipelineContext&, const TaskContext&, ThreadId) -> OpResult {
       return OpOutput::Finished();
     };
@@ -36,14 +36,14 @@ class FooPipe : public PipeOp {
         drain_(std::move(drain)),
         implicit_source_(std::move(implicit_source)) {}
 
-  PipelinePipe Pipe() override {
+  PipelinePipe Pipe(const PipelineContext&) override {
     return [](const PipelineContext&, const TaskContext&, ThreadId,
               std::optional<Batch>) -> OpResult { return OpOutput::PipeEven({}); };
   }
 
-  PipelineDrain Drain() override { return drain_; }
+  PipelineDrain Drain(const PipelineContext&) override { return drain_; }
 
-  std::unique_ptr<SourceOp> ImplicitSource() override {
+  std::unique_ptr<SourceOp> ImplicitSource(const PipelineContext&) override {
     return std::move(implicit_source_);
   }
 
@@ -56,7 +56,7 @@ class FooSink : public SinkOp {
  public:
   FooSink() : SinkOp("FooSink", "Do nothing") {}
 
-  PipelineSink Sink() override {
+  PipelineSink Sink(const PipelineContext&) override {
     return [](const PipelineContext&, const TaskContext&, ThreadId,
               std::optional<Batch>) -> OpResult { return OpOutput::PipeSinkNeedsMore(); };
   }
@@ -67,7 +67,9 @@ class FooSink : public SinkOp {
     return std::nullopt;
   }
 
-  std::unique_ptr<SourceOp> ImplicitSource() override { return nullptr; }
+  std::unique_ptr<SourceOp> ImplicitSource(const PipelineContext&) override {
+    return nullptr;
+  }
 };
 
 TEST(CompilePipelineTest, EmptyPipeline) {
