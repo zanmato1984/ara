@@ -26,3 +26,7 @@ add_ara_test(ara-pipeline-compile-test ara-pipeline "${ARA_PIPELINE_COMPILE_TEST
 set(ARA_PIPELINE_TASK_TEST_SRC
         "pipeline_task_test.cpp")
 add_ara_test(ara-pipeline-task-test ara-pipeline "${ARA_PIPELINE_TASK_TEST_SRC}")
+
+set(ARA_HASH_JOIN_BUILD_TEST_SRC
+        "op/hash_join_build_test.cpp")
+add_ara_test(ara-hash-join-build-test ara-pipeline "${ARA_HASH_JOIN_BUILD_TEST_SRC}")
