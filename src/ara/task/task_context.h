@@ -15,7 +15,7 @@ namespace task {
 class TaskObserver;
 
 struct TaskContext {
-  const QueryContext* query_context;
+  const QueryContext* query_ctx;
   ResumerFactory resumer_factory;
   SingleAwaiterFactory single_awaiter_factory;
   AnyAwaiterFactory any_awaiter_factory;

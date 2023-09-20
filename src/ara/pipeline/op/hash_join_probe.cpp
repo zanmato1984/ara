@@ -30,7 +30,7 @@ bool NeedToScan(JoinType join_type) {
 
 class ProbeProcessor {
  public:
-  Status Init(const PipelineContext& pipeline_context, HashJoin* hash_join) {
+  Status Init(const PipelineContext& pipeline_ctx, HashJoin* hash_join) {
     hardware_flags_ = hash_join->hardware_flags;
     pool_ = hash_join->pool;
 
@@ -43,7 +43,7 @@ class ProbeProcessor {
     swiss_table_ = hash_join->hash_table.keys()->swiss_table();
 
     size_t dop = hash_join->dop;
-    auto minibatch_length = pipeline_context.query_context->options.minibatch_length;
+    auto minibatch_length = pipeline_ctx.query_ctx->options.minibatch_length;
     thread_locals_.resize(dop);
     for (size_t i = 0; i < dop; ++i) {
       thread_locals_[i].materialize = &hash_join->materialize[i];
@@ -59,7 +59,7 @@ class ProbeProcessor {
     return Status::OK();
   }
 
-  OpResult Probe(const PipelineContext& pipeline_context, const TaskContext& task_context,
+  OpResult Probe(const PipelineContext& pipeline_ctx, const TaskContext& task_ctx,
                  ThreadId thread_id, std::optional<Batch> input,
                  TempVectorStack* temp_stack,
                  std::vector<KeyColumnArray>* temp_column_arrays) {
@@ -69,47 +69,44 @@ class ProbeProcessor {
       case JoinType::LEFT_OUTER:
       case JoinType::RIGHT_OUTER:
       case JoinType::FULL_OUTER: {
-        return Probe(
-            pipeline_context, task_context, thread_id, std::move(input), temp_stack,
-            temp_column_arrays,
-            [&](const PipelineContext& pipeline_context, const TaskContext& task_context,
-                ThreadId thread_id, TempVectorStack* temp_stack,
-                std::vector<KeyColumnArray>* temp_column_arrays,
-                std::optional<Batch>& output, State& state_next) -> Status {
-              return InnerOuter(pipeline_context, task_context, thread_id, temp_stack,
-                                temp_column_arrays, output, state_next);
-            });
+        return Probe(pipeline_ctx, task_ctx, thread_id, std::move(input), temp_stack,
+                     temp_column_arrays,
+                     [&](const PipelineContext& pipeline_ctx, const TaskContext& task_ctx,
+                         ThreadId thread_id, TempVectorStack* temp_stack,
+                         std::vector<KeyColumnArray>* temp_column_arrays,
+                         std::optional<Batch>& output, State& state_next) -> Status {
+                       return InnerOuter(pipeline_ctx, task_ctx, thread_id, temp_stack,
+                                         temp_column_arrays, output, state_next);
+                     });
       }
       case JoinType::LEFT_SEMI:
       case JoinType::LEFT_ANTI: {
-        return Probe(
-            pipeline_context, task_context, thread_id, std::move(input), temp_stack,
-            temp_column_arrays,
-            [&](const PipelineContext& pipeline_context, const TaskContext& task_context,
-                ThreadId thread_id, TempVectorStack* temp_stack,
-                std::vector<KeyColumnArray>* temp_column_arrays,
-                std::optional<Batch>& output, State& state_next) -> Status {
-              return LeftSemiAnti(pipeline_context, task_context, thread_id, temp_stack,
-                                  temp_column_arrays, output, state_next);
-            });
+        return Probe(pipeline_ctx, task_ctx, thread_id, std::move(input), temp_stack,
+                     temp_column_arrays,
+                     [&](const PipelineContext& pipeline_ctx, const TaskContext& task_ctx,
+                         ThreadId thread_id, TempVectorStack* temp_stack,
+                         std::vector<KeyColumnArray>* temp_column_arrays,
+                         std::optional<Batch>& output, State& state_next) -> Status {
+                       return LeftSemiAnti(pipeline_ctx, task_ctx, thread_id, temp_stack,
+                                           temp_column_arrays, output, state_next);
+                     });
       }
       case JoinType::RIGHT_SEMI:
       case JoinType::RIGHT_ANTI: {
-        return Probe(
-            pipeline_context, task_context, thread_id, std::move(input), temp_stack,
-            temp_column_arrays,
-            [&](const PipelineContext& pipeline_context, const TaskContext& task_context,
-                ThreadId thread_id, TempVectorStack* temp_stack,
-                std::vector<KeyColumnArray>* temp_column_arrays,
-                std::optional<Batch>& output, State& state_next) -> Status {
-              return RightSemiAnti(pipeline_context, task_context, thread_id, temp_stack,
-                                   temp_column_arrays, output, state_next);
-            });
+        return Probe(pipeline_ctx, task_ctx, thread_id, std::move(input), temp_stack,
+                     temp_column_arrays,
+                     [&](const PipelineContext& pipeline_ctx, const TaskContext& task_ctx,
+                         ThreadId thread_id, TempVectorStack* temp_stack,
+                         std::vector<KeyColumnArray>* temp_column_arrays,
+                         std::optional<Batch>& output, State& state_next) -> Status {
+                       return RightSemiAnti(pipeline_ctx, task_ctx, thread_id, temp_stack,
+                                            temp_column_arrays, output, state_next);
+                     });
       }
     }
   }
 
-  OpResult Drain(const PipelineContext& pipeline_context, const TaskContext& task_context,
+  OpResult Drain(const PipelineContext& pipeline_ctx, const TaskContext& task_ctx,
                  ThreadId thread_id) {
     if (NeedToScan(join_type_)) {
       // No need to drain now, scan will output the remaining rows in materialize.
@@ -178,7 +175,7 @@ class ProbeProcessor {
       const PipelineContext&, const TaskContext&, ThreadId, TempVectorStack*,
       std::vector<KeyColumnArray>*, std::optional<Batch>&, State&)>;
 
-  OpResult Probe(const PipelineContext& pipeline_context, const TaskContext& task_context,
+  OpResult Probe(const PipelineContext& pipeline_ctx, const TaskContext& task_ctx,
                  ThreadId thread_id, std::optional<Batch> input,
                  TempVectorStack* temp_stack,
                  std::vector<KeyColumnArray>* temp_column_arrays, const JoinFn& join_fn) {
@@ -204,7 +201,7 @@ class ProbeProcessor {
         }
 
         // Process input.
-        ARA_RETURN_NOT_OK(join_fn(pipeline_context, task_context, thread_id, temp_stack,
+        ARA_RETURN_NOT_OK(join_fn(pipeline_ctx, task_ctx, thread_id, temp_stack,
                                   temp_column_arrays, output_batch, state_next));
 
         break;
@@ -215,7 +212,7 @@ class ProbeProcessor {
         ARA_CHECK(thread_locals_[thread_id].input.has_value());
 
         // Process input.
-        ARA_RETURN_NOT_OK(join_fn(pipeline_context, task_context, thread_id, temp_stack,
+        ARA_RETURN_NOT_OK(join_fn(pipeline_ctx, task_ctx, thread_id, temp_stack,
                                   temp_column_arrays, output_batch, state_next));
 
         break;
@@ -247,13 +244,11 @@ class ProbeProcessor {
     return std::move(op_output);
   }
 
-  Status InnerOuter(const PipelineContext& pipeline_context,
-                    const TaskContext& task_context, ThreadId thread_id,
-                    TempVectorStack* temp_stack,
+  Status InnerOuter(const PipelineContext& pipeline_ctx, const TaskContext& task_ctx,
+                    ThreadId thread_id, TempVectorStack* temp_stack,
                     std::vector<KeyColumnArray>* temp_column_arrays,
                     std::optional<Batch>& output, State& state_next) {
-    size_t pipe_max_batch_length =
-        pipeline_context.query_context->options.pipe_max_batch_length;
+    size_t pipe_max_batch_length = pipeline_ctx.query_ctx->options.pipe_max_batch_length;
     int num_rows = static_cast<int>(thread_locals_[thread_id].input->batch.length);
     state_next = State::CLEAN;
     bool match_has_more_last = thread_locals_[thread_id].state == State::MATCH_HAS_MORE;
@@ -413,13 +408,11 @@ class ProbeProcessor {
     return Status::OK();
   }
 
-  Status LeftSemiAnti(const PipelineContext& pipeline_context,
-                      const TaskContext& task_context, ThreadId thread_id,
-                      TempVectorStack* temp_stack,
+  Status LeftSemiAnti(const PipelineContext& pipeline_ctx, const TaskContext& task_ctx,
+                      ThreadId thread_id, TempVectorStack* temp_stack,
                       std::vector<KeyColumnArray>* temp_column_arrays,
                       std::optional<Batch>& output, State& state_next) {
-    size_t pipe_max_batch_length =
-        pipeline_context.query_context->options.pipe_max_batch_length;
+    size_t pipe_max_batch_length = pipeline_ctx.query_ctx->options.pipe_max_batch_length;
     int num_rows = static_cast<int>(thread_locals_[thread_id].input->batch.length);
     state_next = State::CLEAN;
 
@@ -501,9 +494,8 @@ class ProbeProcessor {
     return Status::OK();
   }
 
-  Status RightSemiAnti(const PipelineContext& pipeline_context,
-                       const TaskContext& task_context, ThreadId thread_id,
-                       TempVectorStack* temp_stack,
+  Status RightSemiAnti(const PipelineContext& pipeline_ctx, const TaskContext& task_ctx,
+                       ThreadId thread_id, TempVectorStack* temp_stack,
                        std::vector<KeyColumnArray>* temp_column_arrays,
                        std::optional<Batch>& output, State& state_next) {
     int num_rows = static_cast<int>(thread_locals_[thread_id].input->batch.length);
@@ -566,7 +558,7 @@ class ProbeProcessor {
 
 class ScanProcessor {
  public:
-  Status Init(const PipelineContext& pipeline_context, HashJoin* hash_join) {
+  Status Init(const PipelineContext& pipeline_ctx, HashJoin* hash_join) {
     dop_ = hash_join->dop;
     join_type_ = hash_join->join_type;
     hash_table_ = &hash_join->hash_table;
@@ -587,12 +579,12 @@ class ScanProcessor {
     return TaskStatus::Finished();
   }
 
-  OpResult Scan(const PipelineContext& pipeline_context, ThreadId thread_id,
+  OpResult Scan(const PipelineContext& pipeline_ctx, ThreadId thread_id,
                 TempVectorStack* temp_stack) {
     // Should we output matches or non-matches?
     //
     size_t source_max_batch_length =
-        pipeline_context.query_context->options.source_max_batch_length;
+        pipeline_ctx.query_ctx->options.source_max_batch_length;
     bool bit_to_output = (join_type_ == JoinType::RIGHT_SEMI);
 
     int64_t start_row =
@@ -690,7 +682,7 @@ class ScanProcessor {
     }
 
     if (!output.has_value()) {
-      return Scan(pipeline_context, thread_id, temp_stack);
+      return Scan(pipeline_ctx, thread_id, temp_stack);
     } else {
       return OpOutput::SourcePipeHasMore(std::move(output.value()));
     }
@@ -719,18 +711,18 @@ class HashJoinScanSource : public SourceOp {
   HashJoinScanSource(std::string name, std::string desc)
       : SourceOp(std::move(name), std::move(desc)) {}
 
-  Status Init(const PipelineContext& pipeline_context,
+  Status Init(const PipelineContext& pipeline_ctx,
               std::shared_ptr<detail::HashJoin> hash_join) {
     hash_join_ = std::move(hash_join);
     ctx_ = hash_join_->ctx;
-    return scan_processor_.Init(pipeline_context, hash_join_.get());
+    return scan_processor_.Init(pipeline_ctx, hash_join_.get());
   }
 
   PipelineSource Source(const PipelineContext&) override {
-    return [&](const PipelineContext& pipeline_context, const TaskContext& task_context,
+    return [&](const PipelineContext& pipeline_ctx, const TaskContext& task_ctx,
                ThreadId thread_id) -> OpResult {
       ARA_ASSIGN_OR_RAISE(TempVectorStack * temp_stack, ctx_->GetTempStack(thread_id));
-      return scan_processor_.Scan(pipeline_context, thread_id, temp_stack);
+      return scan_processor_.Scan(pipeline_ctx, thread_id, temp_stack);
     };
   }
 
@@ -762,37 +754,37 @@ HashJoinProbe::HashJoinProbe(std::string name, std::string desc)
 
 HashJoinProbe::~HashJoinProbe() = default;
 
-Status HashJoinProbe::Init(const PipelineContext& pipeline_context,
+Status HashJoinProbe::Init(const PipelineContext& pipeline_ctx,
                            std::shared_ptr<detail::HashJoin> hash_join) {
   hash_join_ = std::move(hash_join);
-  return probe_processor_->Init(pipeline_context, hash_join_.get());
+  return probe_processor_->Init(pipeline_ctx, hash_join_.get());
 }
 
 PipelinePipe HashJoinProbe::Pipe(const PipelineContext&) {
-  return [&](const PipelineContext& pipeline_context, const TaskContext& task_context,
+  return [&](const PipelineContext& pipeline_ctx, const TaskContext& task_ctx,
              ThreadId thread_id, std::optional<Batch> batch) -> OpResult {
     ARA_ASSIGN_OR_RAISE(TempVectorStack * temp_stack, ctx_->GetTempStack(thread_id));
     auto temp_column_arrays = &thread_locals_[thread_id].temp_column_arrays;
-    return probe_processor_->Probe(pipeline_context, task_context, thread_id,
-                                   std::move(batch), temp_stack, temp_column_arrays);
+    return probe_processor_->Probe(pipeline_ctx, task_ctx, thread_id, std::move(batch),
+                                   temp_stack, temp_column_arrays);
   };
 }
 
 PipelineDrain HashJoinProbe::Drain(const PipelineContext&) {
-  return [&](const PipelineContext& pipeline_context, const TaskContext& task_context,
+  return [&](const PipelineContext& pipeline_ctx, const TaskContext& task_ctx,
              ThreadId thread_id) {
-    return probe_processor_->Drain(pipeline_context, task_context, thread_id);
+    return probe_processor_->Drain(pipeline_ctx, task_ctx, thread_id);
   };
 }
 
 std::unique_ptr<SourceOp> HashJoinProbe::ImplicitSource(
-    const PipelineContext& pipeline_context) {
+    const PipelineContext& pipeline_ctx) {
   if (!detail::NeedToScan(join_type_)) {
     return nullptr;
   }
   std::unique_ptr<HashJoinScanSource> scan_source =
       std::make_unique<HashJoinScanSource>("HashJoinScanSource", "");
-  ARA_CHECK_OK(scan_source->Init(pipeline_context, hash_join_));
+  ARA_CHECK_OK(scan_source->Init(pipeline_ctx, hash_join_));
   return scan_source;
 }
 

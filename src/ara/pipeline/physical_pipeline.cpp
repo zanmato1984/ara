@@ -30,10 +30,10 @@ class PipelineCompiler {
   PipelineCompiler(const LogicalPipeline& logical_pipeline)
       : logical_pipeline_(logical_pipeline) {}
 
-  PhysicalPipelines Compile(const PipelineContext& context) && {
-    ExtractTopology(context);
-    SortTopology(context);
-    return BuildPhysicalPipelines(context);
+  PhysicalPipelines Compile(const PipelineContext& ctx) && {
+    ExtractTopology(ctx);
+    SortTopology(ctx);
+    return BuildPhysicalPipelines(ctx);
   }
 
  private:
@@ -84,7 +84,7 @@ class PipelineCompiler {
     }
   }
 
-  PhysicalPipelines BuildPhysicalPipelines(const PipelineContext& context) {
+  PhysicalPipelines BuildPhysicalPipelines(const PipelineContext& ctx) {
     std::vector<PhysicalPipeline> physical_pipelines;
     for (auto& [id, physical_info] : physical_pipelines_) {
       auto sources_keepalive = std::move(physical_info.first);
@@ -116,9 +116,9 @@ class PipelineCompiler {
 
 }  // namespace
 
-PhysicalPipelines CompilePipeline(const PipelineContext& context,
+PhysicalPipelines CompilePipeline(const PipelineContext& ctx,
                                   const LogicalPipeline& logical_pipeline) {
-  return PipelineCompiler(logical_pipeline).Compile(context);
+  return PipelineCompiler(logical_pipeline).Compile(ctx);
 }
 
 }  // namespace ara::pipeline

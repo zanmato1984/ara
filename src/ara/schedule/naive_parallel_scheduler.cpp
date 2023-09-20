@@ -22,10 +22,10 @@ using task::TaskId;
 using task::TaskResult;
 using task::TaskStatus;
 
-#define OBSERVE(Method, ...)                                       \
-  if (schedule_context.schedule_observer != nullptr) {             \
-    ARA_RETURN_NOT_OK(schedule_context.schedule_observer->Observe( \
-        &ScheduleObserver::Method, __VA_ARGS__));                  \
+#define OBSERVE(Method, ...)                                                             \
+  if (schedule_ctx.schedule_observer != nullptr) {                                       \
+    ARA_RETURN_NOT_OK(schedule_ctx.schedule_observer->Observe(&ScheduleObserver::Method, \
+                                                              __VA_ARGS__));             \
   }
 
 const std::string NaiveParallelHandle::kName = "NaiveParallelHandle";
@@ -37,15 +37,15 @@ const std::string NaiveParallelScheduler::kDesc =
     "Scheduler that use naive std::thread for each task";
 
 Result<std::unique_ptr<TaskGroupHandle>> NaiveParallelScheduler::DoSchedule(
-    const ScheduleContext& schedule_context, const TaskGroup& task_group) {
+    const ScheduleContext& schedule_ctx, const TaskGroup& task_group) {
   auto& task = task_group.GetTask();
   auto num_tasks = task_group.NumTasks();
   auto& cont = task_group.GetContinuation();
 
-  auto make_future = [&](const TaskContext& task_context) {
+  auto make_future = [&](const TaskContext& task_ctx) {
     std::vector<ConcreteTask> tasks;
     for (size_t i = 0; i < num_tasks; ++i) {
-      tasks.push_back(MakeTask(schedule_context, task, task_context, i));
+      tasks.push_back(MakeTask(schedule_ctx, task, task_ctx, i));
     }
     return std::async(
         std::launch::async, [&, tasks = std::move(tasks)]() mutable -> TaskResult {
@@ -56,15 +56,15 @@ Result<std::unique_ptr<TaskGroupHandle>> NaiveParallelScheduler::DoSchedule(
           for (auto& result : results) {
             ARA_RETURN_NOT_OK(result);
           }
-          OBSERVE(OnAllTasksFinished, schedule_context, task_group, results);
+          OBSERVE(OnAllTasksFinished, schedule_ctx, task_group, results);
           if (cont.has_value()) {
-            return cont.value()(task_context);
+            return cont.value()(task_ctx);
           }
           return TaskStatus::Finished();
         });
   };
-  auto task_context = MakeTaskContext(schedule_context);
-  return std::make_unique<NaiveParallelHandle>(task_group, std::move(task_context),
+  auto task_ctx = MakeTaskContext(schedule_ctx);
+  return std::make_unique<NaiveParallelHandle>(task_group, std::move(task_ctx),
                                                std::move(make_future));
 }
 
@@ -88,27 +88,26 @@ AllAwaiterFactory NaiveParallelScheduler::MakeAllAwaiterFactgory(
 }
 
 NaiveParallelScheduler::ConcreteTask NaiveParallelScheduler::MakeTask(
-    const ScheduleContext& schedule_context, const Task& task,
-    const TaskContext& task_context, TaskId task_id) const {
+    const ScheduleContext& schedule_ctx, const Task& task, const TaskContext& task_ctx,
+    TaskId task_id) const {
   return std::async(
-      std::launch::async,
-      [&schedule_context, &task, &task_context, task_id]() -> TaskResult {
+      std::launch::async, [&schedule_ctx, &task, &task_ctx, task_id]() -> TaskResult {
         TaskResult result = TaskStatus::Continue();
         while (result.ok() && !result->IsFinished() && !result->IsCancelled()) {
           bool is_yield = false;
           if (result->IsYield()) {
             is_yield = true;
-            OBSERVE(OnTaskYield, schedule_context, task, task_id);
+            OBSERVE(OnTaskYield, schedule_ctx, task, task_id);
           } else if (result->IsBlocked()) {
-            OBSERVE(OnTaskBlocked, schedule_context, task, task_id);
+            OBSERVE(OnTaskBlocked, schedule_ctx, task, task_id);
             auto awaiter = std::dynamic_pointer_cast<SyncAwaiter>(result->GetAwaiter());
             ARA_CHECK(awaiter != nullptr);
             awaiter->Wait();
-            OBSERVE(OnTaskResumed, schedule_context, task, task_id);
+            OBSERVE(OnTaskResumed, schedule_ctx, task, task_id);
           }
-          result = task(task_context, task_id);
+          result = task(task_ctx, task_id);
           if (is_yield && result.ok() && !result->IsYield()) {
-            OBSERVE(OnTaskYieldBack, schedule_context, task, task_id);
+            OBSERVE(OnTaskYieldBack, schedule_ctx, task, task_id);
           }
         }
         return result;

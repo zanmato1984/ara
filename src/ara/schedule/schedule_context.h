@@ -12,7 +12,7 @@ namespace schedule {
 class ScheduleObserver;
 
 struct ScheduleContext {
-  const QueryContext* query_context;
+  const QueryContext* query_ctx;
   std::unique_ptr<ChainedObserver<ScheduleObserver>> schedule_observer = nullptr;
 };
 

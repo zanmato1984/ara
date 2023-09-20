@@ -20,43 +20,46 @@ using task::TaskId;
 using task::TaskObserver;
 using task::TaskResult;
 
-#define OBSERVE(Method, ...)                                                         \
-  if (context.schedule_observer != nullptr) {                                        \
-    ARA_RETURN_NOT_OK(                                                               \
-        context.schedule_observer->Observe(&ScheduleObserver::Method, __VA_ARGS__)); \
+#define OBSERVE(Method, ...)                                                     \
+  if (ctx.schedule_observer != nullptr) {                                        \
+    ARA_RETURN_NOT_OK(                                                           \
+        ctx.schedule_observer->Observe(&ScheduleObserver::Method, __VA_ARGS__)); \
   }
 
 TaskGroupHandle::TaskGroupHandle(const std::string& name, const TaskGroup& task_group,
-                                 TaskContext task_context)
+                                 TaskContext task_ctx)
     : Meta(name + "(" + task_group.Name() + ")", name + "(" + task_group.Desc() + ")"),
       task_group_(task_group),
-      task_context_(std::move(task_context)) {}
+      task_ctx_(std::move(task_ctx)) {}
 
-TaskResult TaskGroupHandle::Wait(const ScheduleContext& context) {
-  OBSERVE(OnWaitTaskGroupBegin, *this, context);
-  ARA_RETURN_NOT_OK(task_group_.NotifyFinish(task_context_));
-  auto status = DoWait(context);
-  OBSERVE(OnWaitTaskGroupEnd, *this, context, status);
+TaskResult TaskGroupHandle::Wait(const ScheduleContext& ctx) {
+  OBSERVE(OnWaitTaskGroupBegin, *this, ctx);
+  ARA_RETURN_NOT_OK(task_group_.NotifyFinish(task_ctx_));
+  auto status = DoWait(ctx);
+  OBSERVE(OnWaitTaskGroupEnd, *this, ctx, status);
   return status;
 }
 
-Result<std::unique_ptr<TaskGroupHandle>> Scheduler::Schedule(
-    const ScheduleContext& context, const TaskGroup& tg) {
-  OBSERVE(OnScheduleTaskGroupBegin, *this, context, tg);
-  auto result = DoSchedule(context, tg);
-  OBSERVE(OnScheduleTaskGroupEnd, *this, context, tg, result);
+Result<std::unique_ptr<TaskGroupHandle>> Scheduler::Schedule(const ScheduleContext& ctx,
+                                                             const TaskGroup& tg) {
+  OBSERVE(OnScheduleTaskGroupBegin, *this, ctx, tg);
+  auto result = DoSchedule(ctx, tg);
+  OBSERVE(OnScheduleTaskGroupEnd, *this, ctx, tg, result);
   return result;
 }
 
-TaskContext Scheduler::MakeTaskContext(const ScheduleContext& schedule_context) const {
-  auto task_observer = TaskObserver::Make(*schedule_context.query_context);
-  auto resumer_factory = MakeResumerFactory(schedule_context);
-  auto single_awaiter_factory = MakeSingleAwaiterFactgory(schedule_context);
-  auto any_awaiter_factory = MakeAnyAwaiterFactgory(schedule_context);
-  auto all_awaiter_factory = MakeAllAwaiterFactgory(schedule_context);
-  return {schedule_context.query_context,    std::move(resumer_factory),
-          std::move(single_awaiter_factory), std::move(any_awaiter_factory),
-          std::move(all_awaiter_factory),    std::move(task_observer)};
+TaskContext Scheduler::MakeTaskContext(const ScheduleContext& ctx) const {
+  auto task_observer = TaskObserver::Make(*ctx.query_ctx);
+  auto resumer_factory = MakeResumerFactory(ctx);
+  auto single_awaiter_factory = MakeSingleAwaiterFactgory(ctx);
+  auto any_awaiter_factory = MakeAnyAwaiterFactgory(ctx);
+  auto all_awaiter_factory = MakeAllAwaiterFactgory(ctx);
+  return {ctx.query_ctx,
+          std::move(resumer_factory),
+          std::move(single_awaiter_factory),
+          std::move(any_awaiter_factory),
+          std::move(all_awaiter_factory),
+          std::move(task_observer)};
 }
 
 std::unique_ptr<Scheduler> Scheduler::Make(const QueryContext&) { return nullptr; }

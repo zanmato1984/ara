@@ -23,7 +23,7 @@ Status ValidateHashJoinNodeOptions(const HashJoinNodeOptions& join_options) {
   return Status::OK();
 }
 
-Status HashJoin::Init(const PipelineContext& pipeline_context, size_t dop_,
+Status HashJoin::Init(const PipelineContext&, size_t dop_,
                       arrow::acero::QueryContext* ctx_,
                       const HashJoinNodeOptions& options_, const Schema& left_schema_,
                       const Schema& right_schema_) {

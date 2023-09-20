@@ -22,7 +22,7 @@ namespace detail {
 
 class BuildProcessor {
  public:
-  Status Init(const PipelineContext& context, HashJoin* hash_join,
+  Status Init(const PipelineContext& ctx, HashJoin* hash_join,
               AccumulationQueue* batches) {
     dop_ = hash_join->dop;
     hardware_flags_ = hash_join->hardware_flags;
@@ -176,13 +176,13 @@ HashJoinBuild::HashJoinBuild(std::string name, std::string desc)
 
 HashJoinBuild::~HashJoinBuild() = default;
 
-Status HashJoinBuild::Init(const PipelineContext& context,
+Status HashJoinBuild::Init(const PipelineContext& ctx,
                            std::shared_ptr<detail::HashJoin> hash_join) {
   hash_join_ = std::move(hash_join);
   dop_ = hash_join_->dop;
   ctx_ = hash_join_->ctx;
   hash_table_build_ = &hash_join_->hash_table_build;
-  return build_processor_->Init(context, hash_join.get(), &build_side_batches_);
+  return build_processor_->Init(ctx, hash_join.get(), &build_side_batches_);
 }
 
 PipelineSink HashJoinBuild::Sink(const PipelineContext&) {

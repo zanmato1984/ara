@@ -104,8 +104,7 @@ class PipelineLogger : public PipelineObserver {
   }
 };
 
-std::unique_ptr<PipelineObserver> PipelineObserver::Make(
-    const QueryContext& query_context) {
+std::unique_ptr<PipelineObserver> PipelineObserver::Make(const QueryContext&) {
   auto logger = std::make_unique<PipelineLogger>();
   std::vector<std::unique_ptr<PipelineObserver>> observers;
   observers.push_back(std::move(logger));

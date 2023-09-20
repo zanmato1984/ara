@@ -4,21 +4,21 @@
 
 namespace ara::task {
 
-Status TaskGroup::NotifyFinish(const TaskContext& context) const {
+Status TaskGroup::NotifyFinish(const TaskContext& ctx) const {
   if (notify_ == nullptr) {
     return Status::OK();
   }
 
-  if (context.task_observer != nullptr) {
-    ARA_RETURN_NOT_OK(context.task_observer->Observe(&TaskObserver::OnNotifyFinishBegin,
-                                                     *this, context));
+  if (ctx.task_observer != nullptr) {
+    ARA_RETURN_NOT_OK(
+        ctx.task_observer->Observe(&TaskObserver::OnNotifyFinishBegin, *this, ctx));
   }
 
-  auto status = notify_(context);
+  auto status = notify_(ctx);
 
-  if (context.task_observer != nullptr) {
-    ARA_RETURN_NOT_OK(context.task_observer->Observe(&TaskObserver::OnNotifyFinishEnd,
-                                                     *this, context, status));
+  if (ctx.task_observer != nullptr) {
+    ARA_RETURN_NOT_OK(
+        ctx.task_observer->Observe(&TaskObserver::OnNotifyFinishEnd, *this, ctx, status));
   }
 
   return status;
