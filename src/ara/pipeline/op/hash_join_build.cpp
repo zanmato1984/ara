@@ -182,7 +182,7 @@ Status HashJoinBuild::Init(const PipelineContext& ctx,
   dop_ = hash_join_->dop;
   ctx_ = hash_join_->ctx;
   hash_table_build_ = &hash_join_->hash_table_build;
-  return build_processor_->Init(ctx, hash_join.get(), &build_side_batches_);
+  return build_processor_->Init(ctx, hash_join_.get(), &build_side_batches_);
 }
 
 PipelineSink HashJoinBuild::Sink(const PipelineContext&) {
