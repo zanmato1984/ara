@@ -28,10 +28,9 @@ class HashJoinProbe : public PipeOp {
   std::unique_ptr<SourceOp> ImplicitSource(const PipelineContext&) override;
 
  private:
-  arrow::acero::QueryContext* ctx_;
-
   std::shared_ptr<detail::HashJoin> hash_join_;
 
+  arrow::acero::QueryContext* ctx_;
   arrow::acero::JoinType join_type_;
 
   struct ThreadLocal {

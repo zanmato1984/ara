@@ -35,11 +35,14 @@ class HashJoinProbeTest : public testing::Test {
   ScheduleContext schedule_ctx_;
   NaiveParallelScheduler scheduler;
 
-  void Init(size_t dop, const arrow::acero::HashJoinNodeOptions& options,
+  void Init(size_t dop, size_t batch_length, size_t minibatch_length,
+            const arrow::acero::HashJoinNodeOptions& options,
             const arrow::Schema& left_schema, const arrow::Schema& right_schema) {
     dop_ = dop;
     arrow_query_ctx_ = std::make_unique<arrow::acero::QueryContext>(
         arrow::acero::QueryOptions{}, arrow::compute::ExecContext());
+    query_ctx_.options.pipe_max_batch_length = batch_length;
+    query_ctx_.options.pipe_minibatch_length = minibatch_length;
     ASSERT_OK(arrow_query_ctx_->Init(dop, nullptr));
     ASSERT_OK(hash_join_->Init(pipeline_ctx_, dop, arrow_query_ctx_.get(), options,
                                left_schema, right_schema));
@@ -47,7 +50,7 @@ class HashJoinProbeTest : public testing::Test {
     ASSERT_OK(hash_join_probe_.Init(pipeline_ctx_, hash_join_));
   }
 
-  void RunHashJoinProbe(const Batches& batches) {
+  void RunHashJoinBuild(const Batches& batches) {
     {
       Task sink_task("HashJoinBuild::SinkTask", "",
                      [&](const TaskContext& task_ctx, ThreadId thread_id) -> TaskResult {
@@ -82,13 +85,63 @@ class HashJoinProbeTest : public testing::Test {
       }
     }
   }
+
+  OpResult ProbeOne(ThreadId thread_id, std::optional<Batch> input) {
+    return hash_join_probe_.Pipe(pipeline_ctx_)(pipeline_ctx_, TaskContext{}, thread_id,
+                                                std::move(input));
+  }
 };
 
-TEST_F(HashJoinProbeTest, Basic) {
+TEST_F(HashJoinProbeTest, InnerBatchHasMore) {
   size_t dop = 4;
+  size_t batch_length = 3;
+  size_t minibatch_length = 1;
+
   auto schema_with_batch = arrow::acero::MakeBasicBatches();
   arrow::acero::HashJoinNodeOptions options{
       arrow::acero::JoinType::INNER, {{0}}, {{0}}, {{0}, {1}}, {}};
-  Init(dop, options, *schema_with_batch.schema, *schema_with_batch.schema);
-  RunHashJoinProbe(schema_with_batch.batches);
+  Init(dop, batch_length, minibatch_length, options, *schema_with_batch.schema,
+       *schema_with_batch.schema);
+  RunHashJoinBuild(schema_with_batch.batches);
+
+  auto probe_result = ProbeOne(0, schema_with_batch.batches[0]);
+  ASSERT_OK(probe_result);
+  ASSERT_TRUE(probe_result->IsSourcePipeHasMore());
+  ASSERT_EQ(probe_result->GetBatch()->length, 3);
+}
+
+// TODO: Even doesn't work now.
+TEST_F(HashJoinProbeTest, InnerEven) {
+  size_t dop = 4;
+  size_t batch_length = 4;
+  size_t minibatch_length = 1;
+
+  auto schema_with_batch = arrow::acero::MakeBasicBatches();
+  arrow::acero::HashJoinNodeOptions options{
+      arrow::acero::JoinType::INNER, {{0}}, {{0}}, {{0}, {1}}, {}};
+  Init(dop, batch_length, minibatch_length, options, *schema_with_batch.schema,
+       *schema_with_batch.schema);
+  RunHashJoinBuild(schema_with_batch.batches);
+
+  auto probe_result = ProbeOne(0, schema_with_batch.batches[0]);
+  ASSERT_OK(probe_result);
+  ASSERT_TRUE(probe_result->IsPipeEven());
+  ASSERT_EQ(probe_result->GetBatch()->length, 4);
+}
+
+TEST_F(HashJoinProbeTest, InnerNeedsMore) {
+  size_t dop = 4;
+  size_t batch_length = 5;
+  size_t minibatch_length = 1;
+
+  auto schema_with_batch = arrow::acero::MakeBasicBatches();
+  arrow::acero::HashJoinNodeOptions options{
+      arrow::acero::JoinType::INNER, {{0}}, {{0}}, {{0}, {1}}, {}};
+  Init(dop, batch_length, minibatch_length, options, *schema_with_batch.schema,
+       *schema_with_batch.schema);
+  RunHashJoinBuild(schema_with_batch.batches);
+
+  auto probe_result = ProbeOne(0, schema_with_batch.batches[0]);
+  ASSERT_OK(probe_result);
+  ASSERT_TRUE(probe_result->IsPipeSinkNeedsMore());
 }
