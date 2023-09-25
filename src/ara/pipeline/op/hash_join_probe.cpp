@@ -251,7 +251,7 @@ class ProbeProcessor {
                     std::vector<KeyColumnArray>* temp_column_arrays,
                     std::optional<Batch>& output, State& state_next) {
     size_t pipe_max_batch_length = pipeline_ctx.query_ctx->options.pipe_max_batch_length;
-    size_t pipe_minbatch_length = pipeline_ctx.query_ctx->options.pipe_minibatch_length;
+    size_t pipe_minibatch_length = pipeline_ctx.query_ctx->options.pipe_minibatch_length;
     int num_rows = static_cast<int>(thread_locals_[thread_id].input->batch.length);
     state_next = State::CLEAN;
     bool match_has_more_last = thread_locals_[thread_id].state == State::MATCH_HAS_MORE;
@@ -260,7 +260,7 @@ class ProbeProcessor {
     for (; thread_locals_[thread_id].input->minibatch_start < num_rows &&
            state_next == State::CLEAN;) {
       uint32_t minibatch_size_next =
-          std::min(pipe_minbatch_length,
+          std::min(pipe_minibatch_length,
                    num_rows - thread_locals_[thread_id].input->minibatch_start);
       bool no_duplicate_keys = (hash_table_->key_to_payload() == nullptr);
       bool no_payload_columns = (hash_table_->payloads() == nullptr);
@@ -301,7 +301,7 @@ class ProbeProcessor {
       int num_matches_next;
       while (state_next != State::MATCH_HAS_MORE &&
              thread_locals_[thread_id].input->match_iterator.GetNextBatch(
-                 pipe_minbatch_length, &num_matches_next,
+                 pipe_minibatch_length, &num_matches_next,
                  thread_locals_[thread_id].materialize_batch_ids_buf_data(),
                  thread_locals_[thread_id].materialize_key_ids_buf_data(),
                  thread_locals_[thread_id].materialize_payload_ids_buf_data())) {
@@ -416,7 +416,7 @@ class ProbeProcessor {
                       std::vector<KeyColumnArray>* temp_column_arrays,
                       std::optional<Batch>& output, State& state_next) {
     size_t pipe_max_batch_length = pipeline_ctx.query_ctx->options.pipe_max_batch_length;
-    size_t pipe_minbatch_length = pipeline_ctx.query_ctx->options.pipe_minibatch_length;
+    size_t pipe_minibatch_length = pipeline_ctx.query_ctx->options.pipe_minibatch_length;
     int num_rows = static_cast<int>(thread_locals_[thread_id].input->batch.length);
     state_next = State::CLEAN;
 
@@ -424,7 +424,7 @@ class ProbeProcessor {
     for (; thread_locals_[thread_id].input->minibatch_start < num_rows &&
            state_next == State::CLEAN;) {
       uint32_t minibatch_size_next =
-          std::min(pipe_minbatch_length,
+          std::min(pipe_minibatch_length,
                    num_rows - thread_locals_[thread_id].input->minibatch_start);
 
       // Calculate hash and matches for this minibatch.
@@ -502,14 +502,14 @@ class ProbeProcessor {
                        ThreadId thread_id, TempVectorStack* temp_stack,
                        std::vector<KeyColumnArray>* temp_column_arrays,
                        std::optional<Batch>& output, State& state_next) {
-    size_t pipe_minbatch_length = pipeline_ctx.query_ctx->options.pipe_minibatch_length;
+    size_t pipe_minibatch_length = pipeline_ctx.query_ctx->options.pipe_minibatch_length;
     int num_rows = static_cast<int>(thread_locals_[thread_id].input->batch.length);
     state_next = State::CLEAN;
 
     // Break into minibatches
     for (; thread_locals_[thread_id].input->minibatch_start < num_rows;) {
       uint32_t minibatch_size_next =
-          std::min(pipe_minbatch_length,
+          std::min(pipe_minibatch_length,
                    num_rows - thread_locals_[thread_id].input->minibatch_start);
 
       // Calculate hash and matches for this minibatch.
@@ -586,7 +586,7 @@ class ScanProcessor {
 
   OpResult Scan(const PipelineContext& pipeline_ctx, ThreadId thread_id,
                 TempVectorStack* temp_stack) {
-    size_t pipe_minbatch_length = pipeline_ctx.query_ctx->options.pipe_minibatch_length;
+    size_t pipe_minibatch_length = pipeline_ctx.query_ctx->options.pipe_minibatch_length;
     // Should we output matches or non-matches?
     //
     size_t source_max_batch_length =
@@ -611,16 +611,16 @@ class ScanProcessor {
 
     // Split into mini-batches
     //
-    auto payload_ids_buf = TempVectorHolder<uint32_t>(temp_stack, pipe_minbatch_length);
-    auto key_ids_buf = TempVectorHolder<uint32_t>(temp_stack, pipe_minbatch_length);
-    auto selection_buf = TempVectorHolder<uint16_t>(temp_stack, pipe_minbatch_length);
+    auto payload_ids_buf = TempVectorHolder<uint32_t>(temp_stack, pipe_minibatch_length);
+    auto key_ids_buf = TempVectorHolder<uint32_t>(temp_stack, pipe_minibatch_length);
+    auto selection_buf = TempVectorHolder<uint16_t>(temp_stack, pipe_minibatch_length);
     std::optional<Batch> output;
     for (int64_t mini_batch_start = start_row;
          mini_batch_start < end_row && !output.has_value();) {
       // Compute the size of the next mini-batch
       //
-      int64_t mini_batch_size_next = std::min(end_row - mini_batch_start,
-                                              static_cast<int64_t>(pipe_minbatch_length));
+      int64_t mini_batch_size_next = std::min(
+          end_row - mini_batch_start, static_cast<int64_t>(pipe_minibatch_length));
 
       // Get the list of key and payload ids from this mini-batch to output.
       //
