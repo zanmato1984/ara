@@ -324,7 +324,7 @@ class ProbeProcessor {
         size_t rows_appended = 0;
 
         // If we are to exceed the maximum number of rows per batch, output.
-        if (thread_locals_[thread_id].materialize->num_rows() + num_matches_next >
+        if (thread_locals_[thread_id].materialize->num_rows() + num_matches_next >=
             pipe_max_batch_length) {
           rows_appended =
               pipe_max_batch_length - thread_locals_[thread_id].materialize->num_rows();
@@ -377,7 +377,7 @@ class ProbeProcessor {
           size_t rows_appended = 0;
 
           // If we are to exceed the maximum number of rows per batch, output.
-          if (thread_locals_[thread_id].materialize->num_rows() + num_passing_ids >
+          if (thread_locals_[thread_id].materialize->num_rows() + num_passing_ids >=
               pipe_max_batch_length) {
             rows_appended =
                 pipe_max_batch_length - thread_locals_[thread_id].materialize->num_rows();
@@ -468,7 +468,7 @@ class ProbeProcessor {
       size_t rows_appended = 0;
 
       // If we are to exceed the maximum number of rows per batch, output.
-      if (thread_locals_[thread_id].materialize->num_rows() + num_passing_ids >
+      if (thread_locals_[thread_id].materialize->num_rows() + num_passing_ids >=
           pipe_max_batch_length) {
         rows_appended =
             pipe_max_batch_length - thread_locals_[thread_id].materialize->num_rows();
@@ -654,7 +654,7 @@ class ScanProcessor {
       size_t rows_appended = 0;
 
       // If we are to exceed the maximum number of rows per batch, output.
-      if (thread_locals_[thread_id].materialize->num_rows() + num_output_rows >
+      if (thread_locals_[thread_id].materialize->num_rows() + num_output_rows >=
           source_max_batch_length) {
         rows_appended =
             source_max_batch_length - thread_locals_[thread_id].materialize->num_rows();
