@@ -529,7 +529,7 @@ class PipelineTaskTest : public testing::Test {
     size_t dop = pipeline.Dop();
     const auto& [result, act] = RunPipeline(ctx, pipeline);
     ASSERT_OK(result);
-    ASSERT_TRUE(result->IsFinished());
+    ASSERT_TRUE(result->IsFinished()) << result->ToString();
     auto& exp = ctx.Traces();
     CompareTraces(act, exp);
   }
@@ -540,7 +540,7 @@ class PipelineTaskTest : public testing::Test {
     size_t dop = pipeline.Dop();
     const auto& [result, act] = RunPipeline(ctx, pipeline);
     ASSERT_FALSE(result.ok());
-    ASSERT_TRUE(result.status().IsUnknownError());
+    ASSERT_TRUE(result.status().IsUnknownError()) << result.status().ToString();
     ASSERT_EQ(result.status().message(), exp_msg);
     auto& exp = ctx.Traces();
     CompareTracesForError(act, exp);

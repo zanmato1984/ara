@@ -20,7 +20,7 @@ TEST(TaskTest, BasicTask) {
   TaskContext ctx;
   auto res = task(ctx, 0);
   ASSERT_TRUE(res.ok());
-  ASSERT_TRUE(res->IsFinished());
+  ASSERT_TRUE(res->IsFinished()) << res->ToString();
 }
 
 TEST(TaskTest, BasicContinuation) {
@@ -32,7 +32,7 @@ TEST(TaskTest, BasicContinuation) {
   TaskContext ctx;
   auto res = cont(ctx);
   ASSERT_TRUE(res.ok());
-  ASSERT_TRUE(res->IsFinished());
+  ASSERT_TRUE(res->IsFinished()) << res->ToString();
 }
 
 struct TaskTrace {
@@ -191,13 +191,13 @@ TEST(TaskTest, BasicTaskGroup) {
   {
     auto res = task_ref(ctx, 0);
     ASSERT_TRUE(res.ok());
-    ASSERT_TRUE(res->IsFinished());
+    ASSERT_TRUE(res->IsFinished()) << res->ToString();
   }
 
   {
     auto res = cont_ref.value()(ctx);
     ASSERT_TRUE(res.ok());
-    ASSERT_TRUE(res->IsFinished());
+    ASSERT_TRUE(res->IsFinished()) << res->ToString();
   }
 
   {

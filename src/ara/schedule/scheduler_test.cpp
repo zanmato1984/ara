@@ -55,7 +55,7 @@ TYPED_TEST(ScheduleTest, EmptyTask) {
   auto result =
       this->ScheduleTask(schedule_ctx, std::move(task), 4, std::nullopt, nullptr);
   ASSERT_OK(result);
-  ASSERT_TRUE(result->IsFinished());
+  ASSERT_TRUE(result->IsFinished()) << result->ToString();
 }
 
 TYPED_TEST(ScheduleTest, EmptyTaskWithEmptyCont) {
@@ -69,7 +69,7 @@ TYPED_TEST(ScheduleTest, EmptyTaskWithEmptyCont) {
   auto result =
       this->ScheduleTask(schedule_ctx, std::move(task), 4, std::move(cont), nullptr);
   ASSERT_OK(result);
-  ASSERT_TRUE(result->IsFinished());
+  ASSERT_TRUE(result->IsFinished()) << result->ToString();
 }
 
 TYPED_TEST(ScheduleTest, ContAfterTask) {
@@ -88,7 +88,7 @@ TYPED_TEST(ScheduleTest, ContAfterTask) {
   auto result = this->ScheduleTask(schedule_ctx, std::move(task), num_tasks,
                                    std::move(cont), nullptr);
   ASSERT_OK(result);
-  ASSERT_TRUE(result->IsFinished());
+  ASSERT_TRUE(result->IsFinished()) << result->ToString();
   ASSERT_EQ(cont_saw, num_tasks);
 }
 
@@ -105,7 +105,7 @@ TYPED_TEST(ScheduleTest, EndlessTaskWithNotifyFinish) {
                                      return Status::OK();
                                    });
   ASSERT_OK(result);
-  ASSERT_TRUE(result->IsFinished());
+  ASSERT_TRUE(result->IsFinished()) << result->ToString();
 }
 
 TYPED_TEST(ScheduleTest, YieldTask) {
@@ -135,7 +135,7 @@ TYPED_TEST(ScheduleTest, YieldTask) {
   auto result =
       this->ScheduleTask(schedule_ctx, std::move(task), num_tasks, std::nullopt, nullptr);
   ASSERT_OK(result);
-  ASSERT_TRUE(result->IsFinished());
+  ASSERT_TRUE(result->IsFinished()) << result->ToString();
 
   // TODO: Ensure that the yield tasks are ran in IO thread pool.
   // for (auto io_thread_id : io_thread_ids) {
@@ -190,13 +190,13 @@ TYPED_TEST(ScheduleTest, BlockedTask) {
   {
     auto result = blocked_task_future.get();
     ASSERT_OK(result);
-    ASSERT_TRUE(result->IsFinished());
+    ASSERT_TRUE(result->IsFinished()) << result->ToString();
     ASSERT_EQ(counter, num_tasks);
   }
   {
     auto result = resumer_task_future.get();
     ASSERT_OK(result);
-    ASSERT_TRUE(result->IsFinished());
+    ASSERT_TRUE(result->IsFinished()) << result->ToString();
     ASSERT_EQ(counter, num_tasks);
   }
 }

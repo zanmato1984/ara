@@ -65,7 +65,7 @@ class HashJoinBuildTest : public testing::Test {
       ASSERT_OK(result);
       auto tg_result = result.ValueOrDie()->Wait(schedule_ctx_);
       ASSERT_OK(tg_result);
-      ASSERT_TRUE(tg_result->IsFinished());
+      ASSERT_TRUE(tg_result->IsFinished()) << tg_result->ToString();
     }
 
     {
@@ -75,7 +75,7 @@ class HashJoinBuildTest : public testing::Test {
         ASSERT_OK(result);
         auto tg_result = result.ValueOrDie()->Wait(schedule_ctx_);
         ASSERT_OK(tg_result);
-        ASSERT_TRUE(tg_result->IsFinished());
+        ASSERT_TRUE(tg_result->IsFinished()) << tg_result->ToString();
       }
     }
   }

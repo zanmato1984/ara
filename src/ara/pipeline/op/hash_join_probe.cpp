@@ -627,8 +627,8 @@ class ScanProcessor {
     auto key_ids_buf = TempVectorHolder<uint32_t>(temp_stack, pipe_minibatch_length);
     auto selection_buf = TempVectorHolder<uint16_t>(temp_stack, pipe_minibatch_length);
     std::optional<Batch> output;
-    for (int64_t mini_batch_start = start_row;
-         mini_batch_start < end_row && !output.has_value();) {
+    int64_t mini_batch_start = start_row;
+    for (; mini_batch_start < end_row && !output.has_value();) {
       // Compute the size of the next mini-batch
       //
       int64_t mini_batch_size_next = std::min(
@@ -699,7 +699,11 @@ class ScanProcessor {
     if (!output.has_value()) {
       return Scan(pipeline_ctx, thread_id, temp_stack);
     } else {
-      return OpOutput::SourcePipeHasMore(std::move(output.value()));
+      if (mini_batch_start >= end_row) {
+        return OpOutput::Finished(std::move(output.value()));
+      } else {
+        return OpOutput::SourcePipeHasMore(std::move(output.value()));
+      }
     }
   }
 
