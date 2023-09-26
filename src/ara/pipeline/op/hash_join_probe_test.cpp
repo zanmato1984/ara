@@ -96,7 +96,7 @@ class HashJoinProbeTest : public testing::Test {
   }
 };
 
-TEST_F(HashJoinProbeTest, InnerBatchMinibatchHasMore) {
+TEST_F(HashJoinProbeTest, InnerMinibatchHasMore) {
   size_t dop = 4;
   size_t batch_length = 3;
   size_t minibatch_length = 1;
@@ -125,11 +125,12 @@ TEST_F(HashJoinProbeTest, InnerBatchMinibatchHasMore) {
     auto result = Drain(0);
     ASSERT_OK(result);
     ASSERT_TRUE(result->IsFinished());
+    ASSERT_TRUE(result->GetBatch().has_value());
     ASSERT_EQ(result->GetBatch()->length, 1);
   }
 }
 
-TEST_F(HashJoinProbeTest, InnerBatchMatchHasMore) {
+TEST_F(HashJoinProbeTest, InnerMatchHasMore) {
   size_t dop = 4;
   size_t batch_length = 1;
   size_t minibatch_length = 1;
@@ -160,6 +161,13 @@ TEST_F(HashJoinProbeTest, InnerBatchMatchHasMore) {
     ASSERT_OK(result);
     ASSERT_TRUE(result->IsPipeSinkNeedsMore());
   }
+
+  {
+    auto result = Drain(0);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsFinished());
+    ASSERT_FALSE(result->GetBatch().has_value());
+  }
 }
 
 TEST_F(HashJoinProbeTest, InnerEven) {
@@ -189,6 +197,13 @@ TEST_F(HashJoinProbeTest, InnerEven) {
     ASSERT_OK(result);
     ASSERT_TRUE(result->IsPipeSinkNeedsMore());
   }
+
+  {
+    auto result = Drain(0);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsFinished());
+    ASSERT_FALSE(result->GetBatch().has_value());
+  }
 }
 
 TEST_F(HashJoinProbeTest, InnerNeedsMore) {
@@ -203,7 +218,148 @@ TEST_F(HashJoinProbeTest, InnerNeedsMore) {
        *schema_with_batch.schema);
   RunHashJoinBuild(schema_with_batch.batches);
 
-  auto result = Probe(0, schema_with_batch.batches[0]);
-  ASSERT_OK(result);
-  ASSERT_TRUE(result->IsPipeSinkNeedsMore());
+  {
+    auto result = Probe(0, schema_with_batch.batches[0]);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsPipeSinkNeedsMore());
+  }
+
+  {
+    auto result = Drain(0);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsFinished());
+    ASSERT_TRUE(result->GetBatch().has_value());
+    ASSERT_EQ(result->GetBatch()->length, 4);
+  }
+}
+
+TEST_F(HashJoinProbeTest, LeftOuterMinibatchHasMore) {
+  size_t dop = 4;
+  size_t batch_length = 5;
+  size_t minibatch_length = 1;
+
+  auto schema_with_batch = arrow::acero::MakeBasicBatches();
+  auto probe_batch = arrow::acero::ExecBatchFromJSON(
+      {arrow::int32(), arrow::boolean()}, "[[null, true], [null, false], [4, false]]");
+  arrow::acero::HashJoinNodeOptions options{
+      arrow::acero::JoinType::LEFT_OUTER, {{0}}, {{0}}, {{0}, {1}}, {}};
+  Init(dop, batch_length, minibatch_length, options, *schema_with_batch.schema,
+       *schema_with_batch.schema);
+  RunHashJoinBuild(schema_with_batch.batches);
+
+  {
+    auto result = Probe(0, probe_batch);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsSourcePipeHasMore());
+    ASSERT_EQ(result->GetBatch()->length, 5);
+  }
+
+  {
+    auto result = Probe(0, std::nullopt);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsPipeSinkNeedsMore());
+  }
+
+  {
+    auto result = Drain(0);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsFinished());
+    ASSERT_EQ(result->GetBatch()->length, 1);
+  }
+}
+
+TEST_F(HashJoinProbeTest, LeftOuterMatchHasMore) {
+  size_t dop = 4;
+  size_t batch_length = 1;
+  size_t minibatch_length = 1;
+
+  auto schema_with_batch = arrow::acero::MakeBasicBatches();
+  arrow::acero::HashJoinNodeOptions options{
+      arrow::acero::JoinType::LEFT_OUTER, {{0}}, {{0}}, {{0}, {1}}, {}};
+  Init(dop, batch_length, minibatch_length, options, *schema_with_batch.schema,
+       *schema_with_batch.schema);
+  RunHashJoinBuild(schema_with_batch.batches);
+
+  {
+    auto result = Probe(0, schema_with_batch.batches[0]);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsSourcePipeHasMore());
+    ASSERT_EQ(result->GetBatch()->length, 1);
+  }
+
+  for (size_t i = 0; i < 4; ++i) {
+    auto result = Probe(0, std::nullopt);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsSourcePipeHasMore());
+    ASSERT_EQ(result->GetBatch()->length, 1);
+  }
+
+  {
+    auto result = Probe(0, std::nullopt);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsPipeSinkNeedsMore());
+  }
+
+  {
+    auto result = Drain(0);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsFinished());
+    ASSERT_FALSE(result->GetBatch().has_value());
+  }
+}
+
+TEST_F(HashJoinProbeTest, LeftOuterEven) {
+  size_t dop = 4;
+  size_t batch_length = 5;
+  size_t minibatch_length = 1;
+
+  auto schema_with_batch = arrow::acero::MakeBasicBatches();
+  auto probe_batch = arrow::acero::ExecBatchFromJSON({arrow::int32(), arrow::boolean()},
+                                                     "[[4, false], [null, true]]");
+  arrow::acero::HashJoinNodeOptions options{
+      arrow::acero::JoinType::LEFT_OUTER, {{0}}, {{0}}, {{0}, {1}}, {}};
+  Init(dop, batch_length, minibatch_length, options, *schema_with_batch.schema,
+       *schema_with_batch.schema);
+  RunHashJoinBuild(schema_with_batch.batches);
+
+  {
+    auto result = Probe(0, probe_batch);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsPipeEven());
+    ASSERT_EQ(result->GetBatch()->length, 5);
+  }
+
+  {
+    auto result = Drain(0);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsFinished());
+    ASSERT_FALSE(result->GetBatch().has_value());
+  }
+}
+
+TEST_F(HashJoinProbeTest, LeftOuterNeedsMore) {
+  size_t dop = 4;
+  size_t batch_length = 6;
+  size_t minibatch_length = 1;
+
+  auto schema_with_batch = arrow::acero::MakeBasicBatches();
+  arrow::acero::HashJoinNodeOptions options{
+      arrow::acero::JoinType::LEFT_OUTER, {{0}}, {{0}}, {{0}, {1}}, {}};
+  Init(dop, batch_length, minibatch_length, options, *schema_with_batch.schema,
+       *schema_with_batch.schema);
+  RunHashJoinBuild(schema_with_batch.batches);
+
+  {
+    auto result = Probe(0, schema_with_batch.batches[0]);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsPipeSinkNeedsMore());
+  }
+
+  {
+    auto result = Drain(0);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsFinished());
+    ASSERT_TRUE(result->GetBatch().has_value());
+    ASSERT_EQ(result->GetBatch()->length, 5);
+  }
 }
