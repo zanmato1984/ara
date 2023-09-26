@@ -86,13 +86,17 @@ class HashJoinProbeTest : public testing::Test {
     }
   }
 
-  OpResult ProbeOne(ThreadId thread_id, std::optional<Batch> input) {
+  OpResult Probe(ThreadId thread_id, std::optional<Batch> input) {
     return hash_join_probe_.Pipe(pipeline_ctx_)(pipeline_ctx_, TaskContext{}, thread_id,
                                                 std::move(input));
   }
+
+  OpResult Drain(ThreadId thread_id) {
+    return hash_join_probe_.Drain(pipeline_ctx_)(pipeline_ctx_, TaskContext{}, thread_id);
+  }
 };
 
-TEST_F(HashJoinProbeTest, InnerBatchHasMore) {
+TEST_F(HashJoinProbeTest, InnerBatchMinibatchHasMore) {
   size_t dop = 4;
   size_t batch_length = 3;
   size_t minibatch_length = 1;
@@ -104,10 +108,58 @@ TEST_F(HashJoinProbeTest, InnerBatchHasMore) {
        *schema_with_batch.schema);
   RunHashJoinBuild(schema_with_batch.batches);
 
-  auto probe_result = ProbeOne(0, schema_with_batch.batches[0]);
-  ASSERT_OK(probe_result);
-  ASSERT_TRUE(probe_result->IsSourcePipeHasMore());
-  ASSERT_EQ(probe_result->GetBatch()->length, 3);
+  {
+    auto result = Probe(0, schema_with_batch.batches[0]);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsSourcePipeHasMore());
+    ASSERT_EQ(result->GetBatch()->length, 3);
+  }
+
+  {
+    auto result = Probe(0, std::nullopt);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsPipeSinkNeedsMore());
+  }
+
+  {
+    auto result = Drain(0);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsFinished());
+    ASSERT_EQ(result->GetBatch()->length, 1);
+  }
+}
+
+TEST_F(HashJoinProbeTest, InnerBatchMatchHasMore) {
+  size_t dop = 4;
+  size_t batch_length = 1;
+  size_t minibatch_length = 1;
+
+  auto schema_with_batch = arrow::acero::MakeBasicBatches();
+  arrow::acero::HashJoinNodeOptions options{
+      arrow::acero::JoinType::INNER, {{0}}, {{0}}, {{0}, {1}}, {}};
+  Init(dop, batch_length, minibatch_length, options, *schema_with_batch.schema,
+       *schema_with_batch.schema);
+  RunHashJoinBuild(schema_with_batch.batches);
+
+  {
+    auto result = Probe(0, schema_with_batch.batches[0]);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsSourcePipeHasMore());
+    ASSERT_EQ(result->GetBatch()->length, 1);
+  }
+
+  for (size_t i = 0; i < 3; ++i) {
+    auto result = Probe(0, std::nullopt);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsSourcePipeHasMore());
+    ASSERT_EQ(result->GetBatch()->length, 1);
+  }
+
+  {
+    auto result = Probe(0, std::nullopt);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsPipeSinkNeedsMore());
+  }
 }
 
 TEST_F(HashJoinProbeTest, InnerEven) {
@@ -126,16 +178,16 @@ TEST_F(HashJoinProbeTest, InnerEven) {
   // GetNextMatch() call to tell the current batch is done so the best we can get is a
   // HasMore.
   {
-    auto probe_result = ProbeOne(0, schema_with_batch.batches[0]);
-    ASSERT_OK(probe_result);
-    ASSERT_TRUE(probe_result->IsSourcePipeHasMore());
-    ASSERT_EQ(probe_result->GetBatch()->length, 4);
+    auto result = Probe(0, schema_with_batch.batches[0]);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsSourcePipeHasMore());
+    ASSERT_EQ(result->GetBatch()->length, 4);
   }
 
   {
-    auto probe_result = ProbeOne(0, std::nullopt);
-    ASSERT_OK(probe_result);
-    ASSERT_TRUE(probe_result->IsPipeSinkNeedsMore());
+    auto result = Probe(0, std::nullopt);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsPipeSinkNeedsMore());
   }
 }
 
@@ -151,7 +203,7 @@ TEST_F(HashJoinProbeTest, InnerNeedsMore) {
        *schema_with_batch.schema);
   RunHashJoinBuild(schema_with_batch.batches);
 
-  auto probe_result = ProbeOne(0, schema_with_batch.batches[0]);
-  ASSERT_OK(probe_result);
-  ASSERT_TRUE(probe_result->IsPipeSinkNeedsMore());
+  auto result = Probe(0, schema_with_batch.batches[0]);
+  ASSERT_OK(result);
+  ASSERT_TRUE(result->IsPipeSinkNeedsMore());
 }

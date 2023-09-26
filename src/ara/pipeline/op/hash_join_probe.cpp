@@ -254,11 +254,12 @@ class ProbeProcessor {
     size_t pipe_minibatch_length = pipeline_ctx.query_ctx->options.pipe_minibatch_length;
     int num_rows = static_cast<int>(thread_locals_[thread_id].input->batch.length);
     state_next = State::CLEAN;
+    bool match_has_output = false, minibatch_has_output = false;
     bool match_has_more_last = thread_locals_[thread_id].state == State::MATCH_HAS_MORE;
 
     // Break into minibatches
     for (; thread_locals_[thread_id].input->minibatch_start < num_rows &&
-           state_next == State::CLEAN;) {
+           !match_has_output && !minibatch_has_output;) {
       uint32_t minibatch_size_next =
           std::min(pipe_minibatch_length,
                    num_rows - thread_locals_[thread_id].input->minibatch_start);
@@ -299,7 +300,7 @@ class ProbeProcessor {
       }
 
       int num_matches_next;
-      while (state_next != State::MATCH_HAS_MORE &&
+      while (!match_has_output &&
              thread_locals_[thread_id].input->match_iterator.GetNextBatch(
                  pipe_minibatch_length, &num_matches_next,
                  thread_locals_[thread_id].materialize_batch_ids_buf_data(),
@@ -339,7 +340,7 @@ class ProbeProcessor {
                 output.emplace(std::move(batch));
                 return Status::OK();
               }));
-          state_next = State::MATCH_HAS_MORE;
+          match_has_output = true;
         }
 
         // Call materialize for resulting id tuples pointing to matching pairs
@@ -353,7 +354,7 @@ class ProbeProcessor {
         }
       }
 
-      if (state_next != State::MATCH_HAS_MORE) {
+      if (!match_has_output) {
         match_has_more_last = false;
 
         // For left-outer and full-outer joins output non-matches.
@@ -391,7 +392,7 @@ class ProbeProcessor {
                   output.emplace(std::move(batch));
                   return Status::OK();
                 }));
-            state_next = State::MINIBATCH_HAS_MORE;
+            minibatch_has_output = true;
           }
 
           if (num_passing_ids > 0) {
@@ -408,6 +409,12 @@ class ProbeProcessor {
       }
     }
 
+    if (match_has_output) {
+      state_next = State::MATCH_HAS_MORE;
+    } else if (thread_locals_[thread_id].input->minibatch_start < num_rows) {
+      state_next = State::MINIBATCH_HAS_MORE;
+    }
+
     return Status::OK();
   }
 
@@ -419,10 +426,11 @@ class ProbeProcessor {
     size_t pipe_minibatch_length = pipeline_ctx.query_ctx->options.pipe_minibatch_length;
     int num_rows = static_cast<int>(thread_locals_[thread_id].input->batch.length);
     state_next = State::CLEAN;
+    bool minibatch_has_output = false;
 
     // Break into minibatches
     for (; thread_locals_[thread_id].input->minibatch_start < num_rows &&
-           state_next == State::CLEAN;) {
+           !minibatch_has_output;) {
       uint32_t minibatch_size_next =
           std::min(pipe_minibatch_length,
                    num_rows - thread_locals_[thread_id].input->minibatch_start);
@@ -481,7 +489,7 @@ class ProbeProcessor {
           output.emplace(std::move(batch));
           return Status::OK();
         }));
-        state_next = State::MINIBATCH_HAS_MORE;
+        minibatch_has_output = true;
       }
 
       if (num_passing_ids > 0) {
@@ -493,6 +501,10 @@ class ProbeProcessor {
       }
 
       thread_locals_[thread_id].input->minibatch_start += minibatch_size_next;
+    }
+
+    if (thread_locals_[thread_id].input->minibatch_start < num_rows) {
+      state_next = State::MINIBATCH_HAS_MORE;
     }
 
     return Status::OK();
