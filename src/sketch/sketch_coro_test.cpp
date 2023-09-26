@@ -48,7 +48,8 @@ struct Generator {
 Generator myCoroutine() {
   int x = 0;
   while (true) {
-    co_yield x++;
+    auto old_x = x++;
+    co_yield old_x;
     co_await myCoroutine();
   }
 }

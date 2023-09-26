@@ -17,10 +17,10 @@ TEST(TaskTest, BasicTask) {
   };
 
   Task task("BasicTask", "Do nothing but finish directly", task_impl);
-  TaskContext context;
-  auto res = task(context, 0);
+  TaskContext ctx;
+  auto res = task(ctx, 0);
   ASSERT_TRUE(res.ok());
-  ASSERT_TRUE(res->IsFinished());
+  ASSERT_TRUE(res->IsFinished()) << res->ToString();
 }
 
 TEST(TaskTest, BasicContinuation) {
@@ -29,10 +29,10 @@ TEST(TaskTest, BasicContinuation) {
   };
 
   Continuation cont("BasicContinuation", "Do nothing but finish directly", cont_impl);
-  TaskContext context;
-  auto res = cont(context);
+  TaskContext ctx;
+  auto res = cont(ctx);
   ASSERT_TRUE(res.ok());
-  ASSERT_TRUE(res->IsFinished());
+  ASSERT_TRUE(res->IsFinished()) << res->ToString();
 }
 
 struct TaskTrace {
@@ -135,18 +135,18 @@ TEST(TaskTest, TaskObserver) {
     }
   };
 
-  TaskContext context;
+  TaskContext ctx;
   auto [chained_observer, task_observer] = MakeTestTaskObserver<TestTaskObserver>();
-  context.task_observer = std::move(chained_observer);
+  ctx.task_observer = std::move(chained_observer);
 
-  std::ignore = task_continue(context, 0);
-  std::ignore = task_continue(context, 1);
-  std::ignore = task_finished(context, 0);
-  std::ignore = task_blocked(context, 1);
-  std::ignore = task_blocked(context, 0);
-  std::ignore = task_finished(context, 1);
-  std::ignore = cont_cancelled(context);
-  std::ignore = cont_yield(context);
+  std::ignore = task_continue(ctx, 0);
+  std::ignore = task_continue(ctx, 1);
+  std::ignore = task_finished(ctx, 0);
+  std::ignore = task_blocked(ctx, 1);
+  std::ignore = task_blocked(ctx, 0);
+  std::ignore = task_finished(ctx, 1);
+  std::ignore = cont_cancelled(ctx);
+  std::ignore = cont_yield(ctx);
 
   ASSERT_EQ(task_observer.traces.size(), 16);
   ASSERT_EQ(task_observer.traces[0], task_continue_trace(0, false));
@@ -187,21 +187,21 @@ TEST(TaskTest, BasicTaskGroup) {
   ASSERT_EQ(num_tasks, 1);
   ASSERT_TRUE(cont_ref.has_value());
 
-  TaskContext context;
+  TaskContext ctx;
   {
-    auto res = task_ref(context, 0);
+    auto res = task_ref(ctx, 0);
     ASSERT_TRUE(res.ok());
-    ASSERT_TRUE(res->IsFinished());
+    ASSERT_TRUE(res->IsFinished()) << res->ToString();
   }
 
   {
-    auto res = cont_ref.value()(context);
+    auto res = cont_ref.value()(ctx);
     ASSERT_TRUE(res.ok());
-    ASSERT_TRUE(res->IsFinished());
+    ASSERT_TRUE(res->IsFinished()) << res->ToString();
   }
 
   {
-    auto status = tg.NotifyFinish(context);
+    auto status = tg.NotifyFinish(ctx);
     ASSERT_TRUE(status.ok());
   }
 }
@@ -237,36 +237,36 @@ TEST(TaskTest, TaskGroupObserver) {
   struct TestTaskObserver : public TaskObserver {
     std::vector<TaskGroupTrace> traces;
 
-    Status OnTaskGroupBegin(const TaskGroup& tg, const TaskContext& context) {
+    Status OnTaskGroupBegin(const TaskGroup& tg, const TaskContext& ctx) {
       traces.emplace_back(
           TaskGroupTrace{tg.Name(), tg.Desc(), Status::UnknownError("Begin")});
       return Status::OK();
     }
 
-    Status OnTaskGroupEnd(const TaskGroup& tg, const TaskContext& context,
+    Status OnTaskGroupEnd(const TaskGroup& tg, const TaskContext& ctx,
                           const TaskResult& result) {
       traces.emplace_back(TaskGroupTrace{tg.Name(), tg.Desc(), result});
       return Status::OK();
     }
 
-    Status OnNotifyFinishBegin(const TaskGroup& tg, const TaskContext& context) {
+    Status OnNotifyFinishBegin(const TaskGroup& tg, const TaskContext& ctx) {
       traces.emplace_back(TaskGroupTrace{"Notify" + tg.Name(), tg.Desc(),
                                          Status::UnknownError("NotifyBegin")});
       return Status::OK();
     }
 
-    Status OnNotifyFinishEnd(const TaskGroup& tg, const TaskContext& context,
+    Status OnNotifyFinishEnd(const TaskGroup& tg, const TaskContext& ctx,
                              const Status& status) {
       traces.emplace_back(TaskGroupTrace{"Notify" + tg.Name(), tg.Desc(), status});
       return Status::OK();
     }
   };
 
-  TaskContext context;
+  TaskContext ctx;
   auto [chained_observer, task_observer] = MakeTestTaskObserver<TestTaskObserver>();
-  context.task_observer = std::move(chained_observer);
+  ctx.task_observer = std::move(chained_observer);
 
-  std::ignore = tg.NotifyFinish(context);
+  std::ignore = tg.NotifyFinish(ctx);
 
   ASSERT_EQ(task_observer.traces.size(), 2);
   ASSERT_EQ(task_observer.traces[0],

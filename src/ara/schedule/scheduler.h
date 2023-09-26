@@ -31,7 +31,7 @@ class TaskGroupHandle : public internal::Meta {
 
  protected:
   const task::TaskGroup& task_group_;
-  task::TaskContext task_context_;
+  task::TaskContext task_ctx_;
 };
 
 class Scheduler : public internal::Meta {

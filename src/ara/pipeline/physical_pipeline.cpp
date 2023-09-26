@@ -30,14 +30,14 @@ class PipelineCompiler {
   PipelineCompiler(const LogicalPipeline& logical_pipeline)
       : logical_pipeline_(logical_pipeline) {}
 
-  PhysicalPipelines Compile(const PipelineContext& context) && {
-    ExtractTopology(context);
-    SortTopology(context);
-    return BuildPhysicalPipelines(context);
+  PhysicalPipelines Compile(const PipelineContext& ctx) && {
+    ExtractTopology(ctx);
+    SortTopology(ctx);
+    return BuildPhysicalPipelines(ctx);
   }
 
  private:
-  void ExtractTopology(const PipelineContext&) {
+  void ExtractTopology(const PipelineContext& pipeline_context) {
     std::unordered_map<PipeOp*, SourceOp*> pipe_source_map;
     auto sink = logical_pipeline_.SinkOp();
     for (auto& channel : logical_pipeline_.Channels()) {
@@ -48,7 +48,7 @@ class PipelineCompiler {
       for (size_t i = 0; i < channel.pipe_ops.size(); ++i) {
         auto pipe = channel.pipe_ops[i];
         if (pipe_source_map.count(pipe) == 0) {
-          if (auto implicit_source_up = pipe->ImplicitSource();
+          if (auto implicit_source_up = pipe->ImplicitSource(pipeline_context);
               implicit_source_up != nullptr) {
             auto implicit_source = implicit_source_up.get();
             pipe_source_map.emplace(pipe, implicit_source);
@@ -84,7 +84,7 @@ class PipelineCompiler {
     }
   }
 
-  PhysicalPipelines BuildPhysicalPipelines(const PipelineContext& context) {
+  PhysicalPipelines BuildPhysicalPipelines(const PipelineContext& ctx) {
     std::vector<PhysicalPipeline> physical_pipelines;
     for (auto& [id, physical_info] : physical_pipelines_) {
       auto sources_keepalive = std::move(physical_info.first);
@@ -116,9 +116,9 @@ class PipelineCompiler {
 
 }  // namespace
 
-PhysicalPipelines CompilePipeline(const PipelineContext& context,
+PhysicalPipelines CompilePipeline(const PipelineContext& ctx,
                                   const LogicalPipeline& logical_pipeline) {
-  return PipelineCompiler(logical_pipeline).Compile(context);
+  return PipelineCompiler(logical_pipeline).Compile(ctx);
 }
 
 }  // namespace ara::pipeline

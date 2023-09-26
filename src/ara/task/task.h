@@ -31,18 +31,17 @@ class InternalTask : public internal::Meta {
         hint_(std::move(hint)) {}
 
   template <typename... Args>
-  ReturnType operator()(const TaskContext& context, Args... args) const {
-    auto observer = context.task_observer.get();
+  ReturnType operator()(const TaskContext& ctx, Args... args) const {
+    auto observer = ctx.task_observer.get();
     if (observer != nullptr) {
-      ARA_RETURN_NOT_OK(
-          impl().ObserverBegin(observer, context, std::forward<Args>(args)...));
+      ARA_RETURN_NOT_OK(impl().ObserverBegin(observer, ctx, std::forward<Args>(args)...));
     }
 
-    auto result = f_(context, std::forward<Args>(args)...);
+    auto result = f_(ctx, std::forward<Args>(args)...);
 
     if (observer != nullptr) {
       ARA_RETURN_NOT_OK(
-          impl().ObserverEnd(observer, context, std::forward<Args>(args)..., result));
+          impl().ObserverEnd(observer, ctx, std::forward<Args>(args)..., result));
     }
 
     return result;

@@ -24,9 +24,10 @@ class PipelineTask : public internal::Meta {
  public:
   class Channel {
    public:
-    Channel(const PipelineTask&, size_t, size_t);
+    Channel(const PipelineContext&, const PipelineTask&, size_t, size_t);
 
-    Channel(Channel&& other) : Channel(other.task_, other.channel_id_, other.dop_) {}
+    Channel(Channel&& other)
+        : Channel(other.pipeline_ctx_, other.task_, other.channel_id_, other.dop_) {}
 
     OpResult operator()(const PipelineContext&, const task::TaskContext&, ThreadId);
 
@@ -38,6 +39,7 @@ class PipelineTask : public internal::Meta {
                   std::optional<Batch>);
 
    private:
+    const PipelineContext& pipeline_ctx_;
     const PipelineTask& task_;
     const size_t channel_id_;
     const size_t dop_;
@@ -58,7 +60,7 @@ class PipelineTask : public internal::Meta {
     std::atomic_bool cancelled_;
   };
 
-  PipelineTask(const PhysicalPipeline&, size_t);
+  PipelineTask(const PipelineContext&, const PhysicalPipeline&, size_t);
 
   task::TaskResult operator()(const PipelineContext&, const task::TaskContext&, ThreadId);
 

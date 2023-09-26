@@ -15,7 +15,7 @@ class FooSource : public SourceOp {
  public:
   FooSource() : SourceOp("FooSource", "Do nothing") {}
 
-  PipelineSource Source() override {
+  PipelineSource Source(const PipelineContext&) override {
     return [](const PipelineContext&, const TaskContext&, ThreadId) -> OpResult {
       return OpOutput::Finished();
     };
@@ -36,14 +36,14 @@ class FooPipe : public PipeOp {
         drain_(std::move(drain)),
         implicit_source_(std::move(implicit_source)) {}
 
-  PipelinePipe Pipe() override {
+  PipelinePipe Pipe(const PipelineContext&) override {
     return [](const PipelineContext&, const TaskContext&, ThreadId,
               std::optional<Batch>) -> OpResult { return OpOutput::PipeEven({}); };
   }
 
-  PipelineDrain Drain() override { return drain_; }
+  PipelineDrain Drain(const PipelineContext&) override { return drain_; }
 
-  std::unique_ptr<SourceOp> ImplicitSource() override {
+  std::unique_ptr<SourceOp> ImplicitSource(const PipelineContext&) override {
     return std::move(implicit_source_);
   }
 
@@ -56,7 +56,7 @@ class FooSink : public SinkOp {
  public:
   FooSink() : SinkOp("FooSink", "Do nothing") {}
 
-  PipelineSink Sink() override {
+  PipelineSink Sink(const PipelineContext&) override {
     return [](const PipelineContext&, const TaskContext&, ThreadId,
               std::optional<Batch>) -> OpResult { return OpOutput::PipeSinkNeedsMore(); };
   }
@@ -67,26 +67,28 @@ class FooSink : public SinkOp {
     return std::nullopt;
   }
 
-  std::unique_ptr<SourceOp> ImplicitSource() override { return nullptr; }
+  std::unique_ptr<SourceOp> ImplicitSource(const PipelineContext&) override {
+    return nullptr;
+  }
 };
 
 TEST(CompilePipelineTest, EmptyPipeline) {
-  PipelineContext context;
+  PipelineContext ctx;
   FooSink sink;
   LogicalPipeline logical_pipeline("EmptyPipeline", {}, &sink);
-  auto physical_pipelines = CompilePipeline(context, logical_pipeline);
+  auto physical_pipelines = CompilePipeline(ctx, logical_pipeline);
   ASSERT_EQ(physical_pipelines.size(), 0);
 
   ASSERT_TRUE(logical_pipeline.Desc().empty());
 }
 
 TEST(CompilePipelineTest, SingleChannelPipeline) {
-  PipelineContext context;
+  PipelineContext ctx;
   FooSource source;
   FooPipe pipe;
   FooSink sink;
   LogicalPipeline logical_pipeline("SingleChannelPipeline", {{&source, {&pipe}}}, &sink);
-  auto physical_pipelines = CompilePipeline(context, logical_pipeline);
+  auto physical_pipelines = CompilePipeline(ctx, logical_pipeline);
   ASSERT_EQ(physical_pipelines.size(), 1);
   ASSERT_TRUE(physical_pipelines[0].ImplicitSources().empty());
   ASSERT_EQ(physical_pipelines[0].Channels().size(), 1);
@@ -97,13 +99,13 @@ TEST(CompilePipelineTest, SingleChannelPipeline) {
 }
 
 TEST(CompilePipelineTest, DoubleChannelPipeline) {
-  PipelineContext context;
+  PipelineContext ctx;
   FooSource source1, source2;
   FooPipe pipe;
   FooSink sink;
   LogicalPipeline logical_pipeline("DoubleChannelPipeline",
                                    {{&source1, {&pipe}}, {&source2, {&pipe}}}, &sink);
-  auto physical_pipelines = CompilePipeline(context, logical_pipeline);
+  auto physical_pipelines = CompilePipeline(ctx, logical_pipeline);
   ASSERT_EQ(physical_pipelines.size(), 1);
   ASSERT_TRUE(physical_pipelines[0].ImplicitSources().empty());
   ASSERT_EQ(physical_pipelines[0].Channels().size(), 2);
@@ -116,14 +118,14 @@ TEST(CompilePipelineTest, DoubleChannelPipeline) {
 }
 
 TEST(CompilePipelineTest, DoublePhysicalPipeline) {
-  PipelineContext context;
+  PipelineContext ctx;
   FooSource source;
   auto implicit_source_ptr = std::make_unique<FooSource>();
   auto implicit_source = implicit_source_ptr.get();
   FooPipe pipe(nullptr, std::move(implicit_source_ptr));
   FooSink sink;
   LogicalPipeline logical_pipeline("DoublePhysicalPipeline", {{&source, {&pipe}}}, &sink);
-  auto physical_pipelines = CompilePipeline(context, logical_pipeline);
+  auto physical_pipelines = CompilePipeline(ctx, logical_pipeline);
   ASSERT_EQ(physical_pipelines.size(), 2);
   ASSERT_TRUE(physical_pipelines[0].ImplicitSources().empty());
   ASSERT_EQ(physical_pipelines[1].ImplicitSources().size(), 1);
@@ -140,7 +142,7 @@ TEST(CompilePipelineTest, DoublePhysicalPipeline) {
 }
 
 TEST(CompilePipelineTest, DoublePhysicalDoubleChannelPipeline) {
-  PipelineContext context;
+  PipelineContext ctx;
   FooSource source1, source2;
   auto implicit_source1_ptr = std::make_unique<FooSource>();
   auto implicit_source2_ptr = std::make_unique<FooSource>();
@@ -151,7 +153,7 @@ TEST(CompilePipelineTest, DoublePhysicalDoubleChannelPipeline) {
   FooSink sink;
   LogicalPipeline logical_pipeline("DoubleDoublePipeline",
                                    {{&source1, {&pipe1}}, {&source2, {&pipe2}}}, &sink);
-  auto physical_pipelines = CompilePipeline(context, logical_pipeline);
+  auto physical_pipelines = CompilePipeline(ctx, logical_pipeline);
   ASSERT_EQ(physical_pipelines.size(), 2);
   ASSERT_TRUE(physical_pipelines[0].ImplicitSources().empty());
   ASSERT_EQ(physical_pipelines[1].ImplicitSources().size(), 2);
@@ -175,7 +177,7 @@ TEST(CompilePipelineTest, DoublePhysicalDoubleChannelPipeline) {
 }
 
 TEST(CompilePipelineTest, TripplePhysicalPipeline) {
-  PipelineContext context;
+  PipelineContext ctx;
   FooSource source1, source2;
   auto implicit_source1_ptr = std::make_unique<FooSource>();
   auto implicit_source2_ptr = std::make_unique<FooSource>();
@@ -190,7 +192,7 @@ TEST(CompilePipelineTest, TripplePhysicalPipeline) {
   LogicalPipeline logical_pipeline(
       "TripplePhysicalPipeline",
       {{&source1, {&pipe1, &pipe3}}, {&source2, {&pipe2, &pipe3}}}, &sink);
-  auto physical_pipelines = CompilePipeline(context, logical_pipeline);
+  auto physical_pipelines = CompilePipeline(ctx, logical_pipeline);
   ASSERT_EQ(physical_pipelines.size(), 3);
   ASSERT_TRUE(physical_pipelines[0].ImplicitSources().empty());
   ASSERT_EQ(physical_pipelines[1].ImplicitSources().size(), 2);
@@ -219,7 +221,7 @@ TEST(CompilePipelineTest, TripplePhysicalPipeline) {
 }
 
 TEST(CompilePipelineTest, OddQuadroStagePipeline) {
-  PipelineContext context;
+  PipelineContext ctx;
   FooSource source1, source2, source3, source4;
   auto implicit_source1_ptr = std::make_unique<FooSource>();
   auto implicit_source2_ptr = std::make_unique<FooSource>();
@@ -240,7 +242,7 @@ TEST(CompilePipelineTest, OddQuadroStagePipeline) {
                                     {&source3, {&pipe3, &pipe4}},
                                     {&source4, {&pipe4}}},
                                    &sink);
-  auto physical_pipelines = CompilePipeline(context, logical_pipeline);
+  auto physical_pipelines = CompilePipeline(ctx, logical_pipeline);
   ASSERT_EQ(physical_pipelines.size(), 4);
   ASSERT_TRUE(physical_pipelines[0].ImplicitSources().empty());
   ASSERT_EQ(physical_pipelines[1].ImplicitSources().size(), 2);

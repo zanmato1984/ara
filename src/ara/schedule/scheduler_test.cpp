@@ -31,15 +31,15 @@ struct NaiveParallelSchedulerHolder {
 template <typename SchedulerType>
 class ScheduleTest : public testing::Test {
  protected:
-  TaskResult ScheduleTask(const ScheduleContext& schedule_context, Task task,
+  TaskResult ScheduleTask(const ScheduleContext& schedule_ctx, Task task,
                           size_t num_tasks, std::optional<Continuation> cont,
                           TaskGroup::NotifyFinishFunc notify_finish) {
     TaskGroup task_group("", "", std::move(task), num_tasks, std::move(cont),
                          std::move(notify_finish));
     SchedulerType holder;
-    auto handle = holder.scheduler.Schedule(schedule_context, task_group);
+    auto handle = holder.scheduler.Schedule(schedule_ctx, task_group);
     ARA_RETURN_NOT_OK(handle);
-    return (*handle)->Wait(schedule_context);
+    return (*handle)->Wait(schedule_ctx);
   }
 };
 
@@ -48,18 +48,18 @@ using SchedulerTypes =
 TYPED_TEST_SUITE(ScheduleTest, SchedulerTypes);
 
 TYPED_TEST(ScheduleTest, EmptyTask) {
-  ScheduleContext schedule_context;
+  ScheduleContext schedule_ctx;
   Task task("Task", "Do nothing", [](const TaskContext&, TaskId) -> TaskResult {
     return TaskStatus::Finished();
   });
   auto result =
-      this->ScheduleTask(schedule_context, std::move(task), 4, std::nullopt, nullptr);
+      this->ScheduleTask(schedule_ctx, std::move(task), 4, std::nullopt, nullptr);
   ASSERT_OK(result);
-  ASSERT_TRUE(result->IsFinished());
+  ASSERT_TRUE(result->IsFinished()) << result->ToString();
 }
 
 TYPED_TEST(ScheduleTest, EmptyTaskWithEmptyCont) {
-  ScheduleContext schedule_context;
+  ScheduleContext schedule_ctx;
   Task task("Task", "Do nothing", [](const TaskContext&, TaskId) -> TaskResult {
     return TaskStatus::Finished();
   });
@@ -67,13 +67,13 @@ TYPED_TEST(ScheduleTest, EmptyTaskWithEmptyCont) {
     return TaskStatus::Finished();
   });
   auto result =
-      this->ScheduleTask(schedule_context, std::move(task), 4, std::move(cont), nullptr);
+      this->ScheduleTask(schedule_ctx, std::move(task), 4, std::move(cont), nullptr);
   ASSERT_OK(result);
-  ASSERT_TRUE(result->IsFinished());
+  ASSERT_TRUE(result->IsFinished()) << result->ToString();
 }
 
 TYPED_TEST(ScheduleTest, ContAfterTask) {
-  ScheduleContext schedule_context;
+  ScheduleContext schedule_ctx;
   std::atomic<size_t> counter = 0, cont_saw = 0;
   size_t num_tasks = 42;
   Task task("Task", "Do nothing", [&](const TaskContext&, TaskId) -> TaskResult {
@@ -85,31 +85,31 @@ TYPED_TEST(ScheduleTest, ContAfterTask) {
     cont_saw = counter.load();
     return TaskStatus::Finished();
   });
-  auto result = this->ScheduleTask(schedule_context, std::move(task), num_tasks,
+  auto result = this->ScheduleTask(schedule_ctx, std::move(task), num_tasks,
                                    std::move(cont), nullptr);
   ASSERT_OK(result);
-  ASSERT_TRUE(result->IsFinished());
+  ASSERT_TRUE(result->IsFinished()) << result->ToString();
   ASSERT_EQ(cont_saw, num_tasks);
 }
 
 TYPED_TEST(ScheduleTest, EndlessTaskWithNotifyFinish) {
-  ScheduleContext schedule_context;
+  ScheduleContext schedule_ctx;
   std::atomic_bool finished = false;
   Task task("Task", "Endless", [&](const TaskContext&, TaskId) -> TaskResult {
     return finished ? TaskStatus::Finished() : TaskStatus::Continue();
   });
-  auto result = this->ScheduleTask(schedule_context, std::move(task), 4, std::nullopt,
+  auto result = this->ScheduleTask(schedule_ctx, std::move(task), 4, std::nullopt,
                                    [&](const TaskContext&) {
                                      std::this_thread::sleep_for(std::chrono::seconds(1));
                                      finished = true;
                                      return Status::OK();
                                    });
   ASSERT_OK(result);
-  ASSERT_TRUE(result->IsFinished());
+  ASSERT_TRUE(result->IsFinished()) << result->ToString();
 }
 
 TYPED_TEST(ScheduleTest, YieldTask) {
-  ScheduleContext schedule_context;
+  ScheduleContext schedule_ctx;
   size_t num_tasks = cpu_thread_pool_size * 4;
   std::mutex cpu_thread_ids_mutex, io_thread_ids_mutex;
   std::unordered_set<std::thread::id> cpu_thread_ids, io_thread_ids;
@@ -132,10 +132,10 @@ TYPED_TEST(ScheduleTest, YieldTask) {
     return TaskStatus::Finished();
   });
 
-  auto result = this->ScheduleTask(schedule_context, std::move(task), num_tasks,
-                                   std::nullopt, nullptr);
+  auto result =
+      this->ScheduleTask(schedule_ctx, std::move(task), num_tasks, std::nullopt, nullptr);
   ASSERT_OK(result);
-  ASSERT_TRUE(result->IsFinished());
+  ASSERT_TRUE(result->IsFinished()) << result->ToString();
 
   // TODO: Ensure that the yield tasks are ran in IO thread pool.
   // for (auto io_thread_id : io_thread_ids) {
@@ -144,27 +144,26 @@ TYPED_TEST(ScheduleTest, YieldTask) {
 }
 
 TYPED_TEST(ScheduleTest, BlockedTask) {
-  ScheduleContext schedule_context;
+  ScheduleContext schedule_ctx;
   size_t num_tasks = 42;
   std::atomic<size_t> counter = 0;
   Resumers resumers(num_tasks);
   std::atomic<size_t> num_resumers_set = 0;
 
-  Task blocked_task("BlockedTask", "",
-                    [&](const TaskContext& task_context, TaskId task_id) -> TaskResult {
-                      if (resumers[task_id] == nullptr) {
-                        ARA_CHECK(task_context.resumer_factory != nullptr);
-                        ARA_ASSIGN_OR_RAISE(auto resumer, task_context.resumer_factory());
-                        ARA_CHECK(task_context.single_awaiter_factory != nullptr);
-                        ARA_ASSIGN_OR_RAISE(auto awaiter,
-                                            task_context.single_awaiter_factory(resumer));
-                        resumers[task_id] = std::move(resumer);
-                        num_resumers_set++;
-                        return TaskStatus::Blocked(std::move(awaiter));
-                      }
-                      counter++;
-                      return TaskStatus::Finished();
-                    });
+  Task blocked_task(
+      "BlockedTask", "", [&](const TaskContext& task_ctx, TaskId task_id) -> TaskResult {
+        if (resumers[task_id] == nullptr) {
+          ARA_CHECK(task_ctx.resumer_factory != nullptr);
+          ARA_ASSIGN_OR_RAISE(auto resumer, task_ctx.resumer_factory());
+          ARA_CHECK(task_ctx.single_awaiter_factory != nullptr);
+          ARA_ASSIGN_OR_RAISE(auto awaiter, task_ctx.single_awaiter_factory(resumer));
+          resumers[task_id] = std::move(resumer);
+          num_resumers_set++;
+          return TaskStatus::Blocked(std::move(awaiter));
+        }
+        counter++;
+        return TaskStatus::Finished();
+      });
   Task resumer_task("ResumerTask", "",
                     [&](const TaskContext&, TaskId) {
                       if (num_resumers_set != num_tasks) {
@@ -180,30 +179,30 @@ TYPED_TEST(ScheduleTest, BlockedTask) {
                     {TaskHint::Type::IO});
 
   auto blocked_task_future = std::async(std::launch::async, [&]() -> TaskResult {
-    return this->ScheduleTask(schedule_context, std::move(blocked_task), num_tasks,
+    return this->ScheduleTask(schedule_ctx, std::move(blocked_task), num_tasks,
                               std::nullopt, nullptr);
   });
   auto resumer_task_future = std::async(std::launch::async, [&]() -> TaskResult {
-    return this->ScheduleTask(schedule_context, std::move(resumer_task), 1, std::nullopt,
+    return this->ScheduleTask(schedule_ctx, std::move(resumer_task), 1, std::nullopt,
                               nullptr);
   });
 
   {
     auto result = blocked_task_future.get();
     ASSERT_OK(result);
-    ASSERT_TRUE(result->IsFinished());
+    ASSERT_TRUE(result->IsFinished()) << result->ToString();
     ASSERT_EQ(counter, num_tasks);
   }
   {
     auto result = resumer_task_future.get();
     ASSERT_OK(result);
-    ASSERT_TRUE(result->IsFinished());
+    ASSERT_TRUE(result->IsFinished()) << result->ToString();
     ASSERT_EQ(counter, num_tasks);
   }
 }
 
 TYPED_TEST(ScheduleTest, ErrorAndCancel) {
-  ScheduleContext schedule_context;
+  ScheduleContext schedule_ctx;
   size_t num_errors = 4, num_tasks = 42;
   std::atomic<int> error_counts = -1;
   Task task("Task", "Error then cancel", [&](const TaskContext&, TaskId) -> TaskResult {
@@ -215,8 +214,8 @@ TYPED_TEST(ScheduleTest, ErrorAndCancel) {
     }
     return TaskStatus::Cancelled();
   });
-  auto result = this->ScheduleTask(schedule_context, std::move(task), num_tasks,
-                                   std::nullopt, [&](const TaskContext&) {
+  auto result = this->ScheduleTask(schedule_ctx, std::move(task), num_tasks, std::nullopt,
+                                   [&](const TaskContext&) {
                                      std::this_thread::sleep_for(std::chrono::seconds(1));
                                      error_counts = 0;
                                      return Status::OK();

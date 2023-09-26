@@ -4,25 +4,23 @@
 namespace ara::task {
 
 Status Task::ObserverBegin(ChainedObserver<TaskObserver>* observer,
-                           const TaskContext& context, TaskId task_id) const {
-  return observer->Observe(&TaskObserver::OnTaskBegin, *this, context, task_id);
+                           const TaskContext& ctx, TaskId task_id) const {
+  return observer->Observe(&TaskObserver::OnTaskBegin, *this, ctx, task_id);
 }
 
-Status Task::ObserverEnd(ChainedObserver<TaskObserver>* observer,
-                         const TaskContext& context, TaskId task_id,
-                         const TaskResult& result) const {
-  return observer->Observe(&TaskObserver::OnTaskEnd, *this, context, task_id, result);
+Status Task::ObserverEnd(ChainedObserver<TaskObserver>* observer, const TaskContext& ctx,
+                         TaskId task_id, const TaskResult& result) const {
+  return observer->Observe(&TaskObserver::OnTaskEnd, *this, ctx, task_id, result);
 }
 
 Status Continuation::ObserverBegin(ChainedObserver<TaskObserver>* observer,
-                                   const TaskContext& context) const {
-  return observer->Observe(&TaskObserver::OnContinuationBegin, *this, context);
+                                   const TaskContext& ctx) const {
+  return observer->Observe(&TaskObserver::OnContinuationBegin, *this, ctx);
 }
 
 Status Continuation::ObserverEnd(ChainedObserver<TaskObserver>* observer,
-                                 const TaskContext& context,
-                                 const TaskResult& result) const {
-  return observer->Observe(&TaskObserver::OnContinuationEnd, *this, context, result);
+                                 const TaskContext& ctx, const TaskResult& result) const {
+  return observer->Observe(&TaskObserver::OnContinuationEnd, *this, ctx, result);
 }
 
 }  // namespace ara::task

@@ -34,17 +34,17 @@ const std::string AsyncDualPoolScheduler::kDesc =
     "executors (folly::CPU/IOThreadPoolExecutor) for CPU/IO tasks";
 
 Result<std::unique_ptr<TaskGroupHandle>> AsyncDualPoolScheduler::DoSchedule(
-    const ScheduleContext& schedule_context, const TaskGroup& task_group) {
+    const ScheduleContext& schedule_ctx, const TaskGroup& task_group) {
   auto& task = task_group.GetTask();
   auto num_tasks = task_group.NumTasks();
   auto& cont = task_group.GetContinuation();
 
-  auto make_future = [&](const TaskContext& task_context,
+  auto make_future = [&](const TaskContext& task_ctx,
                          std::vector<TaskResult>& results) -> Future {
     std::vector<Promise> task_promises;
     std::vector<Future> task_futures;
     for (size_t i = 0; i < num_tasks; ++i) {
-      auto [tp, tf] = MakeTask(schedule_context, task, task_context, i, results[i]);
+      auto [tp, tf] = MakeTask(schedule_ctx, task, task_ctx, i, results[i]);
       task_promises.push_back(std::move(tp));
       task_futures.push_back(std::move(tf));
       results[i] = TaskStatus::Continue();
@@ -58,18 +58,18 @@ Result<std::unique_ptr<TaskGroupHandle>> AsyncDualPoolScheduler::DoSchedule(
                    }
                    return folly::collectAll(task_futures);
                  })
-                 .thenValue([&schedule_context, &task_group, &cont,
-                             &task_context](auto&& try_results) -> TaskResult {
+                 .thenValue([&schedule_ctx, &task_group, &cont,
+                             &task_ctx](auto&& try_results) -> TaskResult {
                    std::vector<TaskResult> results(try_results.size());
                    std::transform(try_results.begin(), try_results.end(), results.begin(),
                                   [](auto&& try_result) -> TaskResult {
                                     ARA_CHECK(try_result.hasValue());
                                     return try_result.value();
                                   });
-                   if (schedule_context.schedule_observer != nullptr) {
-                     auto status = schedule_context.schedule_observer->Observe(
-                         &ScheduleObserver::OnAllTasksFinished, schedule_context,
-                         task_group, results);
+                   if (schedule_ctx.schedule_observer != nullptr) {
+                     auto status = schedule_ctx.schedule_observer->Observe(
+                         &ScheduleObserver::OnAllTasksFinished, schedule_ctx, task_group,
+                         results);
                      if (!status.ok()) {
                        return std::move(status);
                      }
@@ -78,17 +78,17 @@ Result<std::unique_ptr<TaskGroupHandle>> AsyncDualPoolScheduler::DoSchedule(
                      ARA_RETURN_NOT_OK(result);
                    }
                    if (cont.has_value()) {
-                     return cont.value()(task_context);
+                     return cont.value()(task_ctx);
                    }
                    return TaskStatus::Finished();
                  });
     p.setValue();
     return std::move(f);
   };
-  TaskContext task_context = MakeTaskContext(schedule_context);
+  TaskContext task_ctx = MakeTaskContext(schedule_ctx);
   std::vector<TaskResult> results(num_tasks);
 
-  return std::make_unique<AsyncHandle>(task_group, std::move(task_context),
+  return std::make_unique<AsyncHandle>(task_group, std::move(task_ctx),
                                        std::move(results), std::move(make_future));
 }
 
@@ -112,7 +112,7 @@ AllAwaiterFactory AsyncDualPoolScheduler::MakeAllAwaiterFactgory(
 }
 
 AsyncDualPoolScheduler::ConcreteTask AsyncDualPoolScheduler::MakeTask(
-    const ScheduleContext& schedule_context, const Task& task, const TaskContext& context,
+    const ScheduleContext& schedule_ctx, const Task& task, const TaskContext& context,
     TaskId task_id, TaskResult& result) const {
   auto [p, f] = folly::makePromiseContract<folly::Unit>(cpu_executor_);
   auto pred = [&]() {
@@ -120,9 +120,9 @@ AsyncDualPoolScheduler::ConcreteTask AsyncDualPoolScheduler::MakeTask(
   };
   auto thunk = [&, task_id]() {
     if (result->IsBlocked()) {
-      if (schedule_context.schedule_observer != nullptr) {
-        auto status = schedule_context.schedule_observer->Observe(
-            &ScheduleObserver::OnTaskBlocked, schedule_context, task, task_id);
+      if (schedule_ctx.schedule_observer != nullptr) {
+        auto status = schedule_ctx.schedule_observer->Observe(
+            &ScheduleObserver::OnTaskBlocked, schedule_ctx, task, task_id);
         if (!status.ok()) {
           result = std::move(status);
           return folly::makeFuture();
@@ -132,9 +132,9 @@ AsyncDualPoolScheduler::ConcreteTask AsyncDualPoolScheduler::MakeTask(
       return std::move(awaiter->GetFuture())
           .via(cpu_executor_)
           .thenValue([&, task_id](auto&&) {
-            if (schedule_context.schedule_observer != nullptr) {
-              auto status = schedule_context.schedule_observer->Observe(
-                  &ScheduleObserver::OnTaskResumed, schedule_context, task, task_id);
+            if (schedule_ctx.schedule_observer != nullptr) {
+              auto status = schedule_ctx.schedule_observer->Observe(
+                  &ScheduleObserver::OnTaskResumed, schedule_ctx, task, task_id);
               if (!status.ok()) {
                 result = std::move(status);
                 return;
@@ -145,9 +145,9 @@ AsyncDualPoolScheduler::ConcreteTask AsyncDualPoolScheduler::MakeTask(
     }
 
     if (result->IsYield()) {
-      if (schedule_context.schedule_observer != nullptr) {
-        auto status = schedule_context.schedule_observer->Observe(
-            &ScheduleObserver::OnTaskYield, schedule_context, task, task_id);
+      if (schedule_ctx.schedule_observer != nullptr) {
+        auto status = schedule_ctx.schedule_observer->Observe(
+            &ScheduleObserver::OnTaskYield, schedule_ctx, task, task_id);
         if (!status.ok()) {
           result = std::move(status);
           return folly::makeFuture();
@@ -158,9 +158,9 @@ AsyncDualPoolScheduler::ConcreteTask AsyncDualPoolScheduler::MakeTask(
         if (!result.ok()) {
           return;
         }
-        if (schedule_context.schedule_observer != nullptr) {
-          auto status = schedule_context.schedule_observer->Observe(
-              &ScheduleObserver::OnTaskYieldBack, schedule_context, task, task_id);
+        if (schedule_ctx.schedule_observer != nullptr) {
+          auto status = schedule_ctx.schedule_observer->Observe(
+              &ScheduleObserver::OnTaskYieldBack, schedule_ctx, task, task_id);
           if (!status.ok()) {
             result = std::move(status);
           }

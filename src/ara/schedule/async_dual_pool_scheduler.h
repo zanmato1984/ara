@@ -25,11 +25,11 @@ class AsyncHandle : public TaskGroupHandle {
                                                   std::vector<task::TaskResult>&)>;
 
  public:
-  AsyncHandle(const task::TaskGroup& task_group, task::TaskContext task_context,
+  AsyncHandle(const task::TaskGroup& task_group, task::TaskContext task_ctx,
               std::vector<task::TaskResult> results, MakeFuture make_future)
-      : TaskGroupHandle(kName, task_group, std::move(task_context)),
+      : TaskGroupHandle(kName, task_group, std::move(task_ctx)),
         results_(std::move(results)),
-        future_(make_future(task_context_, results_)) {}
+        future_(make_future(task_ctx_, results_)) {}
 
  protected:
   task::TaskResult DoWait(const ScheduleContext&) override;

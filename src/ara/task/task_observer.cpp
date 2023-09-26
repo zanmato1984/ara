@@ -11,26 +11,24 @@ using util::TaskResultToString;
 
 class TaskLogger : public TaskObserver {
  public:
-  Status OnTaskBegin(const Task& task, const TaskContext& context,
-                     TaskId task_id) override {
+  Status OnTaskBegin(const Task& task, const TaskContext& ctx, TaskId task_id) override {
     ARA_LOG(INFO) << "Task " << task.Name() << task_id << " begin";
     return Status::OK();
   }
 
-  Status OnTaskEnd(const Task& task, const TaskContext& context, TaskId task_id,
+  Status OnTaskEnd(const Task& task, const TaskContext& ctx, TaskId task_id,
                    const TaskResult& result) override {
     ARA_LOG(INFO) << "Task " << task.Name() << task_id << " end with "
                   << TaskResultToString(result);
     return Status::OK();
   }
 
-  Status OnContinuationBegin(const Continuation& cont,
-                             const TaskContext& context) override {
+  Status OnContinuationBegin(const Continuation& cont, const TaskContext& ctx) override {
     ARA_LOG(INFO) << "Continuation " << cont.Name() << " begin";
     return Status::OK();
   }
 
-  Status OnContinuationEnd(const Continuation& cont, const TaskContext& context,
+  Status OnContinuationEnd(const Continuation& cont, const TaskContext& ctx,
                            const TaskResult& result) override {
     ARA_LOG(INFO) << "Continuation " << cont.Name() << " end with "
                   << TaskResultToString(result);
@@ -38,13 +36,12 @@ class TaskLogger : public TaskObserver {
   }
 
   Status OnNotifyFinishBegin(const TaskGroup& task_group,
-                             const TaskContext& context) override {
+                             const TaskContext& ctx) override {
     ARA_LOG(INFO) << "Notify " << task_group.Name() << " finish begin";
     return Status::OK();
   }
 
-  virtual Status OnNotifyFinishEnd(const TaskGroup& task_group,
-                                   const TaskContext& context,
+  virtual Status OnNotifyFinishEnd(const TaskGroup& task_group, const TaskContext& ctx,
                                    const Status& status) override {
     ARA_LOG(INFO) << "Notify " << task_group.Name() << " finish end with "
                   << status.ToString();
