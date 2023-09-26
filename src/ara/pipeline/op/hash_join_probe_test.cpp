@@ -40,14 +40,14 @@ class HashJoinProbeTest : public testing::Test {
   AsyncDualPoolScheduler scheduler{&cpu_executor, nullptr};
 
   void Init(size_t dop, size_t source_batch_length, size_t pipe_batch_length,
-            size_t minibatch_length, const arrow::acero::HashJoinNodeOptions& options,
+            size_t mini_batch_length, const arrow::acero::HashJoinNodeOptions& options,
             const arrow::Schema& left_schema, const arrow::Schema& right_schema) {
     dop_ = dop;
     arrow_query_ctx_ = std::make_unique<arrow::acero::QueryContext>(
         arrow::acero::QueryOptions{}, arrow::compute::ExecContext());
     query_ctx_.options.source_max_batch_length = source_batch_length;
     query_ctx_.options.pipe_max_batch_length = pipe_batch_length;
-    query_ctx_.options.pipe_minibatch_length = minibatch_length;
+    query_ctx_.options.mini_batch_length = mini_batch_length;
     ASSERT_OK(arrow_query_ctx_->Init(dop, nullptr));
     ASSERT_OK(hash_join_->Init(pipeline_ctx_, dop, arrow_query_ctx_.get(), options,
                                left_schema, right_schema));
@@ -119,16 +119,16 @@ class HashJoinProbeTest : public testing::Test {
   }
 };
 
-TEST_F(HashJoinProbeTest, InnerMinibatchHasMore) {
+TEST_F(HashJoinProbeTest, InnerMiniBatchHasMore) {
   size_t dop = 4;
   size_t source_batch_length = 1024;
   size_t pipe_batch_length = 3;
-  size_t minibatch_length = 1;
+  size_t mini_batch_length = 1;
 
   auto schema_with_batch = arrow::acero::MakeBasicBatches();
   arrow::acero::HashJoinNodeOptions options{
       arrow::acero::JoinType::INNER, {{0}}, {{0}}, {{0}, {1}}, {}};
-  Init(dop, source_batch_length, pipe_batch_length, minibatch_length, options,
+  Init(dop, source_batch_length, pipe_batch_length, mini_batch_length, options,
        *schema_with_batch.schema, *schema_with_batch.schema);
   RunHashJoinBuild(schema_with_batch.batches);
 
@@ -158,12 +158,12 @@ TEST_F(HashJoinProbeTest, InnerMatchHasMore) {
   size_t dop = 4;
   size_t source_batch_length = 1024;
   size_t pipe_batch_length = 1;
-  size_t minibatch_length = 1;
+  size_t mini_batch_length = 1;
 
   auto schema_with_batch = arrow::acero::MakeBasicBatches();
   arrow::acero::HashJoinNodeOptions options{
       arrow::acero::JoinType::INNER, {{0}}, {{0}}, {{0}, {1}}, {}};
-  Init(dop, source_batch_length, pipe_batch_length, minibatch_length, options,
+  Init(dop, source_batch_length, pipe_batch_length, mini_batch_length, options,
        *schema_with_batch.schema, *schema_with_batch.schema);
   RunHashJoinBuild(schema_with_batch.batches);
 
@@ -199,12 +199,12 @@ TEST_F(HashJoinProbeTest, InnerEven) {
   size_t dop = 4;
   size_t source_batch_length = 1024;
   size_t pipe_batch_length = 4;
-  size_t minibatch_length = 1;
+  size_t mini_batch_length = 1;
 
   auto schema_with_batch = arrow::acero::MakeBasicBatches();
   arrow::acero::HashJoinNodeOptions options{
       arrow::acero::JoinType::INNER, {{0}}, {{0}}, {{0}, {1}}, {}};
-  Init(dop, source_batch_length, pipe_batch_length, minibatch_length, options,
+  Init(dop, source_batch_length, pipe_batch_length, mini_batch_length, options,
        *schema_with_batch.schema, *schema_with_batch.schema);
   RunHashJoinBuild(schema_with_batch.batches);
 
@@ -237,12 +237,12 @@ TEST_F(HashJoinProbeTest, InnerNeedsMore) {
   size_t dop = 4;
   size_t source_batch_length = 1024;
   size_t pipe_batch_length = 5;
-  size_t minibatch_length = 1;
+  size_t mini_batch_length = 1;
 
   auto schema_with_batch = arrow::acero::MakeBasicBatches();
   arrow::acero::HashJoinNodeOptions options{
       arrow::acero::JoinType::INNER, {{0}}, {{0}}, {{0}, {1}}, {}};
-  Init(dop, source_batch_length, pipe_batch_length, minibatch_length, options,
+  Init(dop, source_batch_length, pipe_batch_length, mini_batch_length, options,
        *schema_with_batch.schema, *schema_with_batch.schema);
   RunHashJoinBuild(schema_with_batch.batches);
 
@@ -261,18 +261,18 @@ TEST_F(HashJoinProbeTest, InnerNeedsMore) {
   }
 }
 
-TEST_F(HashJoinProbeTest, LeftOuterMinibatchHasMore) {
+TEST_F(HashJoinProbeTest, LeftOuterMiniBatchHasMore) {
   size_t dop = 4;
   size_t source_batch_length = 1024;
   size_t pipe_batch_length = 5;
-  size_t minibatch_length = 1;
+  size_t mini_batch_length = 1;
 
   auto schema_with_batch = arrow::acero::MakeBasicBatches();
   auto probe_batch = arrow::acero::ExecBatchFromJSON(
       {arrow::int32(), arrow::boolean()}, "[[null, true], [null, false], [4, false]]");
   arrow::acero::HashJoinNodeOptions options{
       arrow::acero::JoinType::LEFT_OUTER, {{0}}, {{0}}, {{0}, {1}}, {}};
-  Init(dop, source_batch_length, pipe_batch_length, minibatch_length, options,
+  Init(dop, source_batch_length, pipe_batch_length, mini_batch_length, options,
        *schema_with_batch.schema, *schema_with_batch.schema);
   RunHashJoinBuild(schema_with_batch.batches);
 
@@ -303,12 +303,12 @@ TEST_F(HashJoinProbeTest, LeftOuterMatchHasMore) {
   size_t dop = 4;
   size_t source_batch_length = 1024;
   size_t pipe_batch_length = 1;
-  size_t minibatch_length = 1;
+  size_t mini_batch_length = 1;
 
   auto schema_with_batch = arrow::acero::MakeBasicBatches();
   arrow::acero::HashJoinNodeOptions options{
       arrow::acero::JoinType::LEFT_OUTER, {{0}}, {{0}}, {{0}, {1}}, {}};
-  Init(dop, source_batch_length, pipe_batch_length, minibatch_length, options,
+  Init(dop, source_batch_length, pipe_batch_length, mini_batch_length, options,
        *schema_with_batch.schema, *schema_with_batch.schema);
   RunHashJoinBuild(schema_with_batch.batches);
 
@@ -346,14 +346,14 @@ TEST_F(HashJoinProbeTest, LeftOuterEven) {
   size_t dop = 4;
   size_t source_batch_length = 1024;
   size_t pipe_batch_length = 5;
-  size_t minibatch_length = 1;
+  size_t mini_batch_length = 1;
 
   auto schema_with_batch = arrow::acero::MakeBasicBatches();
   auto probe_batch = arrow::acero::ExecBatchFromJSON({arrow::int32(), arrow::boolean()},
                                                      "[[4, false], [null, true]]");
   arrow::acero::HashJoinNodeOptions options{
       arrow::acero::JoinType::LEFT_OUTER, {{0}}, {{0}}, {{0}, {1}}, {}};
-  Init(dop, source_batch_length, pipe_batch_length, minibatch_length, options,
+  Init(dop, source_batch_length, pipe_batch_length, mini_batch_length, options,
        *schema_with_batch.schema, *schema_with_batch.schema);
   RunHashJoinBuild(schema_with_batch.batches);
 
@@ -377,12 +377,12 @@ TEST_F(HashJoinProbeTest, LeftOuterNeedsMore) {
   size_t dop = 4;
   size_t source_batch_length = 1024;
   size_t pipe_batch_length = 6;
-  size_t minibatch_length = 1;
+  size_t mini_batch_length = 1;
 
   auto schema_with_batch = arrow::acero::MakeBasicBatches();
   arrow::acero::HashJoinNodeOptions options{
       arrow::acero::JoinType::LEFT_OUTER, {{0}}, {{0}}, {{0}, {1}}, {}};
-  Init(dop, source_batch_length, pipe_batch_length, minibatch_length, options,
+  Init(dop, source_batch_length, pipe_batch_length, mini_batch_length, options,
        *schema_with_batch.schema, *schema_with_batch.schema);
   RunHashJoinBuild(schema_with_batch.batches);
 
@@ -405,14 +405,14 @@ TEST_F(HashJoinProbeTest, LeftSemiHasMoreAndEven) {
   size_t dop = 4;
   size_t source_batch_length = 1024;
   size_t pipe_batch_length = 1;
-  size_t minibatch_length = 1;
+  size_t mini_batch_length = 1;
 
   auto schema_with_batch = arrow::acero::MakeBasicBatches();
   arrow::acero::HashJoinNodeOptions options{
       arrow::acero::JoinType::LEFT_SEMI, {{0}}, {{0}}, {{0}, {1}}, {}};
   auto probe_batch = arrow::acero::ExecBatchFromJSON(
       {arrow::int32(), arrow::boolean()}, "[[null, true], [4, false], [4, true]]");
-  Init(dop, source_batch_length, pipe_batch_length, minibatch_length, options,
+  Init(dop, source_batch_length, pipe_batch_length, mini_batch_length, options,
        *schema_with_batch.schema, *schema_with_batch.schema);
   RunHashJoinBuild(schema_with_batch.batches);
 
@@ -444,12 +444,12 @@ TEST_F(HashJoinProbeTest, LeftSemiNeedsMore) {
   size_t dop = 4;
   size_t source_batch_length = 1024;
   size_t pipe_batch_length = 2;
-  size_t minibatch_length = 1;
+  size_t mini_batch_length = 1;
 
   auto schema_with_batch = arrow::acero::MakeBasicBatches();
   arrow::acero::HashJoinNodeOptions options{
       arrow::acero::JoinType::LEFT_SEMI, {{0}}, {{0}}, {{0}, {1}}, {}};
-  Init(dop, source_batch_length, pipe_batch_length, minibatch_length, options,
+  Init(dop, source_batch_length, pipe_batch_length, mini_batch_length, options,
        *schema_with_batch.schema, *schema_with_batch.schema);
   RunHashJoinBuild(schema_with_batch.batches);
 
@@ -472,14 +472,14 @@ TEST_F(HashJoinProbeTest, LeftAntiHasMoreAndEven) {
   size_t dop = 4;
   size_t source_batch_length = 1024;
   size_t pipe_batch_length = 1;
-  size_t minibatch_length = 1;
+  size_t mini_batch_length = 1;
 
   auto schema_with_batch = arrow::acero::MakeBasicBatches();
   arrow::acero::HashJoinNodeOptions options{
       arrow::acero::JoinType::LEFT_ANTI, {{0}}, {{0}}, {{0}, {1}}, {}};
   auto probe_batch = arrow::acero::ExecBatchFromJSON(
       {arrow::int32(), arrow::boolean()}, "[[4, false], [null, true], [null, false]]");
-  Init(dop, source_batch_length, pipe_batch_length, minibatch_length, options,
+  Init(dop, source_batch_length, pipe_batch_length, mini_batch_length, options,
        *schema_with_batch.schema, *schema_with_batch.schema);
   RunHashJoinBuild(schema_with_batch.batches);
 
@@ -511,12 +511,12 @@ TEST_F(HashJoinProbeTest, LeftAntiNeedsMore) {
   size_t dop = 4;
   size_t source_batch_length = 1024;
   size_t pipe_batch_length = 2;
-  size_t minibatch_length = 1;
+  size_t mini_batch_length = 1;
 
   auto schema_with_batch = arrow::acero::MakeBasicBatches();
   arrow::acero::HashJoinNodeOptions options{
       arrow::acero::JoinType::LEFT_ANTI, {{0}}, {{0}}, {{0}, {1}}, {}};
-  Init(dop, source_batch_length, pipe_batch_length, minibatch_length, options,
+  Init(dop, source_batch_length, pipe_batch_length, mini_batch_length, options,
        *schema_with_batch.schema, *schema_with_batch.schema);
   RunHashJoinBuild(schema_with_batch.batches);
 
@@ -539,7 +539,7 @@ TEST_F(HashJoinProbeTest, RightOuter) {
   size_t dop = 4;
   size_t source_batch_length = 3;
   size_t pipe_batch_length = 16;
-  size_t minibatch_length = 1;
+  size_t mini_batch_length = 1;
 
   auto schema_with_batch = []() {
     arrow::acero::BatchesWithSchema out;
@@ -557,7 +557,7 @@ TEST_F(HashJoinProbeTest, RightOuter) {
                                       "[[0, false], [0, true], [1, false], [2, null]]");
   arrow::acero::HashJoinNodeOptions options{
       arrow::acero::JoinType::RIGHT_OUTER, {{0}}, {{0}}, {{0}, {1}}, {{0}, {1}}};
-  Init(dop, source_batch_length, pipe_batch_length, minibatch_length, options,
+  Init(dop, source_batch_length, pipe_batch_length, mini_batch_length, options,
        *schema_with_batch.schema, *schema_with_batch.schema);
   RunHashJoinBuild(schema_with_batch.batches);
 

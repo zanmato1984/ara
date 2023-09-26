@@ -43,17 +43,17 @@ class ProbeProcessor {
     swiss_table_ = hash_join->hash_table.keys()->swiss_table();
 
     size_t dop = hash_join->dop;
-    auto minibatch_length = pipeline_ctx.query_ctx->options.pipe_minibatch_length;
+    auto mini_batch_length = pipeline_ctx.query_ctx->options.mini_batch_length;
     thread_locals_.resize(dop);
     for (size_t i = 0; i < dop; ++i) {
       thread_locals_[i].materialize = &hash_join->materialize[i];
 
-      thread_locals_[i].hashes_buf.resize(minibatch_length);
-      thread_locals_[i].match_bitvector_buf.resize(minibatch_length);
-      thread_locals_[i].key_ids_buf.resize(minibatch_length);
-      thread_locals_[i].materialize_batch_ids_buf.resize(minibatch_length);
-      thread_locals_[i].materialize_key_ids_buf.resize(minibatch_length);
-      thread_locals_[i].materialize_payload_ids_buf.resize(minibatch_length);
+      thread_locals_[i].hashes_buf.resize(mini_batch_length);
+      thread_locals_[i].match_bitvector_buf.resize(mini_batch_length);
+      thread_locals_[i].key_ids_buf.resize(mini_batch_length);
+      thread_locals_[i].materialize_batch_ids_buf.resize(mini_batch_length);
+      thread_locals_[i].materialize_key_ids_buf.resize(mini_batch_length);
+      thread_locals_[i].materialize_payload_ids_buf.resize(mini_batch_length);
     }
 
     return Status::OK();
@@ -136,12 +136,12 @@ class ProbeProcessor {
   SwissTable* swiss_table_;
 
  private:
-  enum class State { CLEAN, MINIBATCH_HAS_MORE, MATCH_HAS_MORE };
+  enum class State { CLEAN, MINI_BATCH_HAS_MORE, MATCH_HAS_MORE };
 
   struct Input {
     Batch batch;
     Batch key_batch;
-    size_t minibatch_start = 0;
+    size_t mini_batch_start = 0;
 
     JoinMatchIterator match_iterator;
   };
@@ -207,7 +207,7 @@ class ProbeProcessor {
 
         break;
       }
-      case State::MINIBATCH_HAS_MORE:
+      case State::MINI_BATCH_HAS_MORE:
       case State::MATCH_HAS_MORE: {
         // Some check.
         ARA_CHECK(thread_locals_[thread_id].input.has_value());
@@ -235,7 +235,7 @@ class ProbeProcessor {
         }
         break;
       }
-      case State::MINIBATCH_HAS_MORE:
+      case State::MINI_BATCH_HAS_MORE:
       case State::MATCH_HAS_MORE: {
         ARA_CHECK(output_batch.has_value());
         op_output = OpOutput::SourcePipeHasMore(std::move(output_batch.value()));
@@ -251,27 +251,27 @@ class ProbeProcessor {
                     std::vector<KeyColumnArray>* temp_column_arrays,
                     std::optional<Batch>& output, State& state_next) {
     size_t pipe_max_batch_length = pipeline_ctx.query_ctx->options.pipe_max_batch_length;
-    size_t pipe_minibatch_length = pipeline_ctx.query_ctx->options.pipe_minibatch_length;
+    size_t mini_batch_length = pipeline_ctx.query_ctx->options.mini_batch_length;
     int num_rows = static_cast<int>(thread_locals_[thread_id].input->batch.length);
     state_next = State::CLEAN;
-    bool match_has_output = false, minibatch_has_output = false;
+    bool match_has_output = false, mini_batch_has_output = false;
     bool match_has_more_last = thread_locals_[thread_id].state == State::MATCH_HAS_MORE;
 
-    // Break into minibatches
-    for (; thread_locals_[thread_id].input->minibatch_start < num_rows &&
-           !match_has_output && !minibatch_has_output;) {
-      uint32_t minibatch_size_next =
-          std::min(pipe_minibatch_length,
-                   num_rows - thread_locals_[thread_id].input->minibatch_start);
+    // Break into mini-batches
+    for (; thread_locals_[thread_id].input->mini_batch_start < num_rows &&
+           !match_has_output && !mini_batch_has_output;) {
+      uint32_t mini_batch_size_next =
+          std::min(mini_batch_length,
+                   num_rows - thread_locals_[thread_id].input->mini_batch_start);
       bool no_duplicate_keys = (hash_table_->key_to_payload() == nullptr);
       bool no_payload_columns = (hash_table_->payloads() == nullptr);
 
       if (!match_has_more_last) {
-        // Calculate hash and matches for this minibatch.
+        // Calculate hash and matches for this mini-batch.
         SwissTableWithKeys::Input hash_table_input(
             &thread_locals_[thread_id].input->key_batch,
-            thread_locals_[thread_id].input->minibatch_start,
-            thread_locals_[thread_id].input->minibatch_start + minibatch_size_next,
+            thread_locals_[thread_id].input->mini_batch_start,
+            thread_locals_[thread_id].input->mini_batch_start + mini_batch_size_next,
             temp_stack, temp_column_arrays);
         hash_table_->keys()->Hash(&hash_table_input,
                                   thread_locals_[thread_id].hashes_buf_data(),
@@ -284,8 +284,8 @@ class ProbeProcessor {
         // AND bit vector with null key filter for join
         bool ignored;
         JoinNullFilter::Filter(thread_locals_[thread_id].input->key_batch,
-                               thread_locals_[thread_id].input->minibatch_start,
-                               minibatch_size_next, *cmp_, &ignored,
+                               thread_locals_[thread_id].input->mini_batch_start,
+                               mini_batch_size_next, *cmp_, &ignored,
                                /*and_with_input=*/true,
                                thread_locals_[thread_id].match_bitvector_buf_data());
 
@@ -293,7 +293,7 @@ class ProbeProcessor {
         // Since every hash table lookup for an input row might have multiple
         // matches we use a helper class that implements enumerating all of them.
         thread_locals_[thread_id].input->match_iterator.SetLookupResult(
-            minibatch_size_next, thread_locals_[thread_id].input->minibatch_start,
+            mini_batch_size_next, thread_locals_[thread_id].input->mini_batch_start,
             thread_locals_[thread_id].match_bitvector_buf_data(),
             thread_locals_[thread_id].key_ids_buf_data(), no_duplicate_keys,
             hash_table_->key_to_payload());
@@ -302,7 +302,7 @@ class ProbeProcessor {
       int num_matches_next;
       while (!match_has_output &&
              thread_locals_[thread_id].input->match_iterator.GetNextBatch(
-                 pipe_minibatch_length, &num_matches_next,
+                 mini_batch_length, &num_matches_next,
                  thread_locals_[thread_id].materialize_batch_ids_buf_data(),
                  thread_locals_[thread_id].materialize_key_ids_buf_data(),
                  thread_locals_[thread_id].materialize_payload_ids_buf_data())) {
@@ -365,14 +365,14 @@ class ProbeProcessor {
         if (join_type_ == JoinType::LEFT_OUTER || join_type_ == JoinType::FULL_OUTER) {
           int num_passing_ids = 0;
           arrow::util::bit_util::bits_to_indexes(
-              /*bit_to_search=*/0, hardware_flags_, minibatch_size_next,
+              /*bit_to_search=*/0, hardware_flags_, mini_batch_size_next,
               thread_locals_[thread_id].match_bitvector_buf_data(), &num_passing_ids,
               thread_locals_[thread_id].materialize_batch_ids_buf_data());
 
           // Add base batch row index.
           for (int i = 0; i < num_passing_ids; ++i) {
             thread_locals_[thread_id].materialize_batch_ids_buf_data()[i] +=
-                static_cast<uint16_t>(thread_locals_[thread_id].input->minibatch_start);
+                static_cast<uint16_t>(thread_locals_[thread_id].input->mini_batch_start);
           }
 
           size_t rows_appended = 0;
@@ -392,7 +392,7 @@ class ProbeProcessor {
                   output.emplace(std::move(batch));
                   return Status::OK();
                 }));
-            minibatch_has_output = true;
+            mini_batch_has_output = true;
           }
 
           if (num_passing_ids > 0) {
@@ -405,14 +405,14 @@ class ProbeProcessor {
           }
         }
 
-        thread_locals_[thread_id].input->minibatch_start += minibatch_size_next;
+        thread_locals_[thread_id].input->mini_batch_start += mini_batch_size_next;
       }
     }
 
     if (match_has_output) {
       state_next = State::MATCH_HAS_MORE;
-    } else if (thread_locals_[thread_id].input->minibatch_start < num_rows) {
-      state_next = State::MINIBATCH_HAS_MORE;
+    } else if (thread_locals_[thread_id].input->mini_batch_start < num_rows) {
+      state_next = State::MINI_BATCH_HAS_MORE;
     }
 
     return Status::OK();
@@ -423,24 +423,24 @@ class ProbeProcessor {
                       std::vector<KeyColumnArray>* temp_column_arrays,
                       std::optional<Batch>& output, State& state_next) {
     size_t pipe_max_batch_length = pipeline_ctx.query_ctx->options.pipe_max_batch_length;
-    size_t pipe_minibatch_length = pipeline_ctx.query_ctx->options.pipe_minibatch_length;
+    size_t mini_batch_length = pipeline_ctx.query_ctx->options.mini_batch_length;
     int num_rows = static_cast<int>(thread_locals_[thread_id].input->batch.length);
     state_next = State::CLEAN;
-    bool minibatch_has_output = false;
+    bool mini_batch_has_output = false;
 
-    // Break into minibatches
-    for (; thread_locals_[thread_id].input->minibatch_start < num_rows &&
-           !minibatch_has_output;) {
-      uint32_t minibatch_size_next =
-          std::min(pipe_minibatch_length,
-                   num_rows - thread_locals_[thread_id].input->minibatch_start);
+    // Break into mini_batches
+    for (; thread_locals_[thread_id].input->mini_batch_start < num_rows &&
+           !mini_batch_has_output;) {
+      uint32_t mini_batch_size_next =
+          std::min(mini_batch_length,
+                   num_rows - thread_locals_[thread_id].input->mini_batch_start);
 
-      // Calculate hash and matches for this minibatch.
+      // Calculate hash and matches for this mini_batch.
       {
         SwissTableWithKeys::Input hash_table_input(
             &thread_locals_[thread_id].input->key_batch,
-            thread_locals_[thread_id].input->minibatch_start,
-            thread_locals_[thread_id].input->minibatch_start + minibatch_size_next,
+            thread_locals_[thread_id].input->mini_batch_start,
+            thread_locals_[thread_id].input->mini_batch_start + mini_batch_size_next,
             temp_stack, temp_column_arrays);
         hash_table_->keys()->Hash(&hash_table_input,
                                   thread_locals_[thread_id].hashes_buf_data(),
@@ -455,8 +455,8 @@ class ProbeProcessor {
       {
         bool ignored;
         JoinNullFilter::Filter(thread_locals_[thread_id].input->key_batch,
-                               thread_locals_[thread_id].input->minibatch_start,
-                               minibatch_size_next, *cmp_, &ignored,
+                               thread_locals_[thread_id].input->mini_batch_start,
+                               mini_batch_size_next, *cmp_, &ignored,
                                /*and_with_input=*/true,
                                thread_locals_[thread_id].match_bitvector_buf_data());
       }
@@ -464,13 +464,13 @@ class ProbeProcessor {
       int num_passing_ids = 0;
       arrow::util::bit_util::bits_to_indexes(
           (join_type_ == JoinType::LEFT_ANTI) ? 0 : 1, hardware_flags_,
-          minibatch_size_next, thread_locals_[thread_id].match_bitvector_buf_data(),
+          mini_batch_size_next, thread_locals_[thread_id].match_bitvector_buf_data(),
           &num_passing_ids, thread_locals_[thread_id].materialize_batch_ids_buf_data());
 
       // Add base batch row index.
       for (int i = 0; i < num_passing_ids; ++i) {
         thread_locals_[thread_id].materialize_batch_ids_buf_data()[i] +=
-            static_cast<uint16_t>(thread_locals_[thread_id].input->minibatch_start);
+            static_cast<uint16_t>(thread_locals_[thread_id].input->mini_batch_start);
       }
 
       size_t rows_appended = 0;
@@ -489,7 +489,7 @@ class ProbeProcessor {
           output.emplace(std::move(batch));
           return Status::OK();
         }));
-        minibatch_has_output = true;
+        mini_batch_has_output = true;
       }
 
       if (num_passing_ids > 0) {
@@ -500,11 +500,11 @@ class ProbeProcessor {
             &ignored));
       }
 
-      thread_locals_[thread_id].input->minibatch_start += minibatch_size_next;
+      thread_locals_[thread_id].input->mini_batch_start += mini_batch_size_next;
     }
 
-    if (thread_locals_[thread_id].input->minibatch_start < num_rows) {
-      state_next = State::MINIBATCH_HAS_MORE;
+    if (thread_locals_[thread_id].input->mini_batch_start < num_rows) {
+      state_next = State::MINI_BATCH_HAS_MORE;
     }
 
     return Status::OK();
@@ -514,22 +514,22 @@ class ProbeProcessor {
                        ThreadId thread_id, TempVectorStack* temp_stack,
                        std::vector<KeyColumnArray>* temp_column_arrays,
                        std::optional<Batch>& output, State& state_next) {
-    size_t pipe_minibatch_length = pipeline_ctx.query_ctx->options.pipe_minibatch_length;
+    size_t mini_batch_length = pipeline_ctx.query_ctx->options.mini_batch_length;
     int num_rows = static_cast<int>(thread_locals_[thread_id].input->batch.length);
     state_next = State::CLEAN;
 
-    // Break into minibatches
-    for (; thread_locals_[thread_id].input->minibatch_start < num_rows;) {
-      uint32_t minibatch_size_next =
-          std::min(pipe_minibatch_length,
-                   num_rows - thread_locals_[thread_id].input->minibatch_start);
+    // Break into mini_batches
+    for (; thread_locals_[thread_id].input->mini_batch_start < num_rows;) {
+      uint32_t mini_batch_size_next =
+          std::min(mini_batch_length,
+                   num_rows - thread_locals_[thread_id].input->mini_batch_start);
 
-      // Calculate hash and matches for this minibatch.
+      // Calculate hash and matches for this mini_batch.
       {
         SwissTableWithKeys::Input hash_table_input(
             &thread_locals_[thread_id].input->key_batch,
-            thread_locals_[thread_id].input->minibatch_start,
-            thread_locals_[thread_id].input->minibatch_start + minibatch_size_next,
+            thread_locals_[thread_id].input->mini_batch_start,
+            thread_locals_[thread_id].input->mini_batch_start + mini_batch_size_next,
             temp_stack, temp_column_arrays);
         hash_table_->keys()->Hash(&hash_table_input,
                                   thread_locals_[thread_id].hashes_buf_data(),
@@ -544,8 +544,8 @@ class ProbeProcessor {
       {
         bool ignored;
         JoinNullFilter::Filter(thread_locals_[thread_id].input->key_batch,
-                               thread_locals_[thread_id].input->minibatch_start,
-                               minibatch_size_next, *cmp_, &ignored,
+                               thread_locals_[thread_id].input->mini_batch_start,
+                               mini_batch_size_next, *cmp_, &ignored,
                                /*and_with_input=*/true,
                                thread_locals_[thread_id].match_bitvector_buf_data());
       }
@@ -553,7 +553,7 @@ class ProbeProcessor {
       int num_passing_ids = 0;
       arrow::util::bit_util::bits_to_indexes(
           (join_type_ == JoinType::LEFT_ANTI) ? 0 : 1, hardware_flags_,
-          minibatch_size_next, thread_locals_[thread_id].match_bitvector_buf_data(),
+          mini_batch_size_next, thread_locals_[thread_id].match_bitvector_buf_data(),
           &num_passing_ids, thread_locals_[thread_id].materialize_batch_ids_buf_data());
 
       // For right-semi, right-anti joins: update has-match flags for the rows
@@ -566,7 +566,7 @@ class ProbeProcessor {
       hash_table_->UpdateHasMatchForKeys(thread_id, num_passing_ids,
                                          thread_locals_[thread_id].key_ids_buf_data());
 
-      thread_locals_[thread_id].input->minibatch_start += minibatch_size_next;
+      thread_locals_[thread_id].input->mini_batch_start += mini_batch_size_next;
     }
 
     return Status::OK();
@@ -598,11 +598,11 @@ class ScanProcessor {
 
   OpResult Scan(const PipelineContext& pipeline_ctx, ThreadId thread_id,
                 TempVectorStack* temp_stack) {
-    size_t pipe_minibatch_length = pipeline_ctx.query_ctx->options.pipe_minibatch_length;
-    // Should we output matches or non-matches?
-    //
     size_t source_max_batch_length =
         pipeline_ctx.query_ctx->options.source_max_batch_length;
+    size_t mini_batch_length = pipeline_ctx.query_ctx->options.mini_batch_length;
+    // Should we output matches or non-matches?
+    //
     bool bit_to_output = (join_type_ == JoinType::RIGHT_SEMI);
 
     int64_t start_row =
@@ -623,16 +623,16 @@ class ScanProcessor {
 
     // Split into mini-batches
     //
-    auto payload_ids_buf = TempVectorHolder<uint32_t>(temp_stack, pipe_minibatch_length);
-    auto key_ids_buf = TempVectorHolder<uint32_t>(temp_stack, pipe_minibatch_length);
-    auto selection_buf = TempVectorHolder<uint16_t>(temp_stack, pipe_minibatch_length);
+    auto payload_ids_buf = TempVectorHolder<uint32_t>(temp_stack, mini_batch_length);
+    auto key_ids_buf = TempVectorHolder<uint32_t>(temp_stack, mini_batch_length);
+    auto selection_buf = TempVectorHolder<uint16_t>(temp_stack, mini_batch_length);
     std::optional<Batch> output;
     int64_t mini_batch_start = start_row;
     for (; mini_batch_start < end_row && !output.has_value();) {
       // Compute the size of the next mini-batch
       //
-      int64_t mini_batch_size_next = std::min(
-          end_row - mini_batch_start, static_cast<int64_t>(pipe_minibatch_length));
+      int64_t mini_batch_size_next =
+          std::min(end_row - mini_batch_start, static_cast<int64_t>(mini_batch_length));
 
       // Get the list of key and payload ids from this mini-batch to output.
       //
