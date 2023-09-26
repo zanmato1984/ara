@@ -888,3 +888,103 @@ TEST_F(HashJoinProbeTest, RightAnti) {
     ASSERT_EQ(result->GetBatch()->length, 3);
   }
 }
+
+TEST_F(HashJoinProbeTest, FullOuter) {
+  size_t dop = 4;
+  size_t source_batch_length = 3;
+  size_t pipe_batch_length = 3;
+  size_t mini_batch_length = 1;
+
+  auto schema_with_batch = []() {
+    arrow::acero::BatchesWithSchema out;
+    out.batches = {
+        arrow::acero::ExecBatchFromJSON({arrow::int32(), arrow::boolean()},
+                                        "[[null, true], [0, false], [1, false]]"),
+        arrow::acero::ExecBatchFromJSON({arrow::int32(), arrow::boolean()},
+                                        "[[2, null], [3, false], [4, false]]")};
+    out.schema = arrow::schema(
+        {arrow::field("i32", arrow::int32()), arrow::field("bool", arrow::boolean())});
+    return out;
+  }();
+  auto probe_batch = arrow::acero::ExecBatchFromJSON(
+      {arrow::int32(), arrow::boolean()},
+      "[[0, false], [0, true], [null, null], [1, false], [2, null], [5, true]]");
+  arrow::acero::HashJoinNodeOptions options{
+      arrow::acero::JoinType::FULL_OUTER, {{0}}, {{0}}, {{0}, {1}}, {{0}, {1}}};
+  Init(dop, source_batch_length, pipe_batch_length, mini_batch_length, options,
+       *schema_with_batch.schema, *schema_with_batch.schema);
+  RunHashJoinBuild(schema_with_batch.batches);
+
+  {
+    auto result = Probe(0, probe_batch);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsSourcePipeHasMore()) << result->ToString();
+    ASSERT_TRUE(result->GetBatch().has_value());
+    ASSERT_EQ(result->GetBatch()->length, 3);
+  }
+
+  for (size_t i = 0; i < 4; ++i) {
+    auto result = Probe(0, std::nullopt);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsSourcePipeHasMore()) << result->ToString();
+    ASSERT_TRUE(result->GetBatch().has_value());
+    ASSERT_EQ(result->GetBatch()->length, 3);
+  }
+
+  {
+    auto result = Probe(0, std::nullopt);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsPipeEven()) << result->ToString();
+    ASSERT_TRUE(result->GetBatch().has_value());
+    ASSERT_EQ(result->GetBatch()->length, 3);
+  }
+
+  StartScan();
+
+  {
+    auto result = Scan(0);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsSourcePipeHasMore()) << result->ToString();
+    ASSERT_TRUE(result->GetBatch().has_value());
+    ASSERT_EQ(result->GetBatch()->length, 3);
+  }
+
+  {
+    auto result = Scan(0);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsFinished()) << result->ToString();
+    ASSERT_TRUE(result->GetBatch().has_value());
+    ASSERT_EQ(result->GetBatch()->length, 1);
+  }
+
+  {
+    auto result = Scan(1);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsFinished()) << result->ToString();
+    ASSERT_FALSE(result->GetBatch().has_value());
+  }
+
+  {
+    auto result = Scan(2);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsFinished()) << result->ToString();
+    ASSERT_TRUE(result->GetBatch().has_value());
+    ASSERT_EQ(result->GetBatch()->length, 2);
+  }
+
+  {
+    auto result = Scan(3);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsSourcePipeHasMore()) << result->ToString();
+    ASSERT_TRUE(result->GetBatch().has_value());
+    ASSERT_EQ(result->GetBatch()->length, 3);
+  }
+
+  {
+    auto result = Scan(3);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsFinished()) << result->ToString();
+    ASSERT_TRUE(result->GetBatch().has_value());
+    ASSERT_EQ(result->GetBatch()->length, 3);
+  }
+}
