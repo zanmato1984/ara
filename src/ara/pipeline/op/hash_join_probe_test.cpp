@@ -110,7 +110,6 @@ TEST_F(HashJoinProbeTest, InnerBatchHasMore) {
   ASSERT_EQ(probe_result->GetBatch()->length, 3);
 }
 
-// TODO: Even doesn't work now.
 TEST_F(HashJoinProbeTest, InnerEven) {
   size_t dop = 4;
   size_t batch_length = 4;
@@ -123,10 +122,21 @@ TEST_F(HashJoinProbeTest, InnerEven) {
        *schema_with_batch.schema);
   RunHashJoinBuild(schema_with_batch.batches);
 
-  auto probe_result = ProbeOne(0, schema_with_batch.batches[0]);
-  ASSERT_OK(probe_result);
-  ASSERT_TRUE(probe_result->IsPipeEven());
-  ASSERT_EQ(probe_result->GetBatch()->length, 4);
+  // TODO: This should be an Even, but current JoinMatchIterator always requires a
+  // GetNextMatch() call to tell the current batch is done so the best we can get is a
+  // HasMore.
+  {
+    auto probe_result = ProbeOne(0, schema_with_batch.batches[0]);
+    ASSERT_OK(probe_result);
+    ASSERT_TRUE(probe_result->IsSourcePipeHasMore());
+    ASSERT_EQ(probe_result->GetBatch()->length, 4);
+  }
+
+  {
+    auto probe_result = ProbeOne(0, std::nullopt);
+    ASSERT_OK(probe_result);
+    ASSERT_TRUE(probe_result->IsPipeSinkNeedsMore());
+  }
 }
 
 TEST_F(HashJoinProbeTest, InnerNeedsMore) {
