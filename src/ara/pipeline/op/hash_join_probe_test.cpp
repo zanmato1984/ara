@@ -618,3 +618,103 @@ TEST_F(HashJoinProbeTest, RightOuter) {
     ASSERT_EQ(result->GetBatch()->length, 3);
   }
 }
+
+TEST_F(HashJoinProbeTest, RightOuterDrainInScan) {
+  size_t dop = 4;
+  size_t source_batch_length = 17;
+  size_t pipe_batch_length = 17;
+  size_t mini_batch_length = 1;
+
+  auto schema_with_batch = []() {
+    arrow::acero::BatchesWithSchema out;
+    out.batches = {
+        arrow::acero::ExecBatchFromJSON({arrow::int32(), arrow::boolean()},
+                                        "[[null, true], [0, false], [1, false]]"),
+        arrow::acero::ExecBatchFromJSON({arrow::int32(), arrow::boolean()},
+                                        "[[2, null], [3, false], [4, false]]")};
+    out.schema = arrow::schema(
+        {arrow::field("i32", arrow::int32()), arrow::field("bool", arrow::boolean())});
+    return out;
+  }();
+  auto probe_batch =
+      arrow::acero::ExecBatchFromJSON({arrow::int32(), arrow::boolean()},
+                                      "[[1, false], [2, true], [3, false], [4, null]]");
+  arrow::acero::HashJoinNodeOptions options{
+      arrow::acero::JoinType::RIGHT_OUTER, {{0}}, {{0}}, {{0}, {1}}, {{0}, {1}}};
+  Init(dop, source_batch_length, pipe_batch_length, mini_batch_length, options,
+       *schema_with_batch.schema, *schema_with_batch.schema);
+  RunHashJoinBuild(schema_with_batch.batches);
+
+  {
+    auto result = Probe(0, probe_batch);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsPipeSinkNeedsMore()) << result->ToString();
+  }
+
+  StartScan();
+
+  {
+    auto result = Scan(0);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsSourcePipeHasMore()) << result->ToString();
+    ASSERT_TRUE(result->GetBatch().has_value());
+    ASSERT_EQ(result->GetBatch()->length, 17);
+  }
+
+  {
+    auto result = Scan(0);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsFinished()) << result->ToString();
+    ASSERT_TRUE(result->GetBatch().has_value());
+  }
+}
+
+TEST_F(HashJoinProbeTest, RightOuterDrainBeforeScan) {
+  size_t dop = 4;
+  size_t source_batch_length = 3;
+  size_t pipe_batch_length = 17;
+  size_t mini_batch_length = 1;
+
+  auto schema_with_batch = []() {
+    arrow::acero::BatchesWithSchema out;
+    out.batches = {
+        arrow::acero::ExecBatchFromJSON({arrow::int32(), arrow::boolean()},
+                                        "[[null, true], [0, false], [1, false]]"),
+        arrow::acero::ExecBatchFromJSON({arrow::int32(), arrow::boolean()},
+                                        "[[2, null], [3, false], [4, false]]")};
+    out.schema = arrow::schema(
+        {arrow::field("i32", arrow::int32()), arrow::field("bool", arrow::boolean())});
+    return out;
+  }();
+  auto probe_batch =
+      arrow::acero::ExecBatchFromJSON({arrow::int32(), arrow::boolean()},
+                                      "[[1, false], [2, true], [3, false], [4, null]]");
+  arrow::acero::HashJoinNodeOptions options{
+      arrow::acero::JoinType::RIGHT_OUTER, {{0}}, {{0}}, {{0}, {1}}, {{0}, {1}}};
+  Init(dop, source_batch_length, pipe_batch_length, mini_batch_length, options,
+       *schema_with_batch.schema, *schema_with_batch.schema);
+  RunHashJoinBuild(schema_with_batch.batches);
+
+  {
+    auto result = Probe(0, probe_batch);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsPipeSinkNeedsMore()) << result->ToString();
+  }
+
+  StartScan();
+
+  {
+    auto result = Scan(0);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsSourcePipeHasMore()) << result->ToString();
+    ASSERT_TRUE(result->GetBatch().has_value());
+    ASSERT_EQ(result->GetBatch()->length, 16);
+  }
+
+  {
+    auto result = Scan(0);
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsSourcePipeHasMore()) << result->ToString();
+    ASSERT_TRUE(result->GetBatch().has_value());
+  }
+}

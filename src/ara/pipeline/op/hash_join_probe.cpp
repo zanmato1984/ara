@@ -108,11 +108,6 @@ class ProbeProcessor {
 
   OpResult Drain(const PipelineContext& pipeline_ctx, const TaskContext& task_ctx,
                  ThreadId thread_id) {
-    if (NeedToScan(join_type_)) {
-      // No need to drain now, scan will output the remaining rows in materialize.
-      return OpOutput::Finished();
-    }
-
     std::optional<Batch> output;
     if (thread_locals_[thread_id].materialize->num_rows() > 0) {
       ARA_RETURN_NOT_OK(thread_locals_[thread_id].materialize->Flush([&](Batch batch) {
@@ -600,6 +595,19 @@ class ScanProcessor {
                 TempVectorStack* temp_stack) {
     size_t source_max_batch_length =
         pipeline_ctx.query_ctx->options.source_max_batch_length;
+
+    // Clear materialize if we can't combine the rows remained in probe with the ones to
+    // be scaned. And at this point, we can't respect the source_max_batch_length.
+    //
+    if (thread_locals_[thread_id].materialize->num_rows() >= source_max_batch_length) {
+      std::optional<Batch> output;
+      ARA_RETURN_NOT_OK(thread_locals_[thread_id].materialize->Flush([&](Batch batch) {
+        output.emplace(std::move(batch));
+        return Status::OK();
+      }));
+      return OpOutput::SourcePipeHasMore(std::move(output.value()));
+    }
+
     size_t mini_batch_length = pipeline_ctx.query_ctx->options.mini_batch_length;
     // Should we output matches or non-matches?
     //
@@ -793,6 +801,11 @@ PipelinePipe HashJoinProbe::Pipe(const PipelineContext&) {
 }
 
 PipelineDrain HashJoinProbe::Drain(const PipelineContext&) {
+  if (detail::NeedToScan(join_type_)) {
+    // No need to drain if scan is needed, scan will output the remaining rows in
+    // materialize.
+    return {};
+  }
   return [&](const PipelineContext& pipeline_ctx, const TaskContext& task_ctx,
              ThreadId thread_id) {
     return probe_processor_->Drain(pipeline_ctx, task_ctx, thread_id);
