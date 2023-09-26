@@ -597,7 +597,7 @@ class ScanProcessor {
         pipeline_ctx.query_ctx->options.source_max_batch_length;
 
     // Clear materialize if we can't combine the rows remained in probe with the ones to
-    // be scaned. And at this point, we can't respect the source_max_batch_length.
+    // be scanned. And at this point, we can't respect the source_max_batch_length.
     //
     if (thread_locals_[thread_id].materialize->num_rows() >= source_max_batch_length) {
       std::optional<Batch> output;
