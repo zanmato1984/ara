@@ -9,6 +9,7 @@ set(ARA_PIPELINE_SRC
         "op/hash_join_build.cpp"
         "op/hash_join_probe.cpp"
         "op/scalar_aggregate.cpp"
+        "op/single_batch_parallel_source.cpp"
         "pipeline_observer.cpp"
         "pipeline_task.cpp"
         "physical_pipeline.cpp")
@@ -44,3 +45,7 @@ add_ara_test(ara-scalar-aggregate-test ara-pipeline "${ARA_SCALAR_AGGREGATE_TEST
 set(ARA_HASH_AGGREGATE_TEST_SRC
         "op/hash_aggregate_test.cpp")
 add_ara_test(ara-hash-aggregate-test ara-pipeline "${ARA_HASH_AGGREGATE_TEST_SRC}")
+
+set(ARA_SINGLE_BATCH_PARALLEL_SOURCE_TEST_SRC
+        "op/single_batch_parallel_source.cpp")
+add_ara_test(ara-single-batch-parallel-source-test ara-pipeline "${ARA_SINGLE_BATCH_PARALLEL_SOURCE_TEST_SRC}")
