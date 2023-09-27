@@ -4,6 +4,7 @@ set(CMAKE_CXX_STANDARD 20)
 
 set(ARA_PIPELINE_SRC
         "logical_pipeline.cpp"
+        "op/hash_aggregate.cpp"
         "op/hash_join.cpp"
         "op/hash_join_build.cpp"
         "op/hash_join_probe.cpp"
@@ -34,3 +35,7 @@ add_ara_test(ara-hash-join-build-test ara-pipeline "${ARA_HASH_JOIN_BUILD_TEST_S
 set(ARA_HASH_JOIN_PROBE_TEST_SRC
         "op/hash_join_probe_test.cpp")
 add_ara_test(ara-hash-join-probe-test ara-pipeline "${ARA_HASH_JOIN_PROBE_TEST_SRC}")
+
+set(ARA_HASH_AGGREGATE_TEST_SRC
+        "op/hash_aggregate_test.cpp")
+add_ara_test(ara-hash-aggregate-test ara-pipeline "${ARA_HASH_AGGREGATE_TEST_SRC}")
