@@ -16,9 +16,9 @@
 #include <gtest/gtest.h>
 
 using namespace ara;
-using namespace ara::task;
 using namespace ara::pipeline;
 using namespace ara::schedule;
+using namespace ara::task;
 
 using ara::pipeline::detail::HashJoin;
 

@@ -17,6 +17,7 @@ Status SingleBatchParallelSource::Init(const PipelineContext&, size_t dop,
                                        std::shared_ptr<Batch> batch) {
   dop_ = dop;
   batch_ = std::move(batch);
+  thread_locals_.resize(dop_);
   return Status::OK();
 }
 
@@ -26,7 +27,8 @@ PipelineSource SingleBatchParallelSource::Source(const PipelineContext& pipeline
              ThreadId thread_id) -> OpResult {
     size_t source_batch_size = pipeline_ctx.query_ctx->options.source_max_batch_length;
     size_t total_rows_per_thread = CeilDiv(batch_->length, dop_);
-    size_t start_this_thread = total_rows_per_thread * thread_id;
+    size_t start_this_thread =
+        std::min(total_rows_per_thread * thread_id, size_t(batch_->length));
     size_t end_this_thread =
         std::min(total_rows_per_thread * (thread_id + 1), size_t(batch_->length));
     size_t start_this_run =
