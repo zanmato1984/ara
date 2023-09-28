@@ -60,7 +60,7 @@ TEST_P(SingleBatchParallelSourceTest, Basic) {
       ASSERT_EQ(batch.value().values.size(), 1);
       ASSERT_TRUE(batch.value().values[0].is_array());
       auto array = batch.value().values[0].array();
-      auto* data = reinterpret_cast<const int64_t*>(array->buffers[1]->data());
+      auto* data = array->GetValues<int64_t>(1);
       for (size_t i = 0; i < batch.value().length; ++i) {
         values.push_back(data[i]);
       }
@@ -73,7 +73,7 @@ TEST_P(SingleBatchParallelSourceTest, Basic) {
       ASSERT_EQ(batch.value().values.size(), 1);
       ASSERT_TRUE(batch.value().values[0].is_array());
       auto array = batch.value().values[0].array();
-      auto* data = reinterpret_cast<const int64_t*>(array->buffers[1]->data());
+      auto* data = array->GetValues<int64_t>(1);
       for (size_t i = 0; i < batch.value().length; ++i) {
         values.push_back(data[i]);
       }
