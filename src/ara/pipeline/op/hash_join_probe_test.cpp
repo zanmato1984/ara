@@ -15,7 +15,6 @@
 #include <arrow/acero/test_util_internal.h>
 #include <arrow/testing/gtest_util.h>
 #include <folly/executors/CPUThreadPoolExecutor.h>
-#include <folly/executors/IOThreadPoolExecutor.h>
 #include <gtest/gtest.h>
 
 using namespace ara;
