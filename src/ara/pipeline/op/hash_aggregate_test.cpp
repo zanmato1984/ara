@@ -106,7 +106,10 @@ TEST_F(HashAggregateTest, Count) {
 
   auto output_schema = arrow::schema(
       {arrow::field("key_i32", arrow::int32()), arrow::field("count", arrow::int64())});
-  auto exp_batch = arrow::acero::ExecBatchFromJSON({arrow::int32(), arrow::int64()},
-                                                   "[[1, 32], [2, 24], [3, 16], [4, 8]]");
+  std::stringstream ss;
+  ss << "[[1, " << 4 * dop_ << "], [2, " << 3 * dop_ << "], [3, " << 2 * dop_ << "], [4, "
+     << 1 * dop_ << "]]";
+  auto exp_batch =
+      arrow::acero::ExecBatchFromJSON({arrow::int32(), arrow::int64()}, ss.str());
   arrow::acero::AssertExecBatchesEqualIgnoringOrder(output_schema, {exp_batch}, batches);
 }
