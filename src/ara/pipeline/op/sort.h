@@ -2,6 +2,7 @@
 
 #include <ara/pipeline/op/op.h>
 
+#include <arrow/api.h>
 #include <arrow/compute/api.h>
 
 namespace ara::pipeline {
@@ -10,7 +11,8 @@ class Sort : public SinkOp {
  public:
   using SinkOp::SinkOp;
 
-  Status Init(const PipelineContext&, size_t, const arrow::SortOptions&, const arrow::Schema&);
+  Status Init(const PipelineContext&, size_t, const arrow::compute::SortOptions&,
+              const arrow::Schema&);
 
   PipelineSink Sink(const PipelineContext&) override;
 
@@ -29,8 +31,7 @@ class Sort : public SinkOp {
   std::shared_ptr<arrow::Schema> output_schema_;
 
   std::mutex mutex_;
-  std::vector<std::shared_ptr<RecordBatch>> batches_;
-  std::shared_ptr<Batch> output_batch_ = nullptr;
+  std::vector<std::shared_ptr<arrow::RecordBatch>> batches_;
 };
 
 }  // namespace ara::pipeline
