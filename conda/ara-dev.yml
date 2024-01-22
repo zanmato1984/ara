@@ -16,10 +16,10 @@ dependencies:
   - grpc-cpp
   - libprotobuf
   - libutf8proc
+  - llvm-openmp
   - lz4-c
   - make
   - ninja
-  - openmp
   - orc
   - pkg-config
   - python
