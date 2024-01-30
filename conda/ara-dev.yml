@@ -3,7 +3,7 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - aws-sdk-cpp=1.8.186
+  - aws-sdk-cpp=1.11.68
   - benchmark>=1.6.0
   - boost-cpp>=1.68.0
   - brotli
