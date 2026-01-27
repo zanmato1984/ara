@@ -33,7 +33,7 @@ class ScalarAggregateTest : public testing::Test {
   void SetUp() override {
     arrow_query_ctx_ = std::make_unique<arrow::acero::QueryContext>(
         arrow::acero::QueryOptions{}, arrow::compute::ExecContext());
-    ASSERT_OK(arrow_query_ctx_->Init(dop_, nullptr));
+    ASSERT_OK(arrow_query_ctx_->Init(nullptr));
   }
 
   OpResult Run(const arrow::acero::AggregateNodeOptions& options,

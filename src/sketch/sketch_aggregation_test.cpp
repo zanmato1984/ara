@@ -490,7 +490,7 @@ class HashAggregateSink : public SinkOp {
       for (size_t i = 0; i < agg_kernels_.size(); ++i) {
         auto ctx = ctx_->exec_context();
         KernelContext batch_ctx{ctx};
-        DCHECK(state0->agg_states[i]);
+        ARA_DCHECK(state0->agg_states[i]);
         batch_ctx.SetState(state0->agg_states[i].get());
 
         RETURN_NOT_OK(agg_kernels_[i]->resize(&batch_ctx, state0->grouper->num_groups()));
@@ -585,7 +585,7 @@ TEST(ScalarAggregate, Basic) {
   std::unique_ptr<arrow::acero::QueryContext> query_ctx =
       std::make_unique<arrow::acero::QueryContext>(arrow::acero::QueryOptions{},
                                                    arrow::compute::ExecContext());
-  ASSERT_OK(query_ctx->Init(8, nullptr));
+  ASSERT_OK(query_ctx->Init(nullptr));
 
   arrow::compute::Aggregate agg("count", nullptr, std::vector<arrow::FieldRef>{{0}},
                                 "count");
@@ -629,7 +629,7 @@ TEST(HashAggregate, Basic) {
   std::unique_ptr<arrow::acero::QueryContext> query_ctx =
       std::make_unique<arrow::acero::QueryContext>(arrow::acero::QueryOptions{},
                                                    arrow::compute::ExecContext());
-  ASSERT_OK(query_ctx->Init(8, nullptr));
+  ASSERT_OK(query_ctx->Init(nullptr));
 
   arrow::compute::Aggregate agg("hash_count", nullptr, std::vector<arrow::FieldRef>{{1}},
                                 "count");

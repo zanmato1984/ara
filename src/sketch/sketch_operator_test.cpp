@@ -21,6 +21,7 @@
 #include <arrow/acero/hash_join.h>
 #include <arrow/acero/hash_join_node.h>
 #include <arrow/api.h>
+#include <arrow/util/logging_internal.h>
 #include <arrow/util/future.h>
 #include <gtest/gtest.h>
 
@@ -346,7 +347,7 @@ TEST(OperatorTest, HashJoinBreakAndFinish) {
       ctx = std::make_unique<arrow::acero::QueryContext>(
           arrow::acero::QueryOptions{},
           arrow::compute::ExecContext(memory_pool, NULLPTR, NULLPTR));
-      DCHECK_OK(ctx->Init(dop, NULLPTR));
+      DCHECK_OK(ctx->Init(NULLPTR));
     }
   };
 

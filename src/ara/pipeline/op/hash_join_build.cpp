@@ -5,8 +5,6 @@
 #include <ara/task/task_status.h>
 #include <ara/util/util.h>
 
-#include <arrow/acero/query_context.h>
-
 namespace ara::pipeline {
 
 using namespace ara::task;
@@ -22,150 +20,141 @@ namespace detail {
 
 class BuildProcessor {
  public:
-  Status Init(const PipelineContext& ctx, HashJoin* hash_join,
-              AccumulationQueue* batches) {
+  Status Init(HashJoin* hash_join, AccumulationQueue* batches) {
+    hash_join_ = hash_join;
     dop_ = hash_join->dop;
-    hardware_flags_ = hash_join->hardware_flags;
-    pool_ = hash_join->pool;
-
     schema_ = hash_join->schema[1];
-    join_type_ = hash_join->join_type;
     hash_table_build_ = &hash_join->hash_table_build;
-    hash_table_ = &hash_join->hash_table;
     batches_ = batches;
-
-    thread_locals_.resize(dop_);
-    for (int i = 0; i < dop_; ++i) {
-      thread_locals_[i].materialize = &hash_join->materialize[i];
-    }
-
     return Status::OK();
   }
 
   Status StartBuild() {
-    bool reject_duplicate_keys =
-        join_type_ == JoinType::LEFT_SEMI || join_type_ == JoinType::LEFT_ANTI;
-    bool no_payload =
-        reject_duplicate_keys || schema_->num_cols(HashJoinProjection::PAYLOAD) == 0;
-
     std::vector<KeyColumnMetadata> key_types;
     for (int i = 0; i < schema_->num_cols(HashJoinProjection::KEY); ++i) {
-      ARA_ASSIGN_OR_RAISE(
+      ARROW_ASSIGN_OR_RAISE(
           KeyColumnMetadata metadata,
           ColumnMetadataFromDataType(schema_->data_type(HashJoinProjection::KEY, i)));
       key_types.push_back(metadata);
     }
+
     std::vector<KeyColumnMetadata> payload_types;
     for (int i = 0; i < schema_->num_cols(HashJoinProjection::PAYLOAD); ++i) {
-      ARA_ASSIGN_OR_RAISE(
+      ARROW_ASSIGN_OR_RAISE(
           KeyColumnMetadata metadata,
           ColumnMetadataFromDataType(schema_->data_type(HashJoinProjection::PAYLOAD, i)));
       payload_types.push_back(metadata);
     }
-    return hash_table_build_->Init(hash_table_, dop_, batches_->row_count(),
+
+    bool reject_duplicate_keys = hash_join_->join_type == JoinType::LEFT_SEMI ||
+                                hash_join_->join_type == JoinType::LEFT_ANTI;
+    bool no_payload = reject_duplicate_keys ||
+                      schema_->num_cols(HashJoinProjection::PAYLOAD) == 0;
+
+    return hash_table_build_->Init(&hash_join_->hash_table, static_cast<int>(dop_),
+                                   batches_->row_count(), batches_->batch_count(),
                                    reject_duplicate_keys, no_payload, key_types,
-                                   payload_types, pool_, hardware_flags_);
+                                   payload_types, hash_join_->pool,
+                                   hash_join_->hardware_flags);
   }
 
-  TaskResult Build(ThreadId thread_id, TempVectorStack* temp_stack) {
-    auto batch_id = dop_ * thread_locals_[thread_id].round + thread_id;
-    if (batch_id >= batches_->batch_count()) {
-      return TaskStatus::Finished();
-    }
-    thread_locals_[thread_id].round++;
+  TaskResult Partition(ThreadId thread_id) {
+    for (int64_t batch_id = static_cast<int64_t>(thread_id);
+         batch_id < static_cast<int64_t>(batches_->batch_count());
+         batch_id += static_cast<int64_t>(dop_)) {
+      Batch input_batch;
+      ARA_ASSIGN_OR_RAISE(input_batch, hash_join_->KeyPayloadFromInput(
+                                           /*side=*/1, &(*batches_)[batch_id]));
 
+      Batch key_batch({}, input_batch.length);
+      key_batch.values.resize(schema_->num_cols(HashJoinProjection::KEY));
+      for (size_t icol = 0; icol < key_batch.values.size(); ++icol) {
+        key_batch.values[icol] = input_batch.values[icol];
+      }
+
+      auto* temp_stack = &hash_join_->temp_stacks[thread_id];
+      ARA_RETURN_NOT_OK(hash_table_build_->PartitionBatch(
+          static_cast<size_t>(thread_id), batch_id, key_batch, temp_stack));
+    }
+
+    return TaskStatus::Finished();
+  }
+
+  TaskResult Build(ThreadId thread_id) {
     bool no_payload = hash_table_build_->no_payload();
 
-    Batch input_batch;
-    ARA_ASSIGN_OR_RAISE(input_batch,
-                        KeyPayloadFromInput(schema_, pool_, &(*batches_)[batch_id]));
-
-    if (input_batch.length == 0) {
-      return TaskStatus::Continue();
-    }
-
-    // Split batch into key batch and optional payload batch
-    //
-    // Input batch is key-payload batch (key columns followed by payload
-    // columns). We split it into two separate batches.
-    //
-    // TODO: Change SwissTableForJoinBuild interface to use key-payload
-    // batch instead to avoid this operation, which involves increasing
-    // shared pointer ref counts.
-    //
-    Batch key_batch({}, input_batch.length);
-    key_batch.values.resize(schema_->num_cols(HashJoinProjection::KEY));
-    for (size_t icol = 0; icol < key_batch.values.size(); ++icol) {
-      key_batch.values[icol] = input_batch.values[icol];
-    }
-    Batch payload_batch({}, input_batch.length);
-
+    ExecBatch key_batch;
+    ExecBatch payload_batch;
+    auto num_keys = schema_->num_cols(HashJoinProjection::KEY);
+    auto num_payloads = schema_->num_cols(HashJoinProjection::PAYLOAD);
+    key_batch.values.resize(num_keys);
     if (!no_payload) {
-      payload_batch.values.resize(schema_->num_cols(HashJoinProjection::PAYLOAD));
-      for (size_t icol = 0; icol < payload_batch.values.size(); ++icol) {
-        payload_batch.values[icol] =
-            input_batch.values[schema_->num_cols(HashJoinProjection::KEY) + icol];
+      payload_batch.values.resize(num_payloads);
+    }
+
+    auto* temp_stack = &hash_join_->temp_stacks[thread_id];
+
+    for (int64_t prtn_id = static_cast<int64_t>(thread_id);
+         prtn_id < static_cast<int64_t>(hash_table_build_->num_prtns());
+         prtn_id += static_cast<int64_t>(dop_)) {
+      for (int64_t batch_id = 0;
+           batch_id < static_cast<int64_t>(batches_->batch_count()); ++batch_id) {
+        Batch input_batch;
+        ARA_ASSIGN_OR_RAISE(input_batch, hash_join_->KeyPayloadFromInput(
+                                             /*side=*/1, &(*batches_)[batch_id]));
+
+        key_batch.length = input_batch.length;
+        for (size_t icol = 0; icol < key_batch.values.size(); ++icol) {
+          key_batch.values[icol] = input_batch.values[icol];
+        }
+
+        if (!no_payload) {
+          payload_batch.length = input_batch.length;
+          for (size_t icol = 0; icol < payload_batch.values.size(); ++icol) {
+            payload_batch.values[icol] = input_batch.values[num_keys + icol];
+          }
+        }
+
+        ARA_RETURN_NOT_OK(hash_table_build_->ProcessPartition(
+            static_cast<size_t>(thread_id), batch_id, static_cast<int>(prtn_id),
+            key_batch, no_payload ? nullptr : &payload_batch, temp_stack));
       }
     }
 
-    ARA_RETURN_NOT_OK(hash_table_build_->PushNextBatch(
-        static_cast<int64_t>(thread_id), key_batch, no_payload ? nullptr : &payload_batch,
-        temp_stack));
-
-    // Release input batch
-    //
-    input_batch.values.clear();
-
-    return TaskStatus::Continue();
+    return TaskStatus::Finished();
   }
 
-  TaskResult FinishBuild() {
+  TaskResult PrepareMerge() {
     batches_->Clear();
+    ARA_RETURN_NOT_OK(hash_table_build_->PreparePrtnMerge());
     return TaskStatus::Finished();
   }
 
-  TaskResult StartMerge() {
-    auto status = hash_table_build_->PreparePrtnMerge();
-    if (status.ok()) {
-      return TaskStatus::Finished();
-    } else {
-      return status;
-    }
-  }
-
-  TaskResult Merge(ThreadId thread_id, TempVectorStack* temp_stack) {
-    hash_table_build_->PrtnMerge(static_cast<int>(thread_id));
+  TaskResult Merge(TaskId task_id) {
+    hash_table_build_->PrtnMerge(static_cast<int>(task_id));
     return TaskStatus::Finished();
   }
 
-  TaskResult FinishMerge(TempVectorStack* temp_stack) {
-    hash_table_build_->FinishPrtnMerge(temp_stack);
+  TaskResult FinishMerge() {
+    hash_table_build_->FinishPrtnMerge(&hash_join_->temp_stacks[0]);
 
-    for (int i = 0; i < thread_locals_.size(); ++i) {
-      thread_locals_[i].materialize->SetBuildSide(
-          hash_table_->keys()->keys(), hash_table_->payloads(),
-          hash_table_->key_to_payload() == nullptr);
+    for (int i = 0; i < hash_join_->materialize.size(); ++i) {
+      hash_join_->materialize[i].SetBuildSide(
+          hash_join_->hash_table.keys()->keys(), hash_join_->hash_table.payloads(),
+          hash_join_->hash_table.key_to_payload() == nullptr);
     }
 
     return TaskStatus::Finished();
   }
+
+  size_t NumPartitions() const { return hash_table_build_->num_prtns(); }
 
  private:
-  size_t dop_;
-  int64_t hardware_flags_;
-  arrow::MemoryPool* pool_;
-
-  HashJoinProjectionMaps* schema_;
-  JoinType join_type_;
-  SwissTableForJoinBuild* hash_table_build_;
-  SwissTableForJoin* hash_table_;
-  AccumulationQueue* batches_;
-
-  struct ThreadLocalState {
-    size_t round = 0;
-    JoinResultMaterialize* materialize = nullptr;
-  };
-  std::vector<ThreadLocalState> thread_locals_;
+  HashJoin* hash_join_ = nullptr;
+  size_t dop_ = 0;
+  HashJoinProjectionMaps* schema_ = nullptr;
+  SwissTableForJoinBuild* hash_table_build_ = nullptr;
+  AccumulationQueue* batches_ = nullptr;
 };
 
 }  // namespace detail
@@ -182,7 +171,7 @@ Status HashJoinBuild::Init(const PipelineContext& ctx,
   dop_ = hash_join_->dop;
   ctx_ = hash_join_->ctx;
   hash_table_build_ = &hash_join_->hash_table_build;
-  return build_processor_->Init(ctx, hash_join_.get(), &build_side_batches_);
+  return build_processor_->Init(hash_join_.get(), &build_side_batches_);
 }
 
 PipelineSink HashJoinBuild::Sink(const PipelineContext&) {
@@ -200,39 +189,36 @@ PipelineSink HashJoinBuild::Sink(const PipelineContext&) {
 TaskGroups HashJoinBuild::Frontend(const PipelineContext&) {
   ARA_CHECK_OK(build_processor_->StartBuild());
 
+  Task partition_task("HashJoinBuild::PartitionTask", "",
+                      [&](const TaskContext&, TaskId task_id) -> TaskResult {
+                        return build_processor_->Partition(task_id);
+                      });
+
   Task build_task("HashJoinBuild::BuildTask", "",
                   [&](const TaskContext&, TaskId task_id) -> TaskResult {
-                    ARA_ASSIGN_OR_RAISE(TempVectorStack * temp_stack,
-                                        ctx_->GetTempStack(task_id));
-                    return build_processor_->Build(task_id, temp_stack);
+                    return build_processor_->Build(task_id);
                   });
   Continuation build_task_cont("HashJoinBuild::BuildCont", "",
                                [&](const TaskContext&) -> TaskResult {
-                                 ARA_RETURN_NOT_OK(build_processor_->FinishBuild());
-                                 return build_processor_->StartMerge();
+                                 return build_processor_->PrepareMerge();
                                });
 
   Task merge_task("HashJoinBuild::MergeTask", "",
                   [&](const TaskContext&, TaskId task_id) -> TaskResult {
-                    ARA_ASSIGN_OR_RAISE(TempVectorStack * temp_stack,
-                                        ctx_->GetTempStack(task_id));
-                    return build_processor_->Merge(task_id, temp_stack);
+                    return build_processor_->Merge(task_id);
                   });
-  size_t num_merge_tasks = hash_table_build_->num_prtns();
+  size_t num_merge_tasks = build_processor_->NumPartitions();
+  Continuation merge_task_cont("HashJoinBuild::MergeCont", "",
+                               [&](const TaskContext&) -> TaskResult {
+                                 return build_processor_->FinishMerge();
+                               });
 
-  Task finish_merge_task("HashJoinBuild::FinishMergeTask", "",
-                         [&](const TaskContext&, TaskId task_id) -> TaskResult {
-                           ARA_ASSIGN_OR_RAISE(TempVectorStack * temp_stack,
-                                               ctx_->GetTempStack(task_id));
-                           return build_processor_->FinishMerge(temp_stack);
-                         });
-
-  return {{"HashJoinBuld::Build", "", std::move(build_task), dop_,
+  return {{"HashJoinBuild::Partition", "", std::move(partition_task), dop_, std::nullopt,
+           nullptr},
+          {"HashJoinBuild::Build", "", std::move(build_task), dop_,
            std::move(build_task_cont), nullptr},
-          {"HashJoinBuld::Merge", "", std::move(merge_task), num_merge_tasks,
-           std::nullopt, nullptr},
-          {"HashJoinBuld::FinishMerge", "", std::move(finish_merge_task), 1, std::nullopt,
-           nullptr}};
+          {"HashJoinBuild::Merge", "", std::move(merge_task), num_merge_tasks,
+           std::move(merge_task_cont), nullptr}};
 }
 
 }  // namespace ara::pipeline

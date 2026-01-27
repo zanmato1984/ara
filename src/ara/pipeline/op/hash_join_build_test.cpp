@@ -38,7 +38,7 @@ class HashJoinBuildTest : public testing::Test {
     dop_ = dop;
     arrow_query_ctx_ = std::make_unique<arrow::acero::QueryContext>(
         arrow::acero::QueryOptions{}, arrow::compute::ExecContext());
-    ASSERT_OK(arrow_query_ctx_->Init(dop, nullptr));
+    ASSERT_OK(arrow_query_ctx_->Init(nullptr));
     ASSERT_OK(hash_join_->Init(pipeline_ctx_, dop, arrow_query_ctx_.get(), options,
                                left_schema, right_schema));
     ASSERT_OK(hash_join_build_.Init(pipeline_ctx_, hash_join_));

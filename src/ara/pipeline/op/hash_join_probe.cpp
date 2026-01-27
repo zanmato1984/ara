@@ -31,6 +31,7 @@ bool NeedToScan(JoinType join_type) {
 class ProbeProcessor {
  public:
   Status Init(const PipelineContext& pipeline_ctx, HashJoin* hash_join) {
+    hash_join_ = hash_join;
     hardware_flags_ = hash_join->hardware_flags;
     pool_ = hash_join->pool;
 
@@ -121,6 +122,7 @@ class ProbeProcessor {
  private:
   int64_t hardware_flags_;
   MemoryPool* pool_;
+  HashJoin* hash_join_ = nullptr;
 
   int num_key_columns_;
   HashJoinProjectionMaps* schema_;
@@ -185,7 +187,7 @@ class ProbeProcessor {
 
         // Prepare input.
         Batch batch;
-        ARA_ASSIGN_OR_RAISE(batch, KeyPayloadFromInput(schema_, pool_, &input.value()));
+        ARA_ASSIGN_OR_RAISE(batch, hash_join_->KeyPayloadFromInput(0, &input.value()));
 
         auto batch_length = input->length;
         thread_locals_[thread_id].input.emplace(
@@ -650,7 +652,10 @@ class ScanProcessor {
           static_cast<uint32_t>(mini_batch_start + mini_batch_size_next - 1));
       int num_output_rows = 0;
       for (uint32_t key_id = first_key_id; key_id <= last_key_id; ++key_id) {
-        if (GetBit(hash_table_->has_match(), key_id) == bit_to_output) {
+        uint32_t has_match_id = hash_table_->key_to_payload()
+                                    ? hash_table_->key_to_payload()[key_id]
+                                    : key_id;
+        if (GetBit(hash_table_->has_match(), has_match_id) == bit_to_output) {
           uint32_t first_payload_for_key = std::max(
               static_cast<uint32_t>(mini_batch_start),
               hash_table_->key_to_payload() ? hash_table_->key_to_payload()[key_id]
@@ -748,7 +753,7 @@ class HashJoinScanSource : public SourceOp {
   PipelineSource Source(const PipelineContext&) override {
     return [&](const PipelineContext& pipeline_ctx, const TaskContext& task_ctx,
                ThreadId thread_id) -> OpResult {
-      ARA_ASSIGN_OR_RAISE(TempVectorStack * temp_stack, ctx_->GetTempStack(thread_id));
+      auto* temp_stack = &hash_join_->temp_stacks[thread_id];
       return scan_processor_.Scan(pipeline_ctx, thread_id, temp_stack);
     };
   }
@@ -793,7 +798,7 @@ Status HashJoinProbe::Init(const PipelineContext& pipeline_ctx,
 PipelinePipe HashJoinProbe::Pipe(const PipelineContext&) {
   return [&](const PipelineContext& pipeline_ctx, const TaskContext& task_ctx,
              ThreadId thread_id, std::optional<Batch> batch) -> OpResult {
-    ARA_ASSIGN_OR_RAISE(TempVectorStack * temp_stack, ctx_->GetTempStack(thread_id));
+    auto* temp_stack = &hash_join_->temp_stacks[thread_id];
     auto temp_column_arrays = &thread_locals_[thread_id].temp_column_arrays;
     return probe_processor_->Probe(pipeline_ctx, task_ctx, thread_id, std::move(batch),
                                    temp_stack, temp_column_arrays);

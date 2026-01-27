@@ -4,7 +4,7 @@ set(CMAKE_CXX_STANDARD 20)
 
 set(ARA_LIBRARIES)
 
-set(ARA_DEPENDENCIES Arrow::arrow_shared ArrowAcero::arrow_acero_shared Folly::folly)
+set(ARA_DEPENDENCIES Arrow::arrow_shared ArrowCompute::arrow_compute_shared ArrowAcero::arrow_acero_shared Folly::folly)
 
 if(ARA_CHECK_INTERNAL_DEPENDENCIES)
   add_custom_target(check-internal-dependencies)

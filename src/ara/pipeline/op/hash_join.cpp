@@ -2,6 +2,8 @@
 
 #include <ara/util/defines.h>
 
+#include <arrow/array/util.h>
+#include <arrow/datum.h>
 #include <arrow/acero/query_context.h>
 
 namespace ara::pipeline::detail {
@@ -21,6 +23,40 @@ Status ValidateHashJoinNodeOptions(const HashJoinNodeOptions& join_options) {
   }
 
   return Status::OK();
+}
+
+Result<arrow::compute::ExecBatch> HashJoin::KeyPayloadFromInput(
+    int side, arrow::compute::ExecBatch* input) const {
+  arrow::compute::ExecBatch projected({}, input->length);
+  int num_key_cols = schema[side]->num_cols(HashJoinProjection::KEY);
+  int num_payload_cols = schema[side]->num_cols(HashJoinProjection::PAYLOAD);
+  projected.values.resize(num_key_cols + num_payload_cols);
+
+  auto key_to_input = schema[side]->map(HashJoinProjection::KEY, HashJoinProjection::INPUT);
+  for (int icol = 0; icol < num_key_cols; ++icol) {
+    const Datum& value_in = input->values[key_to_input.get(icol)];
+    if (value_in.is_scalar()) {
+      ARROW_ASSIGN_OR_RAISE(
+          projected.values[icol],
+          MakeArrayFromScalar(*value_in.scalar(), projected.length, pool));
+    } else {
+      projected.values[icol] = value_in;
+    }
+  }
+
+  auto payload_to_input =
+      schema[side]->map(HashJoinProjection::PAYLOAD, HashJoinProjection::INPUT);
+  for (int icol = 0; icol < num_payload_cols; ++icol) {
+    const Datum& value_in = input->values[payload_to_input.get(icol)];
+    if (value_in.is_scalar()) {
+      ARROW_ASSIGN_OR_RAISE(projected.values[num_key_cols + icol],
+                            MakeArrayFromScalar(*value_in.scalar(), projected.length, pool));
+    } else {
+      projected.values[num_key_cols + icol] = value_in;
+    }
+  }
+
+  return projected;
 }
 
 Status HashJoin::Init(const PipelineContext&, size_t dop_,
@@ -57,6 +93,13 @@ Status HashJoin::Init(const PipelineContext&, size_t dop_,
   materialize.resize(dop);
   for (int i = 0; i < dop; ++i) {
     materialize[i].Init(pool, schema[0], schema[1]);
+  }
+
+  temp_stacks.resize(dop);
+  static constexpr int64_t kTempStackUsage =
+      64 * static_cast<int64_t>(arrow::util::MiniBatch::kMiniBatchLength);
+  for (int i = 0; i < dop; ++i) {
+    ARA_RETURN_NOT_OK(temp_stacks[i].Init(pool, kTempStackUsage));
   }
 
   return Status::OK();

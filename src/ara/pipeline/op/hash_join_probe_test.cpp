@@ -47,7 +47,7 @@ class HashJoinProbeTest : public testing::Test {
     query_ctx_.options.source_max_batch_length = source_batch_length;
     query_ctx_.options.pipe_max_batch_length = pipe_batch_length;
     query_ctx_.options.mini_batch_length = mini_batch_length;
-    ASSERT_OK(arrow_query_ctx_->Init(dop, nullptr));
+    ASSERT_OK(arrow_query_ctx_->Init(nullptr));
     ASSERT_OK(hash_join_->Init(pipeline_ctx_, dop, arrow_query_ctx_.get(), options,
                                left_schema, right_schema));
     ASSERT_OK(hash_join_build_.Init(pipeline_ctx_, hash_join_));

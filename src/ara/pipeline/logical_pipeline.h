@@ -2,6 +2,9 @@
 
 #include <ara/common/meta.h>
 
+#include <string>
+#include <vector>
+
 namespace ara::pipeline {
 
 class SourceOp;

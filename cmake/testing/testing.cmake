@@ -7,7 +7,9 @@ if(ARA_BUILD_TESTS)
   include(cmake/find/gflags.cmake)
 endif(ARA_BUILD_TESTS)
 
-set(EXTRA_ARROW_TEST_SRC "${CMAKE_SOURCE_DIR}/src/arrow/acero/test_util_internal.cc")
+set(EXTRA_ARROW_TEST_SRC
+  "${CMAKE_SOURCE_DIR}/src/arrow/acero/test_util_internal.cc"
+  "${CMAKE_SOURCE_DIR}/src/arrow/compute/test_util_internal.cc")
 
 function(add_ara_test TEST_NAME ARA_LIB_NAME TEST_SRC)
   add_executable(${TEST_NAME} ${TEST_SRC} ${EXTRA_ARROW_TEST_SRC})
@@ -18,7 +20,7 @@ function(add_ara_test TEST_NAME ARA_LIB_NAME TEST_SRC)
     set(ARA_LIB_NAME "ara")
     set(ARA_LIB_DIR "${CMAKE_BINARY_DIR}/src/ara")
   endif(ARA_CHECK_INTERNAL_DEPENDENCIES)
-  target_link_libraries(${TEST_NAME} ${ARA_LIB_NAME} Arrow::arrow_testing_shared GTest::GTest GTest::Main pthread)
+  target_link_libraries(${TEST_NAME} ${ARA_LIB_NAME} ArrowCompute::arrow_compute_shared Arrow::arrow_testing_shared GTest::GTest GTest::Main pthread)
   set_target_properties(${TEST_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/gtests")
   # With OSX and conda, we need to set the correct RPATH so that dependencies
   # are found. The installed libraries with conda have an RPATH that matches
@@ -37,7 +39,7 @@ endfunction(add_ara_test)
 function(add_sketch_test TEST_NAME TEST_SRC)
   add_executable(${TEST_NAME} ${TEST_SRC} ${EXTRA_ARROW_TEST_SRC})
   target_include_directories(${TEST_NAME} PRIVATE "${CMAKE_SOURCE_DIR}/src")
-  target_link_libraries(${TEST_NAME} PUBLIC Arrow::arrow_shared ArrowAcero::arrow_acero_shared Folly::folly Arrow::arrow_testing_shared GTest::GTest GTest::Main pthread)
+  target_link_libraries(${TEST_NAME} PUBLIC Arrow::arrow_shared ArrowCompute::arrow_compute_shared ArrowAcero::arrow_acero_shared Folly::folly Arrow::arrow_testing_shared GTest::GTest GTest::Main pthread)
   set_target_properties(${TEST_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/gtests")
   # With OSX and conda, we need to set the correct RPATH so that dependencies
   # are found. The installed libraries with conda have an RPATH that matches

@@ -348,7 +348,7 @@ class TestHashJoin : public testing::Test {
 
   void Init(HashJoinCase join_case) {
     join_case_ = std::move(join_case);
-    ASSERT_OK(query_ctx_->Init(join_case_.dop_, nullptr));
+    ASSERT_OK(query_ctx_->Init(nullptr));
   }
 };
 

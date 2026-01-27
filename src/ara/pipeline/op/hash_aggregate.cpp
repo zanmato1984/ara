@@ -121,6 +121,7 @@ Status HashAggregate::Init(const PipelineContext&, size_t dop,
                            arrow::acero::QueryContext* ctx,
                            const AggregateNodeOptions& options,
                            const Schema& input_schema) {
+  ARA_RETURN_NOT_OK(arrow::compute::Initialize());
   dop_ = dop;
   ctx_ = ctx;
   auto exec_ctx = ctx_->exec_context();

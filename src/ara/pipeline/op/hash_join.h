@@ -24,9 +24,13 @@ struct HashJoin {
   std::shared_ptr<arrow::Schema> output_schema;
 
   std::vector<arrow::acero::JoinResultMaterialize> materialize;
+  std::vector<arrow::util::TempVectorStack> temp_stacks;
 
   arrow::acero::SwissTableForJoin hash_table;
   arrow::acero::SwissTableForJoinBuild hash_table_build;
+
+  Result<arrow::compute::ExecBatch> KeyPayloadFromInput(
+      int side, arrow::compute::ExecBatch* input) const;
 
   Status Init(const PipelineContext&, size_t, arrow::acero::QueryContext*,
               const arrow::acero::HashJoinNodeOptions&, const arrow::Schema&,

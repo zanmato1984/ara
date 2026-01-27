@@ -20,6 +20,7 @@
 #include "arrow/testing/gtest_util.h"
 #include "arrow/util/vector.h"
 
+#include <cstdint>
 #include <functional>
 #include <random>
 #include <string>
@@ -29,15 +30,19 @@
 #include "arrow/acero/exec_plan.h"
 #include "arrow/compute/exec.h"
 #include "arrow/compute/kernel.h"
+#include "arrow/compute/test_util_internal.h"
+#include "arrow/table.h"
 #include "arrow/testing/visibility.h"
 #include "arrow/util/async_generator.h"
 #include "arrow/util/pcg_random.h"
 
-namespace arrow {
+namespace arrow::acero {
 
-namespace acero {
+// Enumerate all hardware flags that can be tested on this platform
+// and would lead to different code paths being tested in Acero.
+std::vector<int64_t> HardwareFlagsForTesting();
 
-void ValidateOutput(const Datum& output);
+using compute::ExecBatchFromJSON;
 
 using StartProducingFunc = std::function<Status(ExecNode*)>;
 using StopProducingFunc = std::function<void(ExecNode*)>;
@@ -46,16 +51,6 @@ using StopProducingFunc = std::function<void(ExecNode*)>;
 ExecNode* MakeDummyNode(ExecPlan* plan, std::string label, std::vector<ExecNode*> inputs,
                         bool is_sink = false, StartProducingFunc = {},
                         StopProducingFunc = {});
-
-ExecBatch ExecBatchFromJSON(const std::vector<TypeHolder>& types, std::string_view json);
-
-/// \brief Shape qualifier for value types. In certain instances
-/// (e.g. "map_lookup" kernel), an argument may only be a scalar, where in
-/// other kernels arguments can be arrays or scalars
-enum class ArgShape { ANY, ARRAY, SCALAR };
-
-ExecBatch ExecBatchFromJSON(const std::vector<TypeHolder>& types,
-                            const std::vector<ArgShape>& shapes, std::string_view json);
 
 struct BatchesWithSchema {
   std::vector<ExecBatch> batches;
@@ -122,22 +117,13 @@ Result<std::vector<std::shared_ptr<ArrayVector>>> ToArrayVectors(
     const BatchesWithSchema& batches_with_schema);
 
 Result<std::vector<std::shared_ptr<ExecBatch>>> ToExecBatches(
-    const BatchesWithSchema& batches);
+    const BatchesWithSchema& batches_with_schema);
 
 Result<std::vector<std::shared_ptr<RecordBatch>>> ToRecordBatches(
-    const BatchesWithSchema& batches);
+    const BatchesWithSchema& batches_with_schema);
 
 Result<std::shared_ptr<RecordBatchReader>> ToRecordBatchReader(
     const BatchesWithSchema& batches_with_schema);
-
-Result<std::vector<std::shared_ptr<ArrayVector>>> ToArrayVectors(
-    const BatchesWithSchema& batches_with_schema);
-
-Result<std::vector<std::shared_ptr<ExecBatch>>> ToExecBatches(
-    const BatchesWithSchema& batches);
-
-Result<std::vector<std::shared_ptr<RecordBatch>>> ToRecordBatches(
-    const BatchesWithSchema& batches);
 
 Result<std::shared_ptr<Table>> SortTableOnAllFields(const std::shared_ptr<Table>& tab);
 
@@ -204,5 +190,7 @@ struct TableGenerationProperties {
 Result<std::shared_ptr<Table>> MakeRandomTimeSeriesTable(
     const TableGenerationProperties& properties);
 
-}  // namespace acero
-}  // namespace arrow
+Result<std::shared_ptr<Table>> RunEndEncodeTableColumns(
+    const Table& table, const std::vector<int>& column_indices);
+
+}  // namespace arrow::acero

@@ -8,6 +8,7 @@
 #include <arrow/compute/exec.h>
 #include <arrow/util/async_generator.h>
 #include <arrow/util/logging.h>
+#include <arrow/util/logging_internal.h>
 #include <arrow/util/vector.h>
 #include <folly/executors/CPUThreadPoolExecutor.h>
 #include <folly/futures/Future.h>
@@ -125,7 +126,7 @@ struct HashJoinCase {
     ctx = std::make_unique<arrow::acero::QueryContext>(
         arrow::acero::QueryOptions{},
         arrow::compute::ExecContext(memory_pool, NULLPTR, NULLPTR));
-    DCHECK_OK(ctx->Init(dop, NULLPTR));
+    DCHECK_OK(ctx->Init(NULLPTR));
 
     arrow::compute::Expression filter = arrow::compute::literal(true);
     return join->Init(

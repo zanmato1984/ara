@@ -2,6 +2,10 @@
 
 #include <ara/common/meta.h>
 
+#include <memory>
+#include <string>
+#include <vector>
+
 namespace ara::pipeline {
 
 class LogicalPipeline;

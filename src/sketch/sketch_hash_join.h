@@ -11,7 +11,7 @@
 
 #define ARA_SET_AND_RETURN_NOT_OK(status, set)                       \
   do {                                                                \
-    ::arrow::Status __s = ::arrow::internal::GenericToStatus(status); \
+    ::arrow::Status __s = ::arrow::ToStatus(status);                  \
     if (!__s.ok()) {                                                  \
       [&](const ::arrow::Status& __status) set(__s);                  \
     }                                                                 \
@@ -99,7 +99,7 @@ using namespace arrow::acero;
 using namespace arrow::acero::util;
 using namespace arrow::compute;
 using namespace arrow::bit_util;
-using arrow::util::bit_util;
+namespace bit_util = arrow::util::bit_util;
 using arrow::util::MiniBatch;
 using arrow::util::TempVectorHolder;
 using arrow::util::TempVectorStack;
@@ -117,6 +117,9 @@ class BuildProcessor {
 
   // Must execute in task thread.
   Status Build(ThreadId thread_id, TempVectorStack* temp_stack, OperatorStatus& status);
+
+  // Must execute in task thread.
+  Status BuildPartitions(TaskId task_id, TempVectorStack* temp_stack, OperatorStatus& status);
 
   // Could execute in driver thread.
   Status FinishBuild();
@@ -293,6 +296,8 @@ class HashJoin : public PipeOp {
   };
   std::vector<ThreadLocalState> local_states_;
 
+  std::vector<TempVectorStack> temp_stacks_;
+
   ProbeProcessor probe_processor_;
 
   SwissTableForJoin hash_table_;
@@ -304,7 +309,8 @@ class HashJoinBuildSink : public SinkOp {
   Status Init(QueryContext* ctx, size_t dop, int64_t hardware_flags, MemoryPool* pool,
               const HashJoinProjectionMaps* schema, JoinType join_type,
               SwissTableForJoinBuild* hash_table_build, SwissTableForJoin* hash_table,
-              const std::vector<JoinResultMaterialize*>& materialize);
+              const std::vector<JoinResultMaterialize*>& materialize,
+              std::vector<TempVectorStack>* temp_stacks);
 
   PipelineTaskPipe Pipe() override;
 
@@ -318,6 +324,7 @@ class HashJoinBuildSink : public SinkOp {
   QueryContext* ctx_;
   size_t dop_;
   SwissTableForJoinBuild* hash_table_build_;
+  std::vector<TempVectorStack>* temp_stacks_ = nullptr;
   std::mutex build_side_mutex_;
   AccumulationQueue build_side_batches_;
   BuildProcessor build_processor_;
@@ -326,7 +333,8 @@ class HashJoinBuildSink : public SinkOp {
 class HashJoinScanSource : public SourceOp {
  public:
   Status Init(QueryContext* ctx, JoinType join_type, SwissTableForJoin* hash_table,
-              const std::vector<JoinResultMaterialize*>& materializ);
+              const std::vector<JoinResultMaterialize*>& materializ,
+              std::vector<TempVectorStack>* temp_stacks);
 
   PipelineTaskSource Source() override;
 
@@ -336,6 +344,7 @@ class HashJoinScanSource : public SourceOp {
 
  private:
   QueryContext* ctx_;
+  std::vector<TempVectorStack>* temp_stacks_ = nullptr;
 
   ScanProcessor scan_processor_;
 };

@@ -100,9 +100,9 @@ Status BuildProcessor::StartBuild() {
         ColumnMetadataFromDataType(schema_->data_type(HashJoinProjection::PAYLOAD, i)));
     payload_types.push_back(metadata);
   }
-  return hash_table_build_->Init(hash_table_, dop_, batches_->row_count(),
-                                 reject_duplicate_keys, no_payload, key_types,
-                                 payload_types, pool_, hardware_flags_);
+  return hash_table_build_->Init(hash_table_, static_cast<int>(dop_), batches_->row_count(),
+                                 batches_->batch_count(), reject_duplicate_keys, no_payload,
+                                 key_types, payload_types, pool_, hardware_flags_);
 }
 
 Status BuildProcessor::Build(ThreadId thread_id, TempVectorStack* temp_stack,
@@ -114,8 +114,6 @@ Status BuildProcessor::Build(ThreadId thread_id, TempVectorStack* temp_stack,
     return Status::OK();
   }
   local_states_[thread_id].round++;
-
-  bool no_payload = hash_table_build_->no_payload();
 
   ExecBatch input_batch;
   ARROW_ASSIGN_OR_RAISE(input_batch,
@@ -139,25 +137,67 @@ Status BuildProcessor::Build(ThreadId thread_id, TempVectorStack* temp_stack,
   for (size_t icol = 0; icol < key_batch.values.size(); ++icol) {
     key_batch.values[icol] = input_batch.values[icol];
   }
-  ExecBatch payload_batch({}, input_batch.length);
-
-  if (!no_payload) {
-    payload_batch.values.resize(schema_->num_cols(HashJoinProjection::PAYLOAD));
-    for (size_t icol = 0; icol < payload_batch.values.size(); ++icol) {
-      payload_batch.values[icol] =
-          input_batch.values[schema_->num_cols(HashJoinProjection::KEY) + icol];
-    }
-  }
 
   ARA_SET_AND_RETURN_NOT_OK(
-      hash_table_build_->PushNextBatch(static_cast<int64_t>(thread_id), key_batch,
-                                       no_payload ? nullptr : &payload_batch, temp_stack),
+      hash_table_build_->PartitionBatch(thread_id, static_cast<int64_t>(batch_id), key_batch,
+                                        temp_stack),
       { status = OperatorStatus::Other(__s); });
 
   // Release input batch
   //
   input_batch.values.clear();
 
+  return Status::OK();
+}
+
+Status BuildProcessor::BuildPartitions(TaskId task_id, TempVectorStack* temp_stack,
+                                       OperatorStatus& status) {
+  bool no_payload = hash_table_build_->no_payload();
+
+  ExecBatch key_batch;
+  ExecBatch payload_batch;
+
+  auto num_keys = schema_->num_cols(HashJoinProjection::KEY);
+  auto num_payloads = schema_->num_cols(HashJoinProjection::PAYLOAD);
+
+  key_batch.values.resize(num_keys);
+  if (!no_payload) {
+    payload_batch.values.resize(num_payloads);
+  }
+
+  size_t thread_id = dop_ == 0 ? 0 : (task_id % dop_);
+  int prtn_id = static_cast<int>(task_id);
+
+  for (int64_t batch_id = 0; batch_id < static_cast<int64_t>(batches_->batch_count());
+       ++batch_id) {
+    ExecBatch input_batch;
+    ARROW_ASSIGN_OR_RAISE(input_batch,
+                          KeyPayloadFromInput(schema_, pool_, &(*batches_)[batch_id]));
+
+    if (input_batch.length == 0) {
+      continue;
+    }
+
+    key_batch.length = input_batch.length;
+    for (size_t icol = 0; icol < key_batch.values.size(); ++icol) {
+      key_batch.values[icol] = input_batch.values[icol];
+    }
+
+    if (!no_payload) {
+      payload_batch.length = input_batch.length;
+      for (size_t icol = 0; icol < payload_batch.values.size(); ++icol) {
+        payload_batch.values[icol] = input_batch.values[num_keys + icol];
+      }
+    }
+
+    ARA_SET_AND_RETURN_NOT_OK(
+        hash_table_build_->ProcessPartition(
+            thread_id, batch_id, prtn_id, key_batch,
+            no_payload ? nullptr : &payload_batch, temp_stack),
+        { status = OperatorStatus::Other(__s); });
+  }
+
+  status = OperatorStatus::Finished(std::nullopt);
   return Status::OK();
 }
 
@@ -817,6 +857,13 @@ Status HashJoin::Init(QueryContext* ctx, size_t dop, const HashJoinNodeOptions& 
     local_states_[i].materialize.Init(pool_, schema_[0], schema_[1]);
   }
 
+  temp_stacks_.resize(dop_);
+  static constexpr int64_t kTempStackUsage =
+      64 * static_cast<int64_t>(arrow::util::MiniBatch::kMiniBatchLength);
+  for (int i = 0; i < dop_; ++i) {
+    ARA_RETURN_NOT_OK(temp_stacks_[i].Init(pool_, kTempStackUsage));
+  }
+
   std::vector<JoinResultMaterialize*> materialize;
   materialize.resize(dop_);
   for (int i = 0; i < dop_; ++i) {
@@ -840,13 +887,13 @@ std::unique_ptr<SinkOp> HashJoin::BuildSink() {
   std::unique_ptr<HashJoinBuildSink> build_sink = std::make_unique<HashJoinBuildSink>();
   ARA_DCHECK_OK(build_sink->Init(ctx_, dop_, hardware_flags_, pool_, schema_[1],
                                   join_type_, &hash_table_build_, &hash_table_,
-                                  materialize));
+                                  materialize, &temp_stacks_));
   return build_sink;
 }
 
 PipelineTaskPipe HashJoin::Pipe() {
   return [&](ThreadId thread_id, std::optional<ExecBatch> input, OperatorStatus& status) {
-    ARROW_ASSIGN_OR_RAISE(TempVectorStack * temp_stack, ctx_->GetTempStack(thread_id));
+    auto* temp_stack = &temp_stacks_[thread_id];
     auto temp_column_arrays = &local_states_[thread_id].temp_column_arrays;
     return probe_processor_.Probe(thread_id, std::move(input), temp_stack,
                                   temp_column_arrays, status);
@@ -870,7 +917,8 @@ std::unique_ptr<SourceOp> HashJoin::Source() {
   for (int i = 0; i < dop_; ++i) {
     materialize[i] = &local_states_[i].materialize;
   }
-  ARA_DCHECK_OK(scan_source->Init(ctx_, join_type_, &hash_table_, materialize));
+  ARA_DCHECK_OK(
+      scan_source->Init(ctx_, join_type_, &hash_table_, materialize, &temp_stacks_));
   return scan_source;
 }
 
@@ -879,10 +927,12 @@ Status HashJoinBuildSink::Init(QueryContext* ctx, size_t dop, int64_t hardware_f
                                JoinType join_type,
                                SwissTableForJoinBuild* hash_table_build,
                                SwissTableForJoin* hash_table,
-                               const std::vector<JoinResultMaterialize*>& materialize) {
+                               const std::vector<JoinResultMaterialize*>& materialize,
+                               std::vector<TempVectorStack>* temp_stacks) {
   ctx_ = ctx;
   dop_ = dop;
   hash_table_build_ = hash_table_build;
+  temp_stacks_ = temp_stacks;
   return build_processor_.Init(hardware_flags, pool, schema, join_type, hash_table_build,
                                hash_table, &build_side_batches_, materialize);
 }
@@ -905,28 +955,37 @@ TaskGroups HashJoinBuildSink::Frontend() {
   ARA_DCHECK_OK(build_processor_.StartBuild());
 
   auto build_task = [&](TaskId task_id, OperatorStatus& status) {
-    ARROW_ASSIGN_OR_RAISE(TempVectorStack * temp_stack, ctx_->GetTempStack(task_id));
+    auto* temp_stack = &(*temp_stacks_)[task_id];
     return build_processor_.Build(task_id, temp_stack, status);
   };
-  auto build_task_cont = [&]() {
+
+  auto build_partitions_task = [&](TaskId task_id, OperatorStatus& status) {
+    auto* temp_stack = &(*temp_stacks_)[task_id % dop_];
+    return build_processor_.BuildPartitions(task_id, temp_stack, status);
+  };
+  auto build_partitions_task_cont = [&]() {
     ARA_RETURN_NOT_OK(build_processor_.FinishBuild());
     return build_processor_.StartMerge();
   };
 
   auto merge_task = [&](TaskId task_id, OperatorStatus& status) {
-    ARROW_ASSIGN_OR_RAISE(TempVectorStack * temp_stack, ctx_->GetTempStack(task_id));
+    auto* temp_stack = &(*temp_stacks_)[task_id % dop_];
     return build_processor_.Merge(task_id, temp_stack, status);
   };
   auto num_merge_tasks = hash_table_build_->num_prtns();
 
-  auto finish_merge_task = [&](TaskId task_id, OperatorStatus& status) {
-    ARROW_ASSIGN_OR_RAISE(TempVectorStack * temp_stack, ctx_->GetTempStack(task_id));
-    return build_processor_.FinishMerge(temp_stack);
+  auto finish_merge_task = [&](TaskId, OperatorStatus& status) {
+    auto* temp_stack = &(*temp_stacks_)[0];
+    ARA_RETURN_NOT_OK(build_processor_.FinishMerge(temp_stack));
+    status = OperatorStatus::Finished(std::nullopt);
+    return Status::OK();
   };
 
   return {
-      {std::move(build_task), dop_, std::move(build_task_cont)},
-      {std::move(merge_task), num_merge_tasks, std::nullopt},
+      {std::move(build_task), dop_, std::nullopt},
+      {std::move(build_partitions_task), static_cast<size_t>(num_merge_tasks),
+       std::move(build_partitions_task_cont)},
+      {std::move(merge_task), static_cast<size_t>(num_merge_tasks), std::nullopt},
       {std::move(finish_merge_task), 1, std::nullopt},
   };
 }
@@ -935,15 +994,17 @@ TaskGroups HashJoinBuildSink::Backend() { return {}; }
 
 Status HashJoinScanSource::Init(QueryContext* ctx, JoinType join_type,
                                 SwissTableForJoin* hash_table,
-                                const std::vector<JoinResultMaterialize*>& materializ) {
+                                const std::vector<JoinResultMaterialize*>& materializ,
+                                std::vector<TempVectorStack>* temp_stacks) {
   ctx_ = ctx;
+  temp_stacks_ = temp_stacks;
 
   return scan_processor_.Init(join_type, hash_table, materializ);
 }
 
 PipelineTaskSource HashJoinScanSource::Source() {
   return [&](ThreadId thread_id, OperatorStatus& status) {
-    ARROW_ASSIGN_OR_RAISE(TempVectorStack * temp_stack, ctx_->GetTempStack(thread_id));
+    auto* temp_stack = &(*temp_stacks_)[thread_id];
     return scan_processor_.Scan(thread_id, temp_stack, status);
   };
 }

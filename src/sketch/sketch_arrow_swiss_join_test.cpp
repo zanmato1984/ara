@@ -57,14 +57,23 @@ class SwissJoin {
       local_states_[i].materialize.Init(pool_, proj_map_left, proj_map_right);
     }
 
+    temp_stacks_.resize(num_threads_);
+    static constexpr int64_t kTempStackUsage =
+        64 * static_cast<int64_t>(arrow::util::MiniBatch::kMiniBatchLength);
+    for (int i = 0; i < num_threads_; ++i) {
+      RETURN_NOT_OK(temp_stacks_[i].Init(pool_, kTempStackUsage));
+    }
+
     std::vector<JoinResultMaterialize*> materialize;
     materialize.resize(num_threads_);
     for (int i = 0; i < num_threads_; ++i) {
       materialize[i] = &local_states_[i].materialize;
     }
 
-    probe_processor_.Init(proj_map_left->num_cols(HashJoinProjection::KEY), join_type_,
-                          &hash_table_, materialize, &key_cmp_, {});
+    probe_processor_.Init(
+        proj_map_left->num_cols(HashJoinProjection::KEY), join_type_, &hash_table_,
+        /*residual_filter=*/nullptr, materialize, &key_cmp_,
+        [](int64_t, ExecBatch) { return Status::OK(); });
 
     // InitTaskGroups();
 
@@ -101,11 +110,11 @@ class SwissJoin {
 
     ExecBatch keypayload_batch;
     ARROW_ASSIGN_OR_RAISE(keypayload_batch, KeyPayloadFromInput(/*side=*/0, &batch));
-    ARROW_ASSIGN_OR_RAISE(TempVectorStack * temp_stack,
-                          ctx_->GetTempStack(thread_index));
+    auto* temp_stack = &temp_stacks_[thread_index];
 
     return CancelIfNotOK(
-        probe_processor_.OnNextBatch(thread_index, keypayload_batch, temp_stack,
+        probe_processor_.OnNextBatch(static_cast<int64_t>(thread_index), keypayload_batch,
+                                     temp_stack,
                                      &local_states_[thread_index].temp_column_arrays));
   }
 
@@ -162,6 +171,7 @@ class SwissJoin {
     }
     RETURN_NOT_OK(CancelIfNotOK(hash_table_build_.Init(
         &hash_table_, num_threads_, build_side_batches_.row_count(),
+        build_side_batches_.batch_count(),
         reject_duplicate_keys, no_payload, key_types, payload_types, pool_,
         hardware_flags_)));
 
@@ -211,11 +221,14 @@ class SwissJoin {
             input_batch.values[schema->num_cols(HashJoinProjection::KEY) + icol];
       }
     }
-    ARROW_ASSIGN_OR_RAISE(TempVectorStack * temp_stack,
-                          ctx_->GetTempStack(thread_id));
-    RETURN_NOT_OK(CancelIfNotOK(hash_table_build_.PushNextBatch(
-        static_cast<int64_t>(thread_id), key_batch, no_payload ? nullptr : &payload_batch,
-        temp_stack)));
+    auto* temp_stack = &temp_stacks_[thread_id];
+    RETURN_NOT_OK(CancelIfNotOK(hash_table_build_.PartitionBatch(thread_id, batch_id,
+                                                                 key_batch, temp_stack)));
+    for (int prtn_id = 0; prtn_id < hash_table_build_.num_prtns(); ++prtn_id) {
+      RETURN_NOT_OK(CancelIfNotOK(hash_table_build_.ProcessPartition(
+          thread_id, batch_id, prtn_id, key_batch,
+          no_payload ? nullptr : &payload_batch, temp_stack)));
+    }
 
     // Release input batch
     //
@@ -248,8 +261,7 @@ class SwissJoin {
 
   Status MergeFinished(size_t thread_id) {
     RETURN_NOT_OK(status());
-    ARROW_ASSIGN_OR_RAISE(TempVectorStack * temp_stack,
-                          ctx_->GetTempStack(thread_id));
+    auto* temp_stack = &temp_stacks_[thread_id];
     hash_table_build_.FinishPrtnMerge(temp_stack);
     return CancelIfNotOK(OnBuildHashTableFinished(static_cast<int64_t>(thread_id)));
   }
@@ -304,8 +316,7 @@ class SwissJoin {
         std::min((task_id + 1) * kNumRowsPerScanTask, hash_table_.num_rows());
     // Get thread index and related temp vector stack
     //
-    ARROW_ASSIGN_OR_RAISE(TempVectorStack * temp_stack,
-                          ctx_->GetTempStack(thread_id));
+    auto* temp_stack = &temp_stacks_[thread_id];
 
     // Split into mini-batches
     //
@@ -388,7 +399,13 @@ class SwissJoin {
     // Flush all instances of materialize that have non-zero accumulated output
     // rows.
     //
-    RETURN_NOT_OK(CancelIfNotOK(probe_processor_.OnFinished()));
+    for (size_t i = 0; i < local_states_.size(); ++i) {
+      auto& materialize = local_states_[i].materialize;
+      if (materialize.num_rows() > 0) {
+        ExecBatch batch({}, materialize.num_rows());
+        RETURN_NOT_OK(CancelIfNotOK(materialize.Flush(&batch)));
+      }
+    }
 
     int64_t num_produced_batches = 0;
     for (size_t i = 0; i < local_states_.size(); ++i) {
@@ -487,6 +504,7 @@ class SwissJoin {
   JoinProbeProcessor probe_processor_;
   SwissTableForJoinBuild hash_table_build_;
   AccumulationQueue build_side_batches_;
+  std::vector<TempVectorStack> temp_stacks_;
 
   // Atomic state flags.
   // These flags are kept outside of mutex, since they can be queried for every
