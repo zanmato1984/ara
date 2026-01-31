@@ -201,6 +201,113 @@ TYPED_TEST(ScheduleTest, BlockedTask) {
   }
 }
 
+TYPED_TEST(ScheduleTest, BlockedTaskResumerErrorNotify) {
+  ScheduleContext schedule_ctx;
+  size_t num_tasks = 42;
+  std::atomic<size_t> counter = 0;
+
+  std::mutex resumers_mutex;
+  Resumers resumers(num_tasks);
+  std::atomic<size_t> num_resumers_set = 0;
+  std::atomic_bool resumer_task_errored = false;
+  std::atomic_bool unblock_requested = false;
+
+  Task blocked_task(
+      "BlockedTask", "", [&](const TaskContext& task_ctx, TaskId task_id) -> TaskResult {
+        {
+          std::lock_guard<std::mutex> lock(resumers_mutex);
+          if (resumers[task_id] == nullptr) {
+            ARA_CHECK(task_ctx.resumer_factory != nullptr);
+            ARA_ASSIGN_OR_RAISE(auto resumer, task_ctx.resumer_factory());
+            ARA_CHECK(task_ctx.single_awaiter_factory != nullptr);
+            ARA_ASSIGN_OR_RAISE(auto awaiter, task_ctx.single_awaiter_factory(resumer));
+            resumers[task_id] = resumer;
+            num_resumers_set++;
+            if (unblock_requested.load()) {
+              if (!resumer->IsResumed()) {
+                resumer->Resume();
+              }
+            }
+            return TaskStatus::Blocked(std::move(awaiter));
+          }
+        }
+        if (!resumer_task_errored.load()) {
+          return Status::UnknownError(
+              "Blocked task resumed before resumer task errored");
+        }
+        counter++;
+        return TaskStatus::Finished();
+      });
+
+  Task resumer_task(
+      "ResumerTask", "",
+      [&](const TaskContext&, TaskId) -> TaskResult {
+        if (num_resumers_set != num_tasks) {
+          return TaskStatus::Continue();
+        }
+        resumer_task_errored = true;
+        return Status::UnknownError("ResumerTaskError");
+      },
+      {TaskHint::Type::IO});
+
+  auto blocked_task_future = std::async(std::launch::async, [&]() -> TaskResult {
+    return this->ScheduleTask(schedule_ctx, std::move(blocked_task), num_tasks,
+                              std::nullopt, nullptr);
+  });
+
+  auto resumer_task_future = std::async(std::launch::async, [&]() -> TaskResult {
+    return this->ScheduleTask(
+        schedule_ctx, std::move(resumer_task), 1, std::nullopt,
+        [&](const TaskContext&) -> Status {
+          auto deadline =
+              std::chrono::steady_clock::now() + std::chrono::seconds(10);
+          while (!resumer_task_errored.load()) {
+            if (std::chrono::steady_clock::now() > deadline) {
+              unblock_requested = true;
+              Resumers snapshot;
+              {
+                std::lock_guard<std::mutex> lock(resumers_mutex);
+                snapshot = resumers;
+              }
+              for (auto& resumer : snapshot) {
+                if (resumer != nullptr && !resumer->IsResumed()) {
+                  resumer->Resume();
+                }
+              }
+              return Status::UnknownError("Timed out waiting for resumer task error");
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          }
+
+          unblock_requested = true;
+          Resumers snapshot;
+          {
+            std::lock_guard<std::mutex> lock(resumers_mutex);
+            snapshot = resumers;
+          }
+          for (auto& resumer : snapshot) {
+            ARA_CHECK(resumer != nullptr);
+            if (!resumer->IsResumed()) {
+              resumer->Resume();
+            }
+          }
+          return Status::OK();
+        });
+  });
+
+  {
+    auto result = blocked_task_future.get();
+    ASSERT_OK(result);
+    ASSERT_TRUE(result->IsFinished()) << result->ToString();
+    ASSERT_EQ(counter, num_tasks);
+  }
+  {
+    auto result = resumer_task_future.get();
+    ASSERT_FALSE(result.ok());
+    ASSERT_EQ(result.status().message(), "ResumerTaskError");
+  }
+}
+
 TYPED_TEST(ScheduleTest, ErrorAndCancel) {
   ScheduleContext schedule_ctx;
   size_t num_errors = 4, num_tasks = 42;
