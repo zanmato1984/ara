@@ -4,7 +4,7 @@
 
 namespace ara::schedule {
 
-// Runs tasks cooperatively on the calling thread using C++20 coroutines.
+// Runs tasks cooperatively on a single dedicated thread using C++20 coroutines.
 // No backing thread pool is used.
 class SequentialCoroScheduler : public Scheduler {
  public:
@@ -25,4 +25,3 @@ class SequentialCoroScheduler : public Scheduler {
 };
 
 }  // namespace ara::schedule
-
