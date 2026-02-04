@@ -28,6 +28,10 @@ set(ARA_SYNC_RESUMER_AWAITER_TEST_SRC
         "sync_resumer_awaiter_test.cpp")
 add_ara_test(ara-sync-resumer-awaiter-test ara-schedule "${ARA_SYNC_RESUMER_AWAITER_TEST_SRC}")
 
+set(ARA_CORO_RESUMER_AWAITER_TEST_SRC
+        "coro_resumer_awaiter_test.cpp")
+add_ara_test(ara-coro-resumer-awaiter-test ara-schedule "${ARA_CORO_RESUMER_AWAITER_TEST_SRC}")
+
 set(ARA_SCHEDULER_TEST_SRC
         "scheduler_test.cpp")
 add_ara_test(ara-scheduler-test ara-schedule "${ARA_SCHEDULER_TEST_SRC}")
