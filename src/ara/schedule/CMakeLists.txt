@@ -7,6 +7,7 @@ set(ARA_SCHEDULE_SRC
         "async_dual_pool_scheduler.cpp"
         "coro_awaiter.cpp"
         "naive_parallel_scheduler.cpp"
+        "parallel_coro_scheduler.cpp"
         "scheduler.cpp"
         "schedule_observer.cpp"
         "sequential_coro_scheduler.cpp"

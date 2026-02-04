@@ -1,5 +1,6 @@
 #include "async_dual_pool_scheduler.h"
 #include "naive_parallel_scheduler.h"
+#include "parallel_coro_scheduler.h"
 #include "schedule_context.h"
 #include "schedule_observer.h"
 #include "sequential_coro_scheduler.h"
@@ -33,6 +34,10 @@ struct SequentialCoroSchedulerHolder {
   SequentialCoroScheduler scheduler;
 };
 
+struct ParallelCoroSchedulerHolder {
+  ParallelCoroScheduler scheduler;
+};
+
 template <typename SchedulerType>
 class ScheduleTest : public testing::Test {
  protected:
@@ -50,7 +55,7 @@ class ScheduleTest : public testing::Test {
 
 using SchedulerTypes =
     ::testing::Types<AsyncDualPoolSchedulerHolder, NaiveParallelSchedulerHolder,
-                     SequentialCoroSchedulerHolder>;
+                     SequentialCoroSchedulerHolder, ParallelCoroSchedulerHolder>;
 TYPED_TEST_SUITE(ScheduleTest, SchedulerTypes);
 
 TYPED_TEST(ScheduleTest, EmptyTask) {
@@ -238,23 +243,21 @@ TYPED_TEST(ScheduleTest, BlockedTaskResumerErrorNotify) {
           }
         }
         if (!resumer_task_errored.load()) {
-          return Status::UnknownError(
-              "Blocked task resumed before resumer task errored");
+          return Status::UnknownError("Blocked task resumed before resumer task errored");
         }
         counter++;
         return TaskStatus::Finished();
       });
 
-  Task resumer_task(
-      "ResumerTask", "",
-      [&](const TaskContext&, TaskId) -> TaskResult {
-        if (num_resumers_set != num_tasks) {
-          return TaskStatus::Continue();
-        }
-        resumer_task_errored = true;
-        return Status::UnknownError("ResumerTaskError");
-      },
-      {TaskHint::Type::IO});
+  Task resumer_task("ResumerTask", "",
+                    [&](const TaskContext&, TaskId) -> TaskResult {
+                      if (num_resumers_set != num_tasks) {
+                        return TaskStatus::Continue();
+                      }
+                      resumer_task_errored = true;
+                      return Status::UnknownError("ResumerTaskError");
+                    },
+                    {TaskHint::Type::IO});
 
   auto blocked_task_future = std::async(std::launch::async, [&]() -> TaskResult {
     return this->ScheduleTask(schedule_ctx, std::move(blocked_task), num_tasks,
@@ -265,8 +268,7 @@ TYPED_TEST(ScheduleTest, BlockedTaskResumerErrorNotify) {
     return this->ScheduleTask(
         schedule_ctx, std::move(resumer_task), 1, std::nullopt,
         [&](const TaskContext&) -> Status {
-          auto deadline =
-              std::chrono::steady_clock::now() + std::chrono::seconds(10);
+          auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
           while (!resumer_task_errored.load()) {
             if (std::chrono::steady_clock::now() > deadline) {
               unblock_requested = true;
