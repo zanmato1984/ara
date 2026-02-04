@@ -14,6 +14,8 @@ macro(add_ara_library ARA_LIB_NAME ARA_LIB_SRC)
   add_library(${ARA_LIB_NAME} OBJECT ${ARA_LIB_SRC})
   target_include_directories(${ARA_LIB_NAME} PRIVATE "${CMAKE_SOURCE_DIR}/src")
   target_link_libraries(${ARA_LIB_NAME} PRIVATE ${ARA_DEPENDENCIES})
+  # Folly headers include glog headers which require these consumption defines.
+  target_compile_definitions(${ARA_LIB_NAME} PRIVATE GLOG_USE_GLOG_EXPORT)
 
   list(APPEND ARA_LIBRARIES $<TARGET_OBJECTS:${ARA_LIB_NAME}>)
   set(ARA_LIBRARIES ${ARA_LIBRARIES} PARENT_SCOPE)
@@ -22,6 +24,7 @@ macro(add_ara_library ARA_LIB_NAME ARA_LIB_SRC)
     add_library(${ARA_LIB_NAME}-dependency-check SHARED $<TARGET_OBJECTS:${ARA_LIB_NAME}>)
     target_include_directories(${ARA_LIB_NAME}-dependency-check PUBLIC "${CMAKE_SOURCE_DIR}/src")
     target_link_libraries(${ARA_LIB_NAME}-dependency-check PUBLIC ${ARA_DEPENDENCIES})
+    target_compile_definitions(${ARA_LIB_NAME}-dependency-check PRIVATE GLOG_USE_GLOG_EXPORT)
 
     add_dependencies(check-internal-dependencies ${ARA_LIB_NAME}-dependency-check)
   endif(ARA_CHECK_INTERNAL_DEPENDENCIES)
