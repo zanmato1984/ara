@@ -2,6 +2,7 @@
 #include "naive_parallel_scheduler.h"
 #include "schedule_context.h"
 #include "schedule_observer.h"
+#include "sequential_coro_scheduler.h"
 
 #include <ara/task/task.h>
 #include <ara/task/task_group.h>
@@ -28,6 +29,10 @@ struct NaiveParallelSchedulerHolder {
   NaiveParallelScheduler scheduler;
 };
 
+struct SequentialCoroSchedulerHolder {
+  SequentialCoroScheduler scheduler;
+};
+
 template <typename SchedulerType>
 class ScheduleTest : public testing::Test {
  protected:
@@ -44,7 +49,8 @@ class ScheduleTest : public testing::Test {
 };
 
 using SchedulerTypes =
-    ::testing::Types<AsyncDualPoolSchedulerHolder, NaiveParallelSchedulerHolder>;
+    ::testing::Types<AsyncDualPoolSchedulerHolder, NaiveParallelSchedulerHolder,
+                     SequentialCoroSchedulerHolder>;
 TYPED_TEST_SUITE(ScheduleTest, SchedulerTypes);
 
 TYPED_TEST(ScheduleTest, EmptyTask) {
@@ -77,7 +83,7 @@ TYPED_TEST(ScheduleTest, ContAfterTask) {
   std::atomic<size_t> counter = 0, cont_saw = 0;
   size_t num_tasks = 42;
   Task task("Task", "Do nothing", [&](const TaskContext&, TaskId) -> TaskResult {
-    std::this_thread::sleep_for(std::chrono::seconds(1));
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
     counter++;
     return TaskStatus::Finished();
   });

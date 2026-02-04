@@ -5,9 +5,11 @@ set(CMAKE_CXX_STANDARD 20)
 set(ARA_SCHEDULE_SRC
         "async_awaiter.cpp"
         "async_dual_pool_scheduler.cpp"
+        "coro_awaiter.cpp"
         "naive_parallel_scheduler.cpp"
         "scheduler.cpp"
         "schedule_observer.cpp"
+        "sequential_coro_scheduler.cpp"
         "sync_awaiter.cpp")
 add_ara_library(ara-schedule "${ARA_SCHEDULE_SRC}")
 
