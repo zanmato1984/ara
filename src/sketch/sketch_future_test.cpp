@@ -6,7 +6,20 @@
 #include <folly/futures/Future.h>
 #include <folly/io/async/EventBase.h>
 #include <gtest/gtest.h>
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <future>
+#include <iostream>
 #include <numeric>
+#include <stdexcept>
+#include <thread>
+#include <tuple>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <variant>
+#include <vector>
 
 TEST(FollyFutureTest, ContinuationOfCollection) {
   folly::CPUThreadPoolExecutor executor(4);
@@ -266,8 +279,8 @@ TEST(FollyFutureTest, RacyCallback) {
   for (size_t i = 0; i < rounds; ++i) {
     std::atomic_bool start = false;
     auto pair = folly::makePromiseContract<int>();
-    auto& promise = pair.first;
-    auto& future = pair.second;
+    auto& promise = pair.promise;
+    auto& future = pair.future;
     auto fulfill_task = std::async(std::launch::async, [&]() {
       while (!start) {
       }
@@ -292,8 +305,8 @@ TEST(FollyFutureTest, CallbackTiming) {
   bool finished = false;
   folly::CPUThreadPoolExecutor executor(4);
   auto pair = folly::makePromiseContract<folly::Unit>(&executor);
-  auto promise = std::move(pair.first);
-  auto future = std::move(pair.second);
+  auto promise = std::move(pair.promise);
+  auto future = std::move(pair.future);
   promise.setValue();
   future = std::move(future).then([&](auto&&) { finished = true; });
   ASSERT_FALSE(finished);

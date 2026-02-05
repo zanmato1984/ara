@@ -7,6 +7,7 @@
 
 #include <ara/schedule/async_dual_pool_scheduler.h>
 #include <ara/schedule/naive_parallel_scheduler.h>
+#include <ara/schedule/parallel_coro_scheduler.h>
 #include <ara/schedule/schedule_context.h>
 #include <ara/schedule/schedule_observer.h>
 #include <ara/schedule/sequential_coro_scheduler.h>
@@ -526,6 +527,10 @@ struct SequentialCoroSchedulerHolder {
   SequentialCoroScheduler scheduler;
 };
 
+struct ParallelCoroSchedulerHolder {
+  ParallelCoroScheduler scheduler;
+};
+
 template <typename SchedulerType>
 class PipelineTaskTest : public testing::Test {
  protected:
@@ -633,7 +638,7 @@ class PipelineTaskTest : public testing::Test {
 
 using SchedulerTypes =
     ::testing::Types<AsyncDualPoolSchedulerHolder, NaiveParallelSchedulerHolder,
-                     SequentialCoroSchedulerHolder>;
+                     SequentialCoroSchedulerHolder, ParallelCoroSchedulerHolder>;
 TYPED_TEST_SUITE(PipelineTaskTest, SchedulerTypes);
 
 void MakeEmptySourcePipeline(pipelang::ImperativeContext& ctx, size_t dop,

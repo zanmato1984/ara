@@ -3,11 +3,11 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <coroutine>
-#include <chrono>
 #include <deque>
-#include <atomic>
 #include <future>
 #include <mutex>
 #include <thread>
@@ -126,50 +126,50 @@ TEST(CoroResumerTest, Basic) {
 
 TEST(CoroResumerTest, Interleaving) {
   auto resumer = std::make_shared<CoroResumer>();
-  bool cb1_called = false, cb2_called = false, cb3_called = false;
+  std::atomic_bool cb1_called = false, cb2_called = false, cb3_called = false;
   resumer->AddCallback([&]() { cb1_called = true; });
-  resumer->AddCallback([&]() { cb2_called = cb1_called; });
+  resumer->AddCallback([&]() { cb2_called = cb1_called.load(); });
 
   ASSERT_FALSE(resumer->IsResumed());
-  ASSERT_FALSE(cb1_called);
-  ASSERT_FALSE(cb2_called);
+  ASSERT_FALSE(cb1_called.load());
+  ASSERT_FALSE(cb2_called.load());
 
   auto resume_future = std::async(std::launch::async, [&]() {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     resumer->Resume();
     resumer->AddCallback([&]() { cb3_called = true; });
-    ASSERT_TRUE(cb3_called);
+    ASSERT_TRUE(cb3_called.load());
   });
 
-  while (!resumer->IsResumed()) {
+  while (!resumer->IsResumed() || !cb1_called.load() || !cb2_called.load()) {
   }
-  ASSERT_TRUE(cb1_called);
-  ASSERT_TRUE(cb2_called);
+  ASSERT_TRUE(cb1_called.load());
+  ASSERT_TRUE(cb2_called.load());
   resume_future.get();
 }
 
 TEST(CoroResumerTest, Interleaving2) {
   auto resumer = std::make_shared<CoroResumer>();
-  bool cb1_called = false, cb2_called = false, cb3_called = false;
+  std::atomic_bool cb1_called = false, cb2_called = false, cb3_called = false;
   resumer->AddCallback([&]() { cb1_called = true; });
-  resumer->AddCallback([&]() { cb2_called = cb1_called; });
+  resumer->AddCallback([&]() { cb2_called = cb1_called.load(); });
 
   ASSERT_FALSE(resumer->IsResumed());
-  ASSERT_FALSE(cb1_called);
-  ASSERT_FALSE(cb2_called);
+  ASSERT_FALSE(cb1_called.load());
+  ASSERT_FALSE(cb2_called.load());
 
   auto resume_future = std::async(std::launch::async, [&]() {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     resumer->Resume();
   });
 
-  while (!resumer->IsResumed() || !cb1_called || !cb2_called) {
+  while (!resumer->IsResumed() || !cb1_called.load() || !cb2_called.load()) {
   }
-  ASSERT_TRUE(cb1_called);
-  ASSERT_TRUE(cb2_called);
+  ASSERT_TRUE(cb1_called.load());
+  ASSERT_TRUE(cb2_called.load());
 
   resumer->AddCallback([&]() { cb3_called = true; });
-  ASSERT_TRUE(cb3_called);
+  ASSERT_TRUE(cb3_called.load());
 
   resume_future.get();
 }
