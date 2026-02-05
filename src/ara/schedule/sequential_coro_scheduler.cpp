@@ -1,4 +1,5 @@
 #include "sequential_coro_scheduler.h"
+#include "coro_ready_queue.h"
 #include "coro_awaiter.h"
 #include "coro_resumer.h"
 #include "schedule_context.h"
@@ -9,12 +10,9 @@
 #include <ara/task/task_status.h>
 #include <ara/util/defines.h>
 
-#include <condition_variable>
 #include <coroutine>
-#include <deque>
 #include <exception>
 #include <future>
-#include <mutex>
 #include <vector>
 
 namespace ara::schedule {
@@ -32,43 +30,6 @@ using task::TaskResult;
 using task::TaskStatus;
 
 namespace {
-
-class ReadyQueue {
- public:
-  void Enqueue(std::coroutine_handle<> h) {
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      ready_.push_back(h);
-    }
-    cv_.notify_one();
-  }
-
-  std::coroutine_handle<> DequeueOrWait(size_t finished, size_t total) {
-    std::unique_lock<std::mutex> lock(mutex_);
-    cv_.wait(lock, [&]() { return !ready_.empty() || finished >= total; });
-    if (ready_.empty()) {
-      return {};
-    }
-    auto h = ready_.front();
-    ready_.pop_front();
-    return h;
-  }
-
-  struct YieldAwaiter {
-    ReadyQueue* queue;
-
-    bool await_ready() const noexcept { return false; }
-    void await_suspend(std::coroutine_handle<> h) noexcept { queue->Enqueue(h); }
-    void await_resume() const noexcept {}
-  };
-
-  YieldAwaiter Yield() { return YieldAwaiter{this}; }
-
- private:
-  std::mutex mutex_;
-  std::condition_variable cv_;
-  std::deque<std::coroutine_handle<>> ready_;
-};
 
 struct TaskCoro {
   struct promise_type {
@@ -130,9 +91,10 @@ class SequentialCoroHandle : public TaskGroupHandle {
 
 const std::string SequentialCoroHandle::kName = "SequentialCoroHandle";
 
-static TaskCoro MakeTaskCoro(ReadyQueue& queue, const ScheduleContext& schedule_ctx,
-                             const Task& task, const TaskContext& task_ctx,
-                             TaskId task_id, TaskResult& result) {
+static TaskCoro MakeTaskCoro(detail::CoroReadyQueue& queue,
+                             const ScheduleContext& schedule_ctx, const Task& task,
+                             const TaskContext& task_ctx, TaskId task_id,
+                             TaskResult& result) {
   auto schedule = [&queue](std::coroutine_handle<> h) { queue.Enqueue(h); };
 
   while (result.ok() && !result->IsFinished() && !result->IsCancelled()) {
@@ -201,7 +163,7 @@ Result<std::unique_ptr<TaskGroupHandle>> SequentialCoroScheduler::DoSchedule(
       const auto& task = task_group.GetTask();
       const auto& cont = task_group.GetContinuation();
 
-      ReadyQueue queue;
+      detail::CoroReadyQueue queue(num_tasks);
 
       std::vector<TaskResult> results(num_tasks, TaskStatus::Continue());
       std::vector<TaskCoro> coros;
@@ -213,7 +175,7 @@ Result<std::unique_ptr<TaskGroupHandle>> SequentialCoroScheduler::DoSchedule(
 
       size_t finished = 0;
       while (finished < num_tasks) {
-        auto h = queue.DequeueOrWait(finished, num_tasks);
+        auto h = queue.DequeueOrWait([&]() { return finished >= num_tasks; });
         if (!h) {
           continue;
         }

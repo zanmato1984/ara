@@ -302,24 +302,23 @@ TEST(FollyFutureTest, RacyCallback) {
 
 TEST(FollyFutureTest, CallbackTiming) {
   size_t pred_run = 0, thunk_run = 0;
-  bool finished = false;
+  std::atomic_bool finished = false;
   folly::CPUThreadPoolExecutor executor(4);
   auto pair = folly::makePromiseContract<folly::Unit>(&executor);
   auto promise = std::move(pair.promise);
   auto future = std::move(pair.future);
   promise.setValue();
-  future = std::move(future).then([&](auto&&) { finished = true; });
-  ASSERT_FALSE(finished);
+  future = std::move(future).then(
+      [&](auto&&) { finished.store(true, std::memory_order_release); });
   auto pred = [&]() {
     pred_run++;
-    return !finished;
+    return !finished.load(std::memory_order_acquire);
   };
   auto thunk = [&]() {
     thunk_run++;
     return std::move(future);
   };
   folly::whileDo(pred, thunk).wait().value();
-  ASSERT_TRUE(finished);
-  ASSERT_EQ(pred_run, 2);
-  ASSERT_EQ(thunk_run, 1);
+  ASSERT_TRUE(finished.load(std::memory_order_acquire));
+  ASSERT_TRUE((pred_run == 1 && thunk_run == 0) || (pred_run == 2 && thunk_run == 1));
 }

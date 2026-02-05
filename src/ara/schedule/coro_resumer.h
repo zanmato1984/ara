@@ -2,9 +2,8 @@
 
 #include <ara/task/resumer.h>
 
+#include <atomic>
 #include <functional>
-#include <mutex>
-#include <vector>
 
 namespace ara::schedule {
 
@@ -12,45 +11,84 @@ class CoroResumer : public task::Resumer {
  public:
   using Callback = std::function<void()>;
 
-  void Resume() override {
-    std::vector<Callback> callbacks;
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      if (resumed_) {
-        return;
-      }
-      resumed_ = true;
-      callbacks = std::move(callbacks_);
+  ~CoroResumer() override {
+    auto* head = callbacks_.load(std::memory_order_acquire);
+    if (head == kResumedSentinel()) {
+      return;
     }
-    for (const auto& cb : callbacks) {
-      cb();
+    while (head != nullptr) {
+      auto* next = head->next;
+      delete head;
+      head = next;
+    }
+  }
+
+  void Resume() override {
+    auto* head =
+        callbacks_.exchange(kResumedSentinel(), std::memory_order_acq_rel);
+    if (head == kResumedSentinel()) {
+      return;
+    }
+
+    // Call callbacks in the order they were registered.
+    CallbackNode* reversed = nullptr;
+    while (head != nullptr) {
+      auto* next = head->next;
+      head->next = reversed;
+      reversed = head;
+      head = next;
+    }
+    head = reversed;
+
+    while (head != nullptr) {
+      auto* next = head->next;
+      auto cb = std::move(head->cb);
+      delete head;
+      head = next;
+      if (cb) {
+        cb();
+      }
     }
   }
 
   bool IsResumed() override {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return resumed_;
+    return callbacks_.load(std::memory_order_acquire) == kResumedSentinel();
   }
 
   void AddCallback(Callback cb) {
-    bool call_now = false;
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      call_now = resumed_;
-      if (!call_now) {
-        callbacks_.push_back(std::move(cb));
+    auto* head = callbacks_.load(std::memory_order_acquire);
+    if (head == kResumedSentinel()) {
+      cb();
+      return;
+    }
+
+    auto* node = new CallbackNode{std::move(cb), nullptr};
+    while (head != kResumedSentinel()) {
+      node->next = head;
+      if (callbacks_.compare_exchange_weak(head, node, std::memory_order_release,
+                                          std::memory_order_acquire)) {
+        return;
       }
     }
+
+    auto call_now = std::move(node->cb);
+    delete node;
     if (call_now) {
-      cb();
+      call_now();
     }
   }
 
  private:
-  std::mutex mutex_;
-  bool resumed_ = false;
-  std::vector<Callback> callbacks_;
+  struct CallbackNode {
+    Callback cb;
+    CallbackNode* next;
+  };
+
+  static CallbackNode* kResumedSentinel() {
+    return reinterpret_cast<CallbackNode*>(1);
+  }
+
+  std::atomic<CallbackNode*> callbacks_{nullptr};
 };
 
 }  // namespace ara::schedule
-

@@ -5,38 +5,52 @@
 
 namespace ara::schedule {
 
+CoroAwaiter::~CoroAwaiter() {
+  auto* rec = record_.load(std::memory_order_acquire);
+  if (rec == nullptr || rec == kScheduledSentinel()) {
+    return;
+  }
+  delete rec;
+}
+
 bool CoroAwaiter::IsReady() const noexcept {
-  std::lock_guard<std::mutex> lock(mutex_);
-  return readies_ >= num_readies_;
+  return readies_.load(std::memory_order_acquire) >= num_readies_;
 }
 
 bool CoroAwaiter::Suspend(ScheduleFn schedule, std::coroutine_handle<> continuation) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (readies_ >= num_readies_) {
+  if (IsReady()) {
     return false;
   }
-  continuation_ = continuation;
-  schedule_ = std::move(schedule);
+
+  auto* rec = new ContinuationRecord{continuation, std::move(schedule)};
+
+  ContinuationRecord* expected = nullptr;
+  while (!record_.compare_exchange_weak(expected, rec, std::memory_order_release,
+                                       std::memory_order_acquire)) {
+    if (expected == kScheduledSentinel()) {
+      delete rec;
+      return false;
+    }
+    ARA_CHECK(expected == nullptr);
+  }
   return true;
 }
 
 void CoroAwaiter::NotifyReady() {
-  std::coroutine_handle<> continuation;
-  ScheduleFn schedule;
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (readies_ >= num_readies_) {
-      return;
-    }
-    ++readies_;
-    if (readies_ < num_readies_ || !continuation_) {
-      return;
-    }
-    continuation = continuation_;
-    continuation_ = {};
-    schedule = std::move(schedule_);
-    schedule_ = {};
+  const auto new_readies = readies_.fetch_add(1, std::memory_order_acq_rel) + 1;
+  if (new_readies < num_readies_) {
+    return;
   }
+
+  auto* rec = record_.exchange(kScheduledSentinel(), std::memory_order_acq_rel);
+  if (rec == nullptr || rec == kScheduledSentinel()) {
+    return;
+  }
+
+  auto continuation = rec->continuation;
+  auto schedule = std::move(rec->schedule);
+  delete rec;
+
   if (continuation && schedule) {
     schedule(continuation);
   }
@@ -67,4 +81,3 @@ std::shared_ptr<CoroAwaiter> CoroAwaiter::MakeAll(task::Resumers resumers) {
 }
 
 }  // namespace ara::schedule
-

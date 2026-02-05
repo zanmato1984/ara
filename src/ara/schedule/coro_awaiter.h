@@ -3,10 +3,10 @@
 #include <ara/task/awaiter.h>
 #include <ara/task/resumer.h>
 
+#include <atomic>
 #include <coroutine>
 #include <functional>
 #include <memory>
-#include <mutex>
 
 namespace ara::schedule {
 
@@ -16,6 +16,7 @@ class CoroAwaiter : public task::Awaiter,
   using ScheduleFn = std::function<void(std::coroutine_handle<>)>;
 
   explicit CoroAwaiter(size_t num_readies) : num_readies_(num_readies) {}
+  ~CoroAwaiter() override;
 
   struct Awaitable {
     std::shared_ptr<CoroAwaiter> awaiter;
@@ -41,14 +42,21 @@ class CoroAwaiter : public task::Awaiter,
   void NotifyReady();
 
  private:
+  struct ContinuationRecord {
+    std::coroutine_handle<> continuation;
+    ScheduleFn schedule;
+  };
+
+  static ContinuationRecord* kScheduledSentinel() {
+    return reinterpret_cast<ContinuationRecord*>(1);
+  }
+
   bool IsReady() const noexcept;
   bool Suspend(ScheduleFn schedule, std::coroutine_handle<> continuation);
 
-  size_t num_readies_;
-  mutable std::mutex mutex_;
-  size_t readies_ = 0;
-  std::coroutine_handle<> continuation_{};
-  ScheduleFn schedule_;
+  const size_t num_readies_;
+  std::atomic<size_t> readies_{0};
+  std::atomic<ContinuationRecord*> record_{nullptr};
 };
 
 }  // namespace ara::schedule

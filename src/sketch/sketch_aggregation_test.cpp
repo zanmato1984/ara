@@ -133,6 +133,7 @@ class ScalarAggregateSink : public SinkOp {
  public:
   Status Init(QueryContext* ctx, size_t dop, const AggregateNodeOptions& options,
               const std::shared_ptr<Schema>& input_schema) {
+    ARA_RETURN_NOT_OK(arrow::compute::Initialize());
     ctx_ = ctx;
     dop_ = dop;
     auto exec_ctx = ctx_->exec_context();
@@ -347,6 +348,7 @@ class HashAggregateSink : public SinkOp {
  public:
   Status Init(QueryContext* ctx, size_t dop, const AggregateNodeOptions& options,
               const std::shared_ptr<Schema>& input_schema) {
+    ARA_RETURN_NOT_OK(arrow::compute::Initialize());
     ctx_ = ctx;
     dop_ = dop;
     auto exec_ctx = ctx_->exec_context();

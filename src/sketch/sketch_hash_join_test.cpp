@@ -1,4 +1,5 @@
 #include <arrow/acero/query_context.h>
+#include <arrow/compute/api.h>
 #include <arrow/compute/exec.h>
 #include <gtest/gtest.h>
 
@@ -347,6 +348,7 @@ class TestHashJoin : public testing::Test {
   }
 
   void Init(HashJoinCase join_case) {
+    ASSERT_OK(arrow::compute::Initialize());
     join_case_ = std::move(join_case);
     ASSERT_OK(query_ctx_->Init(nullptr));
   }

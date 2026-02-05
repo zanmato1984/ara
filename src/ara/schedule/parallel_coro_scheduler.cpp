@@ -1,4 +1,5 @@
 #include "parallel_coro_scheduler.h"
+#include "coro_ready_queue.h"
 #include "coro_awaiter.h"
 #include "coro_resumer.h"
 #include "schedule_context.h"
@@ -11,13 +12,10 @@
 
 #include <algorithm>
 #include <atomic>
-#include <condition_variable>
 #include <coroutine>
-#include <deque>
 #include <exception>
 #include <functional>
 #include <future>
-#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -36,45 +34,6 @@ using task::TaskResult;
 using task::TaskStatus;
 
 namespace {
-
-class ReadyQueue {
- public:
-  void Enqueue(std::coroutine_handle<> h) {
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      ready_.push_back(h);
-    }
-    cv_.notify_one();
-  }
-
-  std::coroutine_handle<> DequeueOrWait(std::atomic<size_t>& finished, size_t total) {
-    std::unique_lock<std::mutex> lock(mutex_);
-    cv_.wait(lock, [&]() { return !ready_.empty() || finished.load() >= total; });
-    if (ready_.empty()) {
-      return {};
-    }
-    auto h = ready_.front();
-    ready_.pop_front();
-    return h;
-  }
-
-  void NotifyAll() { cv_.notify_all(); }
-
-  struct YieldAwaiter {
-    ReadyQueue* queue;
-
-    bool await_ready() const noexcept { return false; }
-    void await_suspend(std::coroutine_handle<> h) noexcept { queue->Enqueue(h); }
-    void await_resume() const noexcept {}
-  };
-
-  YieldAwaiter Yield() { return YieldAwaiter{this}; }
-
- private:
-  std::mutex mutex_;
-  std::condition_variable cv_;
-  std::deque<std::coroutine_handle<>> ready_;
-};
 
 struct TaskCoro {
   struct promise_type {
@@ -144,9 +103,10 @@ class ParallelCoroHandle : public TaskGroupHandle {
 
 const std::string ParallelCoroHandle::kName = "ParallelCoroHandle";
 
-static TaskCoro MakeTaskCoro(ReadyQueue& queue, const ScheduleContext& schedule_ctx,
-                             const Task& task, const TaskContext& task_ctx,
-                             TaskId task_id, TaskResult& result) {
+static TaskCoro MakeTaskCoro(detail::CoroReadyQueue& queue,
+                             const ScheduleContext& schedule_ctx, const Task& task,
+                             const TaskContext& task_ctx, TaskId task_id,
+                             TaskResult& result) {
   auto schedule = [&queue](std::coroutine_handle<> h) { queue.Enqueue(h); };
 
   while (result.ok() && !result->IsFinished() && !result->IsCancelled()) {
@@ -230,7 +190,7 @@ Result<std::unique_ptr<TaskGroupHandle>> ParallelCoroScheduler::DoSchedule(
         return TaskStatus::Finished();
       }
 
-      ReadyQueue queue;
+      detail::CoroReadyQueue queue(num_tasks);
 
       std::vector<TaskCoro> coros;
       coros.reserve(num_tasks);
@@ -242,7 +202,8 @@ Result<std::unique_ptr<TaskGroupHandle>> ParallelCoroScheduler::DoSchedule(
       std::atomic<size_t> finished = 0;
       auto worker = [&]() {
         while (true) {
-          auto h = queue.DequeueOrWait(finished, num_tasks);
+          auto h = queue.DequeueOrWait(
+              [&]() { return finished.load(std::memory_order_acquire) >= num_tasks; });
           if (!h) {
             break;
           }
@@ -252,7 +213,7 @@ Result<std::unique_ptr<TaskGroupHandle>> ParallelCoroScheduler::DoSchedule(
           if (h.done()) {
             auto new_finished = finished.fetch_add(1) + 1;
             if (new_finished >= num_tasks) {
-              queue.NotifyAll();
+              queue.WakeAll();
             }
           }
         }
