@@ -27,6 +27,7 @@
     {
       "name": "dev-debug",
       "inherits": "dev",
+      "binaryDir": "${sourceDir}/build/dev-debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug"
       }
@@ -34,6 +35,7 @@
     {
       "name": "dev-release",
       "inherits": "dev",
+      "binaryDir": "${sourceDir}/build/dev-release",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release"
       }
@@ -41,6 +43,7 @@
     {
       "name": "build-debug",
       "inherits": "build",
+      "binaryDir": "${sourceDir}/build/build-debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug"
       }
@@ -48,6 +51,7 @@
     {
       "name": "build-release",
       "inherits": "build",
+      "binaryDir": "${sourceDir}/build/build-release",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release"
       }
