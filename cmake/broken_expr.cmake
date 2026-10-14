@@ -5,7 +5,7 @@ if(NOT ARA_BROKEN_EXPR_SOURCE_DIR)
   include(FetchContent)
   FetchContent_Declare(broken_expr_source
     GIT_REPOSITORY https://github.com/zanmato1984/broken-expr-rs.git
-    GIT_TAG 3158dbc353491379f4cdbec3b81d70d7594f0636)
+    GIT_TAG fcfb45241b22c831b5c49c7e0f0769bd484c6890)
   FetchContent_MakeAvailable(broken_expr_source)
   set(ARA_BROKEN_EXPR_SOURCE_DIR "${broken_expr_source_SOURCE_DIR}")
 endif()
