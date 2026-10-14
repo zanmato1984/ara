@@ -16,7 +16,6 @@ struct HashJoin {
   arrow::acero::QueryContext* ctx;
   int64_t hardware_flags;
   arrow::MemoryPool* pool;
-  size_t expression_scratch_limit;
 
   arrow::acero::JoinType join_type;
   std::vector<arrow::acero::JoinKeyCmp> key_cmp;

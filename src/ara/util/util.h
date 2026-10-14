@@ -13,7 +13,6 @@ std::string TaskResultToString(const task::TaskResult&);
 std::string OpResultToString(const pipeline::OpResult&);
 
 Result<Batch> KeyPayloadFromInput(const arrow::acero::HashJoinProjectionMaps*,
-                                  arrow::MemoryPool*, Batch*,
-                                  size_t scratch_limit = 64 * 1024 * 1024);
+                                  arrow::MemoryPool*, Batch*);
 
 }  // namespace ara::util

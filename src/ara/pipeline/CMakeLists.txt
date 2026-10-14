@@ -49,11 +49,3 @@ add_ara_test(ara-hash-aggregate-test ara-pipeline "${ARA_HASH_AGGREGATE_TEST_SRC
 set(ARA_SINGLE_BATCH_PARALLEL_SOURCE_TEST_SRC
         "op/single_batch_parallel_source_test.cpp")
 add_ara_test(ara-single-batch-parallel-source-test ara-pipeline "${ARA_SINGLE_BATCH_PARALLEL_SOURCE_TEST_SRC}")
-
-if(ARA_BUILD_TESTS)
-  add_executable(ara-expr-projection-test op/expr_projection_test.cpp)
-  target_link_libraries(ara-expr-projection-test PRIVATE ara GTest::GTest GTest::Main)
-  target_compile_definitions(ara-expr-projection-test PRIVATE GLOG_USE_GLOG_EXPORT)
-  set_target_properties(ara-expr-projection-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/gtests")
-  add_test(NAME ara-expr-projection-test COMMAND ara-expr-projection-test)
-endif()
